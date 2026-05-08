@@ -1,0 +1,10 @@
+{
+  "_header": {
+    "File": "update_runtime.json",
+    "Function": "bootstrap 更新実行時のランタイム制御"
+  },
+  "BOOTSTRAP_APPLY_TIMEOUT_SEC": 120,
+  "PATCH_RETRY_IN_RUN_MAX": 3,
+  "PATCH_RETRY_WAIT_SEC_1": 2,
+  "PATCH_RETRY_WAIT_SEC_2": 5
+}

@@ -1,0 +1,361 @@
+{
+  "_header": {
+    "File": "ui_csv_mg.json",
+    "Function": "CSV結合",
+    "Created": "2026-03-04",
+    "Updated": "2026-04-05",
+    "Setting_details": {
+      "WINDOW": {
+        "説明": "ウィンドウ共通。全画面で参照される既定。",
+        "RESIZABLE": "リサイズ可否。true/false",
+        "SHOW_MINIMIZE": "最小化ボタン表示。true/false",
+        "SHOW_MAXIMIZE": "最大化ボタン表示。true/false",
+        "STARTUP_POSITION": "起動時の位置。center / center_on_excel / remember_last",
+        "CENTER_ON_EXCEL": "Excelウィンドウを基準に中央配置。true/false",
+        "SHOW_IN_TASKBAR": "タスクバーに表示するか。true/false",
+        "STORAGE_KEY": "ジオメトリ保存用キー。空文字で画面キー使用",
+        "DEFAULT_WIDTH": "初期幅（ピクセル）。0 でオート",
+        "DEFAULT_HEIGHT": "初期高さ（ピクセル）。0 でオート",
+        "TOPMOST": "ウィンドウを最前面ヒントで出す。true/false（他アプリの上にも重なる。Excel前面との兼ね合いで csv_mg 本体・進捗・完了に使用）"
+      },
+      "COMMON": {
+        "説明": "共通設定。",
+        "WINDOW": "上記 WINDOW と同じ構造。",
+        "EXCEL": {
+          "LOCK_WHEN_OPEN": "ダイアログ表示中にExcel操作をロックするか。true/false"
+        },
+        "ICON（全画面共通ルール）": "アイコン表示は全画面で同一ルール。未設定・空＝アイコン表示なし。設定値あり＝その標準アイコンを表示。画面単位でオン/オフを分けず、このルールを標準とする。",
+        "ICON_設定可能値": "Information, Info（情報）, Warning, Warn（警告）, Critical（エラー）, Question（質問）のいずれか。大文字小文字は区別しない。空・未設定でアイコン非表示。"
+      },
+      "MAIN": {
+        "説明": "結合画面（メイン）の設定。",
+        "WINDOW": "上記 WINDOW と同じ構造。",
+        "TITLE": "ウィンドウタイトル。文字列",
+        "DESC": "説明文。文字列（\\n は改行。ラベルとラジオの間隔には効かない）",
+        "DESC_VISIBLE": "説明文を表示するか。true/false",
+        "SPACING_AFTER_DESC": "説明文とラジオボタンの間隔（ピクセル）。0 でなし。\\n では調整できないためここで指定",
+        "RIBBON": {
+          "説明": "リボン（操作ボタン群）の設定。",
+          "ORIENTATION": "並び方向。horizontal / vertical",
+          "SHOW_LABEL": "ボタンラベルを表示するか。true/false",
+          "GROUPS": "グループの配列。各要素は key, title, buttons[]。buttons の要素は id, label, tooltip"
+        },
+        "DIALOG_BUTTONS": {
+          "説明": "結合開始・キャンセルボタン。",
+          "OK": "ボタンラベル（結合開始）",
+          "CANCEL": "ボタンラベル（キャンセル）",
+          "OK_TOOLTIP": "OK のツールチップ",
+          "CANCEL_TOOLTIP": "キャンセルのツールチップ",
+          "SHOW_LABEL": "ラベルを表示するか。true/false"
+        },
+        "MESSAGES": {
+          "NO_FILES": "ファイル未選択時のメッセージ"
+        },
+        "DIALOGS": {
+          "ADD": {
+            "TITLE": "ファイル選択ダイアログのタイトル",
+            "FILTER": "ファイル種別フィルタ。例: CSV files (*.csv);;All files (*.*)"
+          },
+          "FOLDER": {
+            "TITLE": "フォルダ選択ダイアログのタイトル（getExistingDirectory）"
+          }
+        },
+        "RADIO": {
+          "説明": "ヘッダ取り扱いオプションのラジオボタン。",
+          "ENABLED": "ラジオを表示するか。true/false",
+          "DEFAULT_INDEX": "初期選択インデックス。0 始まり",
+          "DEFAULT": "初期値。mode_append / mode_replace / mode_preview",
+          "TITLE": "ラジオグループのタイトル",
+          "TOOLTIP": "ラジオのツールチップ",
+          "ITEMS": "配列。各要素は id, label, tooltip"
+        },
+        "TABLE": {
+          "説明": "ファイル一覧テーブル。",
+          "ALTERNATE_ROW_COLORS": "行の交互色。true/false",
+          "ROW_HEIGHT": "行の高さ（ピクセル）。0 でデフォルト",
+          "VISIBLE_ROWS": "テーブルに表示する行数（見える行数）。0 で制限なし",
+          "TOOLTIP": "テーブルのツールチップ",
+          "COLUMNS": "配列。各要素は key, title, width"
+        },
+        "FOCUS": {
+          "DEFAULT_BUTTON": "初期フォーカスボタン。例: ok",
+          "TAB_ORDER": "タブ順のウィジェットIDの配列"
+        },
+        "SCREENS": {
+          "説明": "サブ画面（進捗・完了・重複確認）の設定。",
+          "PROGRESS": {
+            "説明": "進捗画面。",
+            "TITLE": "ウィンドウタイトル",
+            "TOOLTIP": "ツールチップ",
+            "WINDOW": "上記 WINDOW と同じ構造"
+          },
+          "DONE": {
+            "説明": "完了通知画面。",
+            "TITLE": "ウィンドウタイトル",
+            "TOOLTIP": "ツールチップ",
+            "WINDOW": "上記 WINDOW と同じ構造",
+            "LIST_DOCUMENT_MARGIN": "完了一覧（QPlainTextEdit）のドキュメント余白（ピクセル）。0 で詰め。",
+            "LIST_FONT_POINT_SIZE": "完了一覧のフォントサイズ（ポイント）。0 または未指定でシステム等幅フォント既定。",
+            "LIST_MONOSPACE": "true のとき完了一覧にシステムの等幅フォントを適用し、番号・ファイル名・行数列を揃える。false でプロポーショナル。",
+            "LIST_NAME_COL_CHARS": "ファイル名列の最大文字数（表示幅の目安）。長い場合は末尾を … で省略。既定 28、8〜80。",
+            "ICON": "上記 ICON 共通ルール・ICON_設定可能値に従う。例: Information / Info で情報アイコン。未設定・空で非表示。",
+            "ICON_SIZE": "アイコン大きさ。S(小・16px) / M(中・24px) / L(大・32px)。数値(12〜48)も可。未設定時は M。",
+            "MSG_HEADER": "完了メッセージの見出し",
+            "MSG_COUNT_PREFIX": "結合ファイル数表示の接頭辞",
+            "MSG_ROWS_PREFIX": "追加行数表示の接頭辞",
+            "MSG_TOTAL_ROWS_PREFIX": "結合ファイル数右側の総追加行数ラベル。未設定時は MSG_ROWS_PREFIX または「総追加行数：」",
+            "LIST_WIDTH": "結合ファイルリストの幅（ピクセル）。0 で未指定",
+            "LIST_MIN_HEIGHT": "完了一覧の最低高さ（ピクセル）。0 または未指定で無効。1件のみのときの過小化を抑える。",
+            "LIST_MAX_HEIGHT": "完了一覧の最大高さ（ピクセル）。0 または未指定で DEFAULT_HEIGHT に応じた既定。LIST_MIN_HEIGHT 適用後に上限として再適用される。",
+            "BTN_OK": "OK ボタンラベル",
+            "BTN_OK_TOOLTIP": "OK のツールチップ"
+          },
+          "DUPLICATE": {
+            "説明": "重複確認画面。",
+            "TITLE": "ウィンドウタイトル",
+            "TOOLTIP": "ツールチップ",
+            "ICON": "上記 ICON 共通ルール・ICON_設定可能値。例: Warning / Warn で警告アイコン。",
+            "ICON_SIZE": "アイコン大きさ。S / M / L または数値。",
+            "MSG": "説明文。改行は \\n",
+            "COLUMNS": "テーブル列名の配列。例: [\"ファイル名\", \"フォルダパス\"]",
+            "BTN_OK": "追加ボタンラベル",
+            "BTN_CANCEL": "キャンセルボタンラベル",
+            "BTN_OK_TOOLTIP": "追加ボタンのツールチップ",
+            "BTN_CANCEL_TOOLTIP": "キャンセルボタンのツールチップ",
+            "WINDOW": "上記 WINDOW と同じ構造"
+          }
+        }
+      }
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "WINDOW": {
+    "RESIZABLE": true,
+    "SHOW_MINIMIZE": false,
+    "SHOW_MAXIMIZE": false,
+    "STARTUP_POSITION": "center",
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "STORAGE_KEY": "",
+    "DEFAULT_WIDTH": 500,
+    "DEFAULT_HEIGHT": 500,
+    "TOPMOST": false
+  },
+  "COMMON": {
+    "WINDOW": {
+      "RESIZABLE": true,
+      "SHOW_MINIMIZE": false,
+      "SHOW_MAXIMIZE": false,
+      "STARTUP_POSITION": "center",
+      "CENTER_ON_EXCEL": false,
+      "SHOW_IN_TASKBAR": false,
+      "DEFAULT_WIDTH": 500,
+      "DEFAULT_HEIGHT": 500,
+      "TOPMOST": false
+    },
+    "EXCEL": {
+      "LOCK_WHEN_OPEN": true
+    }
+  },
+  "MAIN": {
+    "WINDOW": {
+      "RESIZABLE": true,
+      "SHOW_MINIMIZE": false,
+      "SHOW_MAXIMIZE": false,
+      "DEFAULT_WIDTH": 550,
+      "DEFAULT_HEIGHT": 500,
+      "SHOW_IN_TASKBAR": false,
+      "TOPMOST": true
+    },
+    "TITLE": "CSV結合ファイル選択",
+    "DESC": "結合するCSVファイルを選択し結合後、Excelシートへ出力します。",
+    "DESC_VISIBLE": true,
+    "SPACING_AFTER_DESC": 12,
+    "RIBBON": {
+      "ORIENTATION": "horizontal",
+      "SHOW_LABEL": true,
+      "GROUPS": [
+        {
+          "key": "ops",
+          "title": "操作",
+          "buttons": [
+            {
+              "id": "add",
+              "label": "ファイル選択",
+              "tooltip": "追加するCSVファイルを1件以上選択します。"
+            },
+            {
+              "id": "add_folder",
+              "label": "フォルダ選択",
+              "tooltip": "フォルダ内のCSVファイルを一括で追加します。"
+            },
+            {
+              "id": "up",
+              "label": "▲",
+              "tooltip": "選択した行を上へ移動します。"
+            },
+            {
+              "id": "down",
+              "label": "▼",
+              "tooltip": "選択した行を下へ移動します。"
+            },
+            {
+              "id": "remove",
+              "label": "削除",
+              "tooltip": "選択した行を一覧から削除します。"
+            },
+            {
+              "id": "clear",
+              "label": "オールクリア",
+              "tooltip": "一覧をすべてクリアします。"
+            }
+          ]
+        }
+      ]
+    },
+    "DIALOG_BUTTONS": {
+      "OK": "結合開始",
+      "CANCEL": "キャンセル",
+      "OK_TOOLTIP": "一覧の順序でCSVを結合し、Excelシートへ出力します。",
+      "CANCEL_TOOLTIP": "結合せずにダイアログを閉じます。",
+      "SHOW_LABEL": true
+    },
+    "MESSAGES": {
+      "NO_FILES": "結合するファイルが選択されていません。"
+    },
+    "DIALOGS": {
+      "ADD": {
+        "TITLE": "CSVファイルを選択(複数ファイル選択可能)",
+        "FILTER": "CSV files (*.csv);;All files (*.*)"
+      },
+      "FOLDER": {
+        "TITLE": "フォルダを選択（配下の CSV を一覧に追加）"
+      }
+    },
+    "RADIO": {
+      "ENABLED": true,
+      "DEFAULT_INDEX": 0,
+      "DEFAULT": "mode_append",
+      "TITLE": "ファイル結合時の項目名(ヘッダ)取り扱いオプション",
+      "TOOLTIP": "結合後の1行目（ヘッダ）の扱いを選択します。",
+      "ITEMS": [
+        {
+          "id": "mode_append",
+          "label": "最初のファイルヘッダを追加",
+          "tooltip": "先頭ファイルの1行目のみをヘッダとして1回だけ出力し、他ファイルの1行目はデータとして結合します。"
+        },
+        {
+          "id": "mode_replace",
+          "label": "各ファイルのヘッダ付きで結合",
+          "tooltip": "各CSVの1行目をヘッダとしてその都度出力し、続くデータを結合します。"
+        },
+        {
+          "id": "mode_preview",
+          "label": "全てヘッダなしで結合",
+          "tooltip": "全ファイルの行をヘッダ扱いせず、そのまま連結して出力します。"
+        }
+      ]
+    },
+    "TABLE": {
+      "ALTERNATE_ROW_COLORS": true,
+      "ROW_HEIGHT": 22,
+      "VISIBLE_ROWS": 10,
+      "TOOLTIP": "結合するCSVファイルの一覧です。行の並び順が結合順になります。",
+      "COLUMNS": [
+        {
+          "key": "name",
+          "title": "ファイル名",
+          "width": 200
+        },
+        {
+          "key": "folder",
+          "title": "フォルダパス",
+          "width": 300
+        }
+      ]
+    },
+    "FOCUS": {
+      "DEFAULT_BUTTON": "add",
+      "TAB_ORDER": [
+        "add",
+        "add_folder",
+        "up",
+        "down",
+        "remove",
+        "clear",
+        "radio0",
+        "radio1",
+        "radio2",
+        "table",
+        "ok",
+        "cancel"
+      ]
+    },
+    "SCREENS": {
+      "PROGRESS": {
+        "TITLE": "ファイル結合 進捗",
+        "TOOLTIP": "CSV結合の進捗を表示しています。",
+        "WINDOW": {
+          "RESIZABLE": false,
+          "SHOW_MINIMIZE": false,
+          "SHOW_MAXIMIZE": false,
+          "DEFAULT_WIDTH": 400,
+          "DEFAULT_HEIGHT": 120,
+          "SHOW_IN_TASKBAR": false,
+          "TOPMOST": true
+        }
+      },
+      "DONE": {
+        "TITLE": "結合完了",
+        "TOOLTIP": "結合が完了しました。OKで閉じるとExcel操作が有効になります。",
+        "LIST_DOCUMENT_MARGIN": 0,
+        "LIST_MONOSPACE": true,
+        "LIST_NAME_COL_CHARS": 28,
+        "WINDOW": {
+          "RESIZABLE": true,
+          "SHOW_MINIMIZE": false,
+          "SHOW_MAXIMIZE": false,
+          "DEFAULT_WIDTH": 0,
+          "DEFAULT_HEIGHT": 0,
+          "SHOW_IN_TASKBAR": false,
+          "TOPMOST": true
+        },
+        "ICON": "Information",
+        "ICON_SIZE": "M",
+        "MSG_HEADER": "結合完了しました。",
+        "MSG_COUNT_PREFIX": "結合ファイル数：",
+        "MSG_ROWS_PREFIX": "追加行数：",
+        "MSG_TOTAL_ROWS_PREFIX": "総追加行数：",
+        "LIST_WIDTH": 320,
+        "LIST_MIN_HEIGHT": 0,
+        "LIST_MAX_HEIGHT": 280,
+        "BTN_OK": "OK",
+        "BTN_OK_TOOLTIP": "このダイアログを閉じ、Excel操作を有効にします。"
+      },
+      "DUPLICATE": {
+        "ICON": "Warning",
+        "ICON_SIZE": "M",
+        "TITLE": "重複ファイルの確認",
+        "TOOLTIP": "一覧に既に含まれるファイルがあります。",
+        "MSG": "既に一覧に存在するファイルが含まれています。\n追加: 重複していないファイルのみ追加します。\nキャンセル: 追加を中止します。",
+        "COLUMNS": [
+          "ファイル名",
+          "フォルダパス"
+        ],
+        "BTN_OK": "追加",
+        "BTN_CANCEL": "キャンセル",
+        "BTN_OK_TOOLTIP": "重複していないファイルのみ一覧に追加します。",
+        "BTN_CANCEL_TOOLTIP": "追加せずにダイアログを閉じます。",
+        "WINDOW": {
+          "RESIZABLE": true,
+          "SHOW_MINIMIZE": false,
+          "SHOW_MAXIMIZE": false,
+          "DEFAULT_WIDTH": 0,
+          "DEFAULT_HEIGHT": 0,
+          "SHOW_IN_TASKBAR": false,
+          "TOPMOST": true
+        }
+      }
+    }
+  }
+}

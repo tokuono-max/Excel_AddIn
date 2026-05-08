@@ -1,0 +1,160 @@
+{
+  "_header": {
+    "File": "ui_dupli.json",
+    "Function": "重複チェック",
+    "Shared_UI": "進捗は ui_common.create_progress_dialog。レポートは dupli 専用モードレス。",
+    "VIEWPORT_POLL_MS": "VIEWPORT_HIGHLIGHT.POLL_MS をやや大きくすると、追従ティックの COM 頻度が下がりカーソル（砂時計）のちらつきを緩和しやすい。",
+    "REPORT_WIDTH": "外枠幅は REPORT.WINDOW.DEFAULT_WIDTH（指定時）を優先し、MIN/MAX でクランプ。DEFAULT_WIDTH 未指定時のみ内容幅基準。"
+  },
+  "_separator": "-------------------",
+  "MAIN": {},
+  "MESSAGES": {
+    "NO_VALID_RANGE": "重複チェックの対象となる有効な範囲が見つかりません。",
+    "READ_FAILED": "セルデータの読み込みに失敗しました。",
+    "NO_DUPLICATES": "重複データは検出されませんでした。",
+    "STATUS_FINAL": "重複チェック完了。重複: {count} 件。 OKボタンでレポートを表示します。\n（シートは表示範囲に応じてハイライトします）",
+    "ERROR_PREFIX": "ERROR: 重複解析失敗",
+    "PHASE_READ": "セルデータを読み込み中...",
+    "PHASE_ANALYZE": "重複パターンを解析中...",
+    "PHASE_WRITE": "レポート構成とハイライト用データを準備中...",
+    "PROGRESS_CUSTOM_READ": "読込中",
+    "PROGRESS_CUSTOM_ANALYZE": "解析中",
+    "PROGRESS_CUSTOM_WRITE": "準備中",
+    "PHASE_CLEAR": "ハイライトを解除しています...",
+    "STATUS_CANCELLED": "重複チェックを中止しました。",
+    "CANCELLED_DONE": "中止しました",
+    "BTN_PROGRESS_CANCEL": "キャンセル",
+    "PROGRESS_CANCEL_TOOLTIP": "処理を中止し、付与したハイライトを解除します。",
+    "HIGHLIGHT_CLEAR_DONE": "ハイライトを解除しました"
+  },
+  "HIGHLIGHT": {
+    "USE_CORE_ERR_BG": true,
+    "RGB": null
+  },
+  "VIEWPORT_HIGHLIGHT": {
+    "POLL_MS": 450,
+    "MARGIN_ROWS": 2,
+    "MARGIN_COLS": 1,
+    "SIDECAR_STALE_SEC": 86400
+  },
+  "GOTO_MARGIN_ROWS": 2,
+  "GOTO_MARGIN_COLS": 1,
+  "GOTO_HIGHLIGHT": {
+    "BGR": 14540253
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "重複データ解析中",
+      "TOOLTIP": "選択範囲の重複を検出しています。完了までお待ちください。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 148,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": true
+      }
+    },
+    "DONE": {
+      "TITLE": "重複チェック",
+      "TOOLTIP": "重複チェックの結果を表示しています。",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "ICON_TOOLTIP": "情報",
+      "MSG_TOOLTIP": "ステータスメッセージの詳細です。",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて次に重複検出レポートを表示します。ハイライトはレポートを閉じるまで残ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "REPORT": {
+      "TITLE_TEMPLATE": "重複検出レポート",
+      "TOOLTIP": "重複行の一覧です。行を選んでセルへ移動できます。",
+      "REPORT_INTRO": "選択範囲内で、行内容が一致する重複を検出しました。\n一覧は同一内容グループごとに、シート上で若い行から並んでいます。",
+      "REPORT_INTRO_MODE_B": "単一セルをトリガに、シートの有効データ領域で同じ値（比較キー）を持つセルを検出しました。一覧は値ごとに、代表セルが若い座標から並んでいます。",
+      "REPORT_INTRO_TOOLTIP": "レポートの見方の説明です。",
+      "COUNT_CAPTION_TEMPLATE": "検出総数: {count} 件",
+      "COUNT_CAPTION_TOOLTIP": "重複としてカウントした行数です。",
+      "TABLE_TOOLTIP": "ダブルクリックでも該当セルへ移動できます。",
+      "SUMMARY_COL_MAX_WIDTH": 0,
+      "TABLE_COLUMN_PAD": 28,
+      "TABLE_CHROME_WIDTH": 30,
+      "DIALOG_WIDTH_FUDGE": 12,
+      "BTN_CLOSE": "閉じる",
+      "BTN_CLOSE_TOOLTIP": "レポートを閉じます。閉じたときにシート上の重複ハイライトを解除します。",
+      "BTN_GOTO": "セルへ移動",
+      "BTN_GOTO_TOOLTIP": "選択中の行の先頭セルへジャンプします。",
+      "COLUMNS": [
+        {
+          "key": "row",
+          "label": "行",
+          "width": 0,
+          "tooltip": "シート上の行番号"
+        },
+        {
+          "key": "addr",
+          "label": "セル",
+          "width": 0,
+          "tooltip": "重複セル座標"
+        },
+        {
+          "key": "summary",
+          "label": "重複内容（先頭3列）",
+          "width": 0,
+          "tooltip": "行の先頭3列の内容"
+        }
+      ],
+      "MODE_B_COLUMNS": [
+        {
+          "key": "value",
+          "label": "値（比較キー）",
+          "width": 0,
+          "tooltip": "重複判定に使った正規化後の文字列"
+        },
+        {
+          "key": "ncells",
+          "label": "該当セル数",
+          "width": 0,
+          "tooltip": "この値が出現したセル数（重複グループ）"
+        },
+        {
+          "key": "addr",
+          "label": "代表座標",
+          "width": 0,
+          "tooltip": "ジャンプ先の代表セル（グループ内で最小行・列）"
+        }
+      ],
+      "MODE_B_WINDOW": {
+        "DEFAULT_WIDTH": 900,
+        "DEFAULT_HEIGHT": 520,
+        "MIN_WIDTH": 680,
+        "MIN_HEIGHT": 400,
+        "VALUE_COL_MAX_WIDTH": 420,
+        "TOPMOST": false
+      },
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": true,
+        "DEFAULT_WIDTH": 365,
+        "DEFAULT_HEIGHT": 450,
+        "MIN_WIDTH": 365,
+        "MAX_WIDTH": 920,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    }
+  }
+}

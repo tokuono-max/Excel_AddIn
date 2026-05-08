@@ -1,0 +1,120 @@
+{
+  "_header": {
+    "File": "ui_hd_nr.json",
+    "Function": "行整形（ヘッダブロック横結合）",
+    "Created": "2026-03-09",
+    "Updated": "2026-03-09",
+    "Setting_details": {
+      "MAIN": "ヘッダ確認画面。TITLE, DESC, DIALOG_BUTTONS（開始/キャンセル）。WINDOW は SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。",
+      "SCREENS": {
+        "WARNING": "複数行未選択時のワーニング。WINDOW は SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。",
+        "PROGRESS": "整形中の進捗（整形数/総数）。",
+        "DONE": "整形完了通知。WINDOW は SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。",
+        "DATA_SHORTAGE": "データ不足通知（不足発生行・不足行）。SHORTAGE_CELL_BG_RGB で不足セルのシート上ハイライト色を [R,G,B] で指定。WINDOW は SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。"
+      }
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "WINDOW": {
+    "RESIZABLE": true,
+    "SHOW_MINIMIZE": false,
+    "SHOW_MAXIMIZE": false,
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "DEFAULT_WIDTH": 440,
+    "DEFAULT_HEIGHT": 280,
+    "TOPMOST": false
+  },
+  "MAIN": {
+    "TITLE": "行整形 - ヘッダ確認",
+    "DESC": "選択された行をヘッダブロックとして、横列に\n結合してデータ領域を整形します。\n開始する場合は「開始」を押してください。",
+    "DESC_VISIBLE": true,
+    "ICON": "Warning",
+    "ICON_SIZE": "M",
+    "WINDOW": {
+      "RESIZABLE": false,
+      "SHOW_MINIMIZE": false,
+      "SHOW_MAXIMIZE": false,
+      "CENTER_ON_EXCEL": true,
+      "SHOW_IN_TASKBAR": false,
+      "DEFAULT_WIDTH": 250,
+      "DEFAULT_HEIGHT": 200,
+      "TOPMOST": true
+    },
+    "DIALOG_BUTTONS": {
+      "OK": "開始",
+      "CANCEL": "キャンセル",
+      "OK_TOOLTIP": "ヘッダブロックとデータ領域の整形を開始します。",
+      "CANCEL_TOOLTIP": "キャンセルして Excel に戻ります。"
+    }
+  },
+  "SCREENS": {
+    "WARNING": {
+      "TITLE": "データ整形異常",
+      "MSG": "ヘッダが複数行選択されていません。\nヘッダ行を複数選択してから再度実行してください。",
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "閉じる",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "DEFAULT_WIDTH": 300,
+        "DEFAULT_HEIGHT": 200,
+        "TOPMOST": true
+      }
+    },
+    "PROGRESS": {
+      "TITLE": "行整形 進捗",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 380,
+        "DEFAULT_HEIGHT": 100,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "DONE": {
+      "TITLE": "行整形 完了",
+      "MSG_HEADER": "行整形が完了しました。",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "DATA_SHORTAGE": {
+      "TITLE": "行整形 - データ不足",
+      "MSG": "不足データが発生しました。\n該当行をハイライトしています。\n確認のうえ Excel で修正してください。",
+      "SHORTAGE_CELL_BG_RGB": [
+        255,
+        255,
+        224
+      ],
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "閉じる",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 200,
+        "TOPMOST": true
+      }
+    }
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "SCHEMA_VERSION": {
+    "_comment": "このファイルのスキーマ版。将来キー追加時に読み手が互換判定に使う。既定は 1。",
+    "value": 1
+  },
+  "APPLY_WINDOW_CONFIG": {
+    "OWNER_HWND_TIMER_MS": {
+      "_comment": "apply_window_config で Win32 オーナー再適用を打つ遅延(ms)の列。要素数4固定（0,50,150,300）。",
+      "values": [
+        0,
+        50,
+        150,
+        300
+      ]
+    },
+    "ENSURE_FRONT_TIMER_MS": {
+      "_comment": "apply_window_config で ensure_front を打つ遅延(ms)の列。要素数2固定（100,350）。",
+      "values": [
+        100,
+        350
+      ]
+    },
+    "CENTER_ON_EXCEL_RECENTER_DELAY_MS": {
+      "_comment": "CENTER_ON_EXCEL 時に OS が位置をずらしたあと再センタする遅延（ms）。既定 400。",
+      "value": 400
+    },
+    "MIN_MAX_BUTTONS_REMOVE_DELAY_MS": {
+      "_comment": "最小化/最大化ボタン非表示時に Win32 でスタイル除去する遅延（ms）。既定 150。",
+      "value": 150
+    }
+  },
+  "EXCEL_KEEP_FOREGROUND": {
+    "ARM_TIMER_DELAY_MS": {
+      "_comment": "EXCEL_KEEP_FOREGROUND の QTimer 武装までの遅延（ms）。",
+      "value": 120
+    },
+    "INITIAL_TICK_IMMEDIATE_MS": {
+      "_comment": "武装直後に 1 回だけ即 ensure_front する遅延（ms）。既定 0。",
+      "value": 0
+    }
+  },
+  "DONE_DIALOG_SHOW_ON_EXCEL": {
+    "ENSURE_FRONT_EXTRA_DELAYS_MS": {
+      "_comment": "done_dialog_show_event_on_excel で可視時に追加 ensure_front を打つ遅延(ms)の列。既定 [80,200]。",
+      "values": [
+        80,
+        200
+      ]
+    }
+  },
+  "ENSURE_FRONT": {
+    "SET_FOREGROUND_FAIL_RETRY_MS": {
+      "_comment": "SetForegroundWindow 失敗時に ensure_front を再帰呼び出しするまでの遅延（ms）。既定 100。",
+      "value": 100
+    },
+    "SET_FOREGROUND_FAIL_MAX_FF_RETRY_EXCLUSIVE": {
+      "_comment": "ensure_front 内の _ff_retry 再試行上限（従来 if _ff_retry < 2）。既定 2。",
+      "value": 2
+    }
+  },
+  "OWNER_TASKBAR": {
+    "EXTENDED_STYLE_REAPPLY_DELAYS_MS": {
+      "_comment": "set_owner 後にタスクバー抑止スタイルを再適用する遅延(ms)の列。既定 [0,160]。",
+      "values": [
+        0,
+        160
+      ]
+    }
+  },
+  "FOCUS_EXCEL_AFTER_MODAL": {
+    "NUDGE_DELAYS_MS": {
+      "_comment": "モーダル終了後に Excel を nudge する遅延(ms)の列。既定 [0,80,200,350]。",
+      "values": [
+        0,
+        80,
+        200,
+        350
+      ]
+    }
+  },
+  "DUPLI_REPORT_AFTER_CELL_GOTO": {
+    "ENSURE_FRONT_DELAYS_MS": {
+      "_comment": "重複レポートでセルジャンプ後に ensure_front を打つ遅延(ms)の列。既定 [0,120]。",
+      "values": [
+        0,
+        120
+      ]
+    }
+  },
+  "HELP_BEFORE_MODAL_EXEC": {
+    "DELAY_MS": {
+      "_comment": "ui_server がヘルプ dlg.exec() に入る直前に QEventLoop で待つ ms。既定 0。",
+      "value": 0
+    }
+  },
+  "UI_CAPTION_DIAGNOSTIC": {
+    "HWND_SAMPLE_DELAYS_MS": {
+      "_comment": "HC_UI_WINDOW_CAPTION_DIAG 有効時、キャプション HWND サンプルを取る遅延(ms)の列。",
+      "values": [
+        200,
+        500,
+        1200
+      ]
+    }
+  }
+}

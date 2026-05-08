@@ -1,0 +1,77 @@
+{
+  "_header": {
+    "File": "ui_row_dl.json",
+    "Function": "空白行削除",
+    "Shared_UI": "進捗は ui_common.create_progress_dialog。確認 PREVIEW・完了 DONE。"
+  },
+  "_separator": "-------------------",
+  "MAIN": {},
+  "MESSAGES": {
+    "PHASE_SCAN": "各行を精密走査中...",
+    "PHASE_DELETE": "空白行を物理抹消中 ({count} 行)...",
+    "STATUS_DONE": "空白行の物理抹消完了\n抹消: {count:,} 行\n位置(行): {positions}",
+    "STATUS_NONE": "空白行は物理的に検出されませんでした。",
+    "ERROR_PREFIX": "ERROR: 行抹消失敗",
+    "PROGRESS_CUSTOM_SCAN": "走査中",
+    "PROGRESS_CUSTOM_DELETE": "書込中"
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "空白行の検索",
+      "TOOLTIP": "使用範囲（UsedRange）内の空白行を検索しています。キャンセルで中止できます。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 440,
+        "DEFAULT_HEIGHT": 130,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": false
+      }
+    },
+    "PREVIEW": {
+      "TITLE": "空白行削除",
+      "TOOLTIP": "検出された空白行の行番号一覧です。削除で物理削除、キャンセルで Excel に戻ります。",
+      "ICON": "Question",
+      "ICON_SIZE": "M",
+      "MSG_CONFIRM_HEADER": "次の行は使用範囲内で空欄です。削除しますか？\n（行番号は Excel 上の行番号です）",
+      "MSG_NONE_BODY": "使用範囲内に空欄行はありませんでした。",
+      "LIST_MIN_HEIGHT": 150,
+      "LIST_TOOLTIP": "削除対象となる空欄行の行番号一覧です。",
+      "BTN_DELETE": "削除",
+      "BTN_DELETE_TOOLTIP": "一覧の行をまとめて物理削除します（Undo 可能な場合は元に戻せます）。",
+      "BTN_CANCEL": "キャンセル",
+      "BTN_CANCEL_TOOLTIP": "削除せずに終了します。",
+      "BTN_OK_NONE": "OK",
+      "BTN_OK_NONE_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 200,
+        "DEFAULT_HEIGHT": 200,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "DONE": {
+      "TITLE": "空白行削除",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 140,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    }
+  }
+}

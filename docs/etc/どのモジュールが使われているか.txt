@@ -1,0 +1,68 @@
+了解です。各未実装項目について「本来ここ（ファイル/関数）に実装が必要だが、現状は存在しない」を根拠付きで落とし込みます。まず該当しそうな関数名・呼び出し有無をコード検索して確定します。
+
+以下に、先ほど挙げた未実装項目それぞれについて、**「どのファイルのどの関数に（要求どおりなら）実装が必要だが、現状その実装が無い」**を、根拠（検索結果/読取箇所）ベースで落として一覧化します。
+
+1) 全体結合（Polarsパイプライン）での JOIN 確定が本番実行に未接続
+要求: §2.0(3) / §10.7（列生成→キー付与→全体結合→出力）
+実装が必要な場所（本来）
+svc/svc_data_agg.py の _run_batch()：各項目の中間表を作った後に svc_data_agg_pipeline.join_on_match_keys() を呼ぶ
+svc/svc_data_agg.py の _run_step()：ステップ実行でも同等の中間表→JOIN（またはステップ用に縮退したJOIN）を通す
+現状「無い」根拠
+svc/svc_data_agg.py 内に join_on_match_keys / svc_data_agg_pipeline の呼び出しが 存在しない（検索ヒットなし）
+本番実行は _run_batch() が scan_folder()→extract_item_bundle()→write_master_to_sheet() で完結している
+（svc/svc_data_agg.py の _run_batch で確認）
+2) イベントログ（結合失敗・キー欠損・パス不一致等）の本番出力が未実装
+要求: §2.4.1 / §10.8 / 画面一覧 No.14（別シート等へイベントログ）
+実装が必要な場所（本来）
+svc/svc_data_agg.py の _run_batch()：JOIN/キー付与の結果として出る失敗情報を集め、Excelシートへ出力（例：core_xlc.write_chunk 相当）
+svc/svc_data_agg.py の _run_step()：ステップ時も同様にログを残す（または累積）
+もしくは svc/svc_data_agg_pipeline.py の join_on_match_keys() が返す event_rows を受け取り、上記で出力する
+現状「無い」根拠
+svc/svc_data_agg.py に reason_code / JOIN_MISS / JOIN_FAIL / event_log 等の取り回しが 存在しない（検索ヒットなし）
+svc/svc_data_agg_pipeline.py には reason_code を持つ event_rows があるが、本番実行が呼んでいない（= 出力経路が無い）
+3) duplicate_append（複製追加）の書き込み処理が未実装
+要求: §2.4（書込みモード）/ §10.4.3
+実装が必要な場所（本来）
+svc/svc_data_agg_write.py
+write_master() / write_master_to_sheet() の mode 分岐に duplicate_append を追加
+現状「無い」根拠
+svc/svc_data_agg_scenario.py の WRITE_MODES には duplicate_append が含まれる
+しかし svc/svc_data_agg_write.py にあるモード定数は MODE_APPEND/OVERWRITE/FILL_IN のみで、duplicate_append の分岐が 存在しない（検索ヒットなし）
+4) file_name_rule / file_pattern による “シナリオ単位ファイル絞り込み” が未実装
+要求: §10.3.3（UI保存）＋「抽出エンジンでの適用は §10.9」
+実装が必要な場所（本来）
+svc/svc_data_agg.py の _run_batch() / _run_step()：
+scan_folder() で得た候補 file_paths を、各 item/source の UI ブロック（ui_scenario_source_v1／旧キー互換）の file_name_rule と file_pattern で さらに絞る
+もしくは svc/svc_data_agg_scan.py に “ルール付きフィルタ” API を追加して呼ぶ
+現状「無い」根拠
+svc/svc_data_agg.py 内に file_name_rule / file_pattern の参照が 存在しない（検索ヒットなし）
+ui_qt/ui_data_agg.py 側は ui_scenario_source_v1 に保存するが、svc 側へ適用されていない（当該メモの時点の記述）
+5) 「対象ファイル一覧（別画面）」要件（並び替え・実行中ハイライト等）が未達
+要求: §3.2 / 画面一覧 No.2
+別画面でパス一覧、並び順編集、実行中の項目/参照ファイルが分かる表示（ハイライト等）
+実装が必要な場所（本来）
+ui_qt/ui_data_agg.py に 対象ファイル一覧専用の QDialog（別ウィンドウ） と、その起動ボタン
+実行中状態（現在項目/参照ファイル）を UI に伝える仕組み（IPCや進捗通知の拡張）
+現状「無い」根拠
+ui_qt/ui_data_agg.py にはタブ2の 検出ファイル一覧(QListWidget) 更新処理 _on_scan() はある（= “一覧表示”はある）
+ただし「別画面」「並び順編集」「実行中のハイライト/インジケータ」は、該当するクラス/関数/文言が 確認できない（検索上もそれらしき実装が無い）
+6) デバッグ画面 UI 差分（要求の確定案）未解消項目が残存
+要求: §3.1.3.2（差分追跡）
+実装が必要な場所（本来）
+ui_qt/ui_data_agg_debug.py
+親行背景を「項目名列のみ」にする、\n を行分割する、ヘッダ描画の不具合修正、列見出し文言統一 等
+現状「無い/未達」根拠（コード上の具体箇所）
+親行背景：_tree_paint_top_row_only() が 全列をグレーにしている（要求は“全列グレーNG”）
+ui_qt/ui_data_agg_debug.py の _tree_paint_top_row_only（読取済み）
+\n 分割：_slot_third_column() は "\n".join(...) を返しており、要求の「1行＝1表示行」への分割ロジックが 未（表示上は1セル複数行のままになり得る）
+列見出し・ヘッダ描画：MultiLineHeaderView はあるが、要求定義書の差分表にある「未」項目を完全に解消した形にはなっていない（差分表側が未更新）
+7) last_folder.txt の初期フォルダ採用・更新が未実装（data_aggとして）
+要求: §2.1 / §11.4
+実装が必要な場所（本来）
+ui_qt/ui_data_agg.py
+起動時に last_folder.txt を読み self._edit_start_path へ反映
+フォルダ選択確定時に last_folder.txt を更新
+現状「無い」根拠
+ui_qt/ui_data_agg.py に last_folder.txt を扱う記述が 存在しない（検索ヒットなし）
+現状の初期値は _on_folder_select で os.path.expanduser("~") を使うのみ（読取済み）
+必要ならこの次に、上の各項目ごとに「要求定義書に先に追記/補正すべき表現（曖昧点）→実装差分→動作確認観点」を 1項目ずつテンプレ化して、**“要求定義書を先に改版してから実装”**の手順に戻せる形にします。

@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "bin": {
+    "latest_version": "1.0.0",
+    "min_supported_version": "1.0.0",
+    "release_notes_url": "",
+    "full": {
+      "relative_path": "releases/bin_1.0.0_full.zip",
+      "sha256": ""
+    },
+    "patch": {
+      "relative_path": "releases/bin_0.9.x_to_1.0.0_delta.zip",
+      "sha256": "",
+      "from_min_version": "0.9.0",
+      "from_max_version": "0.9.99"
+    }
+  },
+  "config": {
+    "latest_version": "2026.04.20",
+    "payload": {
+      "relative_path": "releases/config_2026.04.20.zip",
+      "sha256": ""
+    },
+    "min_bin_version": "0.9.0"
+  },
+  "bootstrap": {
+    "latest_version": "1.1.0",
+    "full": {
+      "relative_path": "releases/bootstrap_1.1.0_full.zip",
+      "sha256": ""
+    }
+  }
+}

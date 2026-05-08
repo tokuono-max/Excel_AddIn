@@ -1,0 +1,77 @@
+{
+  "_header": {
+    "File": "ui_col_dl.json",
+    "Function": "空白列削除",
+    "Shared_UI": "進捗は ui_common.create_progress_dialog。確認 PREVIEW・完了 DONE。"
+  },
+  "_separator": "-------------------",
+  "MAIN": {},
+  "MESSAGES": {
+    "PHASE_SCAN": "全列の内容を精密解析中...",
+    "PHASE_DELETE": "空白列を物理抹消中 ({count} 列)...",
+    "STATUS_DONE": "空白列の物理抹消完了\n抹消: {count:,} 列\n位置(列): {positions}",
+    "STATUS_NONE": "（データ行基準で）空白列は検出されませんでした。",
+    "ERROR_PREFIX": "ERROR: 列抹消失敗",
+    "PROGRESS_CUSTOM_SCAN": "解析中",
+    "PROGRESS_CUSTOM_DELETE": "書込中"
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "空白列の検索",
+      "TOOLTIP": "使用範囲（UsedRange）内を走査しています。1 行目はヘッダとして空欄判定から除外します。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 440,
+        "DEFAULT_HEIGHT": 130,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": false
+      }
+    },
+    "PREVIEW": {
+      "TITLE": "空白列削除",
+      "TOOLTIP": "データ行（2 行目以降）がすべて空の列です。削除すると列全体（ヘッダ行を含む）が削除されます。",
+      "ICON": "Question",
+      "ICON_SIZE": "M",
+      "MSG_CONFIRM_HEADER": "次の列は、使用範囲の 2 行目以降がすべて空欄です。\n列全体（1 行目のヘッダ含む）を削除しますか？\n（列記号は Excel の列名です）",
+      "MSG_NONE_BODY": "使用範囲内で、データ行のみが空の列はありませんでした。\n（1 行目のみ値がある列はここでは対象外です）",
+      "LIST_MIN_HEIGHT": 180,
+      "LIST_TOOLTIP": "削除対象となる列の記号（A, B, …）の一覧です。",
+      "BTN_DELETE": "削除",
+      "BTN_DELETE_TOOLTIP": "一覧の列をまとめて物理削除します（Undo 可能な場合は元に戻せます）。",
+      "BTN_CANCEL": "キャンセル",
+      "BTN_CANCEL_TOOLTIP": "削除せずに終了します。",
+      "BTN_OK_NONE": "OK",
+      "BTN_OK_NONE_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 200,
+        "DEFAULT_HEIGHT": 200,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "DONE": {
+      "TITLE": "空白列削除",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 140,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "_header": {
+    "File": "ui_csv_ld.json",
+    "Function": "CSV読込",
+    "Created": "2026-03-05",
+    "Updated": "2026-03-06",
+    "Shared_UI": "ファイル選択は共通 ui_qt.ui_fil.show_open_file_dialog を使用。",
+    "Setting_details": {
+      "WINDOW": {
+        "説明": "ファイル選択ダイアログのウィンドウ挙動。csv_ld ではファイル選択はネイティブのみ。",
+        "RESIZABLE": "リサイズ可否。true/false",
+        "CENTER_ON_EXCEL": "Excel を基準に中央配置。true/false",
+        "SHOW_IN_TASKBAR": "タスクバーに表示するか。true/false"
+      },
+      "MAIN": {
+        "説明": "ファイル「開く」ダイアログの設定。",
+        "TITLE": "ダイアログのタイトル",
+        "FILTER": "ファイル種別フィルタ。例: CSVファイル (*.csv);;すべてのファイル (*.*)"
+      },
+      "SCREENS": {
+        "説明": "サブ画面（進捗・完了通知）。",
+        "DONE": {
+          "説明": "読込完了通知。Excel中央表示の確認用（csv_sp と同様の挙動）。",
+          "TITLE": "CSV読込 完了",
+          "MSG_HEADER": "読込が完了しました。",
+          "MSG_COUNT_PREFIX": "読込ファイル数：",
+          "ICON": "Information",
+          "WINDOW": {
+            "CENTER_ON_EXCEL": true,
+            "DEFAULT_WIDTH": 360,
+            "DEFAULT_HEIGHT": 220,
+            "TOPMOST": false
+          }
+        },
+        "PROGRESS": {
+          "説明": "CSV読込の進捗画面。TOPMOST true は×ボタン赤表示の原因になるため false 推奨。",
+          "TITLE": "CSV読込 進捗",
+          "TOOLTIP": "CSVを読み込んでいます。",
+          "WINDOW": {
+            "RESIZABLE": false,
+            "SHOW_MINIMIZE": false,
+            "SHOW_MAXIMIZE": false,
+            "DEFAULT_WIDTH": 400,
+            "DEFAULT_HEIGHT": 120,
+            "SHOW_IN_TASKBAR": false,
+            "SHOW_CLOSE_BUTTON": false,
+            "TOPMOST": false
+          }
+        }
+      }
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "WINDOW": {
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "RESIZABLE": true,
+    "TOPMOST": false
+  },
+  "MAIN": {
+    "TITLE": "読み込む CSV ファイルを選択してください",
+    "FILTER": "CSVファイル (*.csv);;すべてのファイル (*.*)"
+  },
+  "SCREENS": {
+    "DONE": {
+      "TITLE": "CSV読込 完了",
+      "MSG_HEADER": "読込が完了しました。\n",
+      "ICON": "Information",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 250,
+        "DEFAULT_HEIGHT": 200,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "PROGRESS": {
+      "TITLE": "CSV読込 進捗",
+      "TOOLTIP": "CSVを読み込んでいます。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": true
+      }
+    }
+  }
+}

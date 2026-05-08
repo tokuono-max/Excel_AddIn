@@ -1,0 +1,53 @@
+# Nuitka batch build logs (see docs/Exe化（開発者向け）.md §3.5.2)
+logs/nuitka/
+
+# 第2段階に入る前の dist\CSV_Tool フルコピー（ロールバック比較用・容量大）
+dist/CSV_Tool_baseline_pre_phase2/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Env
+.venv/
+venv/
+
+# Build
+build/
+dist/
+release/
+
+# Logs
+logs/
+*.log
+
+# Cursor
+.cursor/
+
+# VSCode
+.vscode/
+
+# History
+.history/
+
+# Nuitka
+*.build/
+*.dist/
+nuitka-crash-report.xml
+
+# Qt
+*.qm
+
+# Temp
+*.tmp
+*.bak
+
+# Excel temp
+~$*.xlsm
+~$*.xlsx
+
+# OS
+Thumbs.db
+.DS_Store

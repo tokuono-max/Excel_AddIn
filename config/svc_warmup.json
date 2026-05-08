@@ -1,0 +1,26 @@
+{
+  "_header": {
+    "File": "svc_warmup.json",
+    "Purpose": "svc_server 起動時に事前ロードする action 一覧（遅延C 軽減）。未指定・空ならウォームアップなし。",
+    "CommentOutRule": "JSON は正式コメント不可。無効化したい要素は先頭に # を付ける（例: #data_agg）。unknown action として無視される。",
+    "Updated": "2026-04-23"
+  },
+  "warmup_actions": [
+    "csv_ld",
+    "csv_mg",
+    "csv_sv",
+    "csv_sp",
+    "dupli",
+    "row_dl",
+    "col_dl",
+    "dt_ymd",
+    "dt_hm",
+    "trm_ex",
+    "hd_nr",
+    "hd_in",
+    "undo",
+    "help",
+    "update_check",
+    "data_agg"
+  ]
+}

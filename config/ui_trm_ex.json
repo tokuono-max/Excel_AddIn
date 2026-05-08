@@ -1,0 +1,125 @@
+{
+  "_header": {
+    "File": "ui_trm_ex.json",
+    "Function": "文頭・文末トリム（選択範囲の空白削除）",
+    "Shared_UI": "処理実行中は PROGRESS、選択ダイアログは CHOICE、完了通知は DONE、削除対象なし/データなし時は NO_TARGET で表示。",
+    "Description": "Excel 選択範囲（または選択なし時は UsedRange）内の文字列セルについて、文頭・文末の空白を検出し、ユーザーが「文頭削除」「文末削除」「全削除」のいずれかを選んで実行する機能の UI 文言・画面設定を定義する。",
+    "MESSAGES": "NO_DATA=有効データ領域なし時。NO_TARGET=文頭・文末いずれにも空白がない時。STATUS_DONE=完了通知（\\n で改行し縦並び表示）。CHOICE_* は選択ダイアログ内の件数表示フォーマット。",
+    "SCREENS_PROGRESS": "トリム実行中の進捗表示。ui_common.create_progress_dialog の共通 progress 仕様に従う。TITLE, WINDOW を参照。",
+    "SCREENS_CHOICE": "文頭/文末の件数と 4 ボタン（文頭削除・文末削除・全削除・キャンセル）を表示。TITLE, MSG_HEADER, CHOICE_LEADING_FMT, CHOICE_TRAILING_FMT, BTN_*, ICON, WINDOW を参照。",
+    "SCREENS_DONE": "トリム実行後の完了通知。削除文頭数・削除文末数を縦並びで表示。TITLE, ICON, BTN_OK, WINDOW を参照。",
+    "SCREENS_NO_TARGET": "削除対象が一件もない場合、または UsedRange が空の場合の通知。DONE と同様の構成でメッセージのみ差し替え。SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。",
+    "Note": "_header と _separator は core_cst 読込時に除外され、実行時設定としては使用されない。",
+    "HIGHLIGHT": "選択ダイアログ表示中のみ。HIGHLIGHT_LEADING=文頭空白検出セル（薄い水色）、HIGHLIGHT_TRAILING=文末空白検出セル（薄い青）。文末のみのセルは trailing の色。両方あるセルは trailing で上書き表示。VIEWPORT_HIGHLIGHT は重複チェックと同様の可視範囲追従間隔・余白。",
+    "WINDOW_EXCEL_FG": "任意。EXCEL_KEEP_FOREGROUND=true は定期的 ensure_front のためちらつきやすい。既定は CHOICE では付けない（Win32 オーナー＋prepare の 1 回前面化に任せる）。必要な環境だけ true + POLL_MS。ui_common.apply_window_config が解釈。"
+  },
+  "_separator": "-------------------",
+  "MAIN": {},
+  "VIEWPORT_HIGHLIGHT": {
+    "MARGIN_ROWS": 2,
+    "MARGIN_COLS": 1,
+    "POLL_MS": 800
+  },
+  "HIGHLIGHT_LEADING": {
+    "RGB": [
+      200,
+      240,
+      255
+    ]
+  },
+  "HIGHLIGHT_TRAILING": {
+    "RGB": [
+      175,
+      215,
+      255
+    ]
+  },
+  "MESSAGES": {
+    "NO_DATA": "有効なデータ領域がありません。",
+    "NO_TARGET": "削除対象のセルはありませんでした。",
+    "PHASE_READ": "選択範囲を読み込み中...",
+    "CHOICE_HEADER": "文頭・文末の空白を検出しました。削除種別を選んでください。",
+    "CHOICE_LEADING_FMT": "文頭に空白: {n_leading} 件",
+    "CHOICE_TRAILING_FMT": "文末に空白: {n_trailing} 件",
+    "STATUS_DONE": "トリム完了\n削除文頭数: {n_leading}\n削除文末数: {n_trailing}",
+    "ERROR_PREFIX": "ERROR: トリム処理でエラー",
+    "PROGRESS_CUSTOM_READ": "読込中",
+    "PHASE_APPLY": "空白を削除中...",
+    "PHASE_WRITE": "シートへ反映中...",
+    "PROGRESS_CUSTOM_APPLY": "選択した種別でトリム中",
+    "PROGRESS_CUSTOM_WRITE": "書き込み中"
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "文頭・文末トリム 実行中",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 420,
+        "DEFAULT_HEIGHT": 128,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "CHOICE": {
+      "TITLE": "文頭・文末トリム",
+      "MSG_HEADER": "文頭・文末の空白を検出しました。削除種別を選んでください。",
+      "CHOICE_LEADING_FMT": "文頭に空白: {n_leading} 件",
+      "CHOICE_TRAILING_FMT": "文末に空白: {n_trailing} 件",
+      "BTN_LEADING": "文頭削除",
+      "BTN_LEADING_TOOLTIP": "文頭の空白のみ削除します。",
+      "BTN_TRAILING": "文末削除",
+      "BTN_TRAILING_TOOLTIP": "文末の空白のみ削除します。",
+      "BTN_ALL": "全削除",
+      "BTN_ALL_TOOLTIP": "文頭・文末の空白を両方削除します。",
+      "BTN_CANCEL": "キャンセル",
+      "BTN_CANCEL_TOOLTIP": "何もせず閉じます。",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 420,
+        "DEFAULT_HEIGHT": 220,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "DONE": {
+      "TITLE": "文頭・文末トリム",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 140,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "NO_TARGET": {
+      "TITLE": "文頭・文末トリム",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "DEFAULT_WIDTH": 340,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "_header": {
+    "File": "ui_undo.json",
+    "Function": "元に戻す（Undo）",
+    "Created": "2026-03-09",
+    "Updated": "2026-05-03",
+    "Setting_details": {
+      "概要": "Undo の完了・失敗通知ダイアログの見た目と挙動を定義する。ui_qt.ui_undo が本ファイルを必須読込。",
+      "SCREENS": {
+        "PROGRESS": {
+          "説明": "Undo 復元処理中の進捗。キャンセルなし。",
+          "TITLE": "ウィンドウタイトル。",
+          "TOOLTIP": "ツールチップ（任意）。",
+          "WINDOW": "DEFAULT_WIDTH 等。SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true。前面化は TOPMOST（最前面ヒント）と EXCEL_FRONT_FOLLOW（Excel 前景追従）で指定。"
+        },
+        "UNDO_FAILED": {
+          "説明": "復元不可時の通知画面（キャッシュなし・シート取得失敗等）。",
+          "TITLE": "ウィンドウタイトル。",
+          "MSG_HEADER": "本文が空のときのフォールバックメッセージ。",
+          "DETAIL_TEXT": "本文の先頭に表示する固定メッセージ。svc_undo から渡る detail_text（エラー詳細）は create_dialog でこの後に改行で結合される。",
+          "ICON": "Information / Warning 等。ui_common._warning_icon_pixmap で解釈。",
+          "ICON_SIZE": "S / M / L または数値（ピクセル）。",
+          "BTN_OK": "ボタンラベル（例: 閉じる）。",
+          "WINDOW": "DEFAULT_WIDTH, DEFAULT_HEIGHT, CENTER_ON_EXCEL, SHOW_IN_TASKBAR, TOPMOST（WindowStaysOnTopHint）等。UNDO_DONE と別サイズにできる。"
+        },
+        "UNDO_DONE": {
+          "説明": "復元成功時の終了通知画面。",
+          "TITLE": "ウィンドウタイトル。",
+          "MSG_HEADER": "本文が空のときのフォールバック。",
+          "DETAIL_TEXT": "補足説明（復元は値のみで書式は復元しない等）。svc_undo から渡る detail_text（シート名付き「元に戻しました。」）がメイン本文として表示される。",
+          "ICON": "Information 推奨。",
+          "BTN_OK": "ボタンラベル（例: OK）。",
+          "WINDOW": "SHOW_IN_TASKBAR（既定 false）, CENTER_ON_EXCEL（既定 true）, TOPMOST, EXCEL_FRONT_FOLLOW。apply_window_config と showEvent / prepare で反映。"
+        }
+      },
+      "WINDOW（ルート）": "SCREENS 未指定時のフォールバック。本設定では各 SCREENS 内で WINDOW を個別指定している。"
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "MAIN": {},
+  "MESSAGES": {
+    "PHASE_UNDO_BOOT": "復元を開始しています...",
+    "PHASE_UNDO_PREP": "復元を準備しています...",
+    "PHASE_UNDO_MEASURE": "使用中の範囲を確認しています...",
+    "PHASE_UNDO_CLEAR": "シートをクリアしています...",
+    "PHASE_UNDO_WRITE": "データを書き戻しています...",
+    "PHASE_UNDO_TRIM": "表示範囲を調整しています...",
+    "PHASE_UNDO_AUTOFIT": "列幅を整えています...",
+    "PHASE_UNDO_FREEZE": "表示枠とスクロール位置を復元しています...",
+    "PHASE_UNDO_FINALIZE": "終了処理中...",
+    "PHASE_UNDO_STRUCTURE": "構造を復元しています...",
+    "PHASE_UNDO_STRUCTURE_FINISH": "復元後の処理を行っています...",
+    "PHASE_UNDO_CACHE_DELETE": "復元情報を整理しています..."
+  },
+  "WINDOW": {
+    "RESIZABLE": false,
+    "SHOW_MINIMIZE": false,
+    "SHOW_MAXIMIZE": false,
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "DEFAULT_WIDTH": 0,
+    "DEFAULT_HEIGHT": 0,
+    "TOPMOST": true
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "元に戻す",
+      "TOOLTIP": "シートを元の状態に復元しています。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 120,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": false
+      }
+    },
+    "UNDO_FAILED": {
+      "TITLE": "復元情報",
+      "MSG_HEADER": "復元データがありません。",
+      "DETAIL_TEXT": "元に戻すデータがないため、\n復元できませんでした。\n",
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "閉じる",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "DEFAULT_WIDTH": 0,
+        "DEFAULT_HEIGHT": 0,
+        "TOPMOST": false
+      }
+    },
+    "UNDO_DONE": {
+      "TITLE": "復元完了",
+      "MSG_HEADER": "元に戻しました。",
+      "DETAIL_TEXT": "シートを元の状態に復元しました。\n復元は値だけで、セル書式セルの色等は復元しません",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "DEFAULT_WIDTH": 0,
+        "DEFAULT_HEIGHT": 0,
+        "TOPMOST": true
+      }
+    }
+  }
+}

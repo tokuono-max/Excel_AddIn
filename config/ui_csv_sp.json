@@ -1,0 +1,265 @@
+{
+  "_header": {
+    "File": "ui_csv_sp.json",
+    "Function": "CSVファイル分割（選択行範囲分割）",
+    "Created": "2026-03-05",
+    "Updated": "2026-04-08",
+    "Config_load_timing": "機能起動時（各画面表示時に create_dialog 経由で読込）。core_cst がファイル mtime でキャッシュ。",
+    "Shared_UI": "ワーニングは ui_qt.ui_common.create_warning_dialog、完了通知は create_done_dialog、フォルダ選択は ui_qt.ui_fld.show_folder_dialog を使用。",
+    "Setting_details": {
+      "WINDOW": {
+        "説明": "分割画面のウィンドウ挙動。他機能と同様。",
+        "RESIZABLE": "リサイズ可否。true/false",
+        "SHOW_MINIMIZE": "最小化ボタン表示。true/false",
+        "SHOW_MAXIMIZE": "最大化ボタン表示。true/false",
+        "STARTUP_POSITION": "起動時の位置。center / center_on_excel",
+        "CENTER_ON_EXCEL": "Excelウィンドウを基準に中央配置。true/false",
+        "SHOW_IN_TASKBAR": "タスクバーにアイコン表示するか。true/false",
+        "DEFAULT_WIDTH": "初期幅（ピクセル）。0 でオート",
+        "DEFAULT_HEIGHT": "初期高さ（ピクセル）。0 でオート"
+      },
+      "MAIN": {
+        "説明": "分割画面（メイン）の設定。",
+        "WINDOW": "上記 WINDOW と同じ構造。MAIN で上書き可能。",
+        "TITLE": "ウィンドウタイトル",
+        "DESC": "説明文（機能概要）",
+        "DESC_VISIBLE": "説明文を表示するか。true/false",
+        "TABLE": {
+          "TOOLTIP": "分割明細テーブルのツールチップ",
+          "COLUMNS": "配列。各要素は key, title, width"
+        },
+        "DIALOG_BUTTONS": {
+          "説明": "左側に追加/削減、右側に分割開始/キャンセル。順序は LEFT / RIGHT の配列で定義。",
+          "LEFT": "左端に並べるボタンの配列。各要素は id, label, tooltip",
+          "RIGHT": "右端に並べるボタンの配列。各要素は id, label, tooltip"
+        },
+        "DIALOGS": {
+          "FOLDER": "保存先フォルダ選択。TITLE, DEFAULT_BASE_FILENAME, USE_NATIVE, WINDOW, SPLIT_SIZES, LIST_COLUMN_WIDTHS。Qtカスタム時のみ。",
+          "FOLDER_USE_NATIVE": "FOLDER.USE_NATIVE。true＝OS標準ダイアログ。false＝Qtカスタム（左ツリー・右一覧・サイズ指定可）。未指定時は true。",
+          "FOLDER_SPLIT_SIZES": "FOLDER.SPLIT_SIZES。[左パネル幅, 右パネル幅]（ピクセル）。右パネル幅がフォルダ配下テーブルの実際の表示幅になる。",
+          "FOLDER_LIST_COLUMN_WIDTHS": "FOLDER.LIST_COLUMN_WIDTHS。フォルダ配下エリアの列幅（ピクセル）の配列。[名前, サイズ, 種類, 更新日]の順。0＝その列は非表示。4要素未満または未指定時は種類列を非表示・他は自動。SPLIT_SIZESの右幅と合計が異なる場合、最終列（更新日）が伸縮して右パネル内に収まる。"
+        },
+        "CONFLICT": {
+          "説明": "分割保存先に同名ファイルがある場合の動作。",
+          "ENABLED": "重複チェックを有効化。true/false",
+          "WHEN_EXISTS": "重複時動作。ask / overwrite / rename / cancel",
+          "RENAME_SUFFIX_FORMAT": "（旧）自動連番用。現在の分割フローでは連番救済は行わず指定名で上書き。キーは互換のため残置可",
+          "RENAME_START_INDEX": "（旧）同上",
+          "RENAME_MAX_TRIES": "（旧）同上",
+          "ASK_DIALOG": {
+            "TITLE": "問い合わせダイアログタイトル",
+            "MSG": "問い合わせメッセージ",
+            "BTN_APPLY": "分割実施ボタン文言",
+            "BTN_DELETE": "削除ボタン文言",
+            "BTN_CANCEL": "キャンセルボタン文言",
+            "CTX_DELETE": "右クリックメニューの削除文言",
+            "SHOW_DUPLICATE_LIST": "true のとき重複ファイル一覧を表示",
+            "MAX_LIST_ITEMS": "一覧表示上限。超過分は『他 n 件』表示",
+            "RENAME_COLUMN_TITLE": "重複一覧の変更名列タイトル",
+            "NOTICE_OVERWRITE_AFTER_RENAME": "変更後名が既存と重複する場合は上書きされる旨の説明文"
+          }
+        }
+      },
+      "SCREENS": {
+        "PROGRESS": "進捗画面。TITLE, TOOLTIP, WINDOW",
+        "DONE": "完了通知。LIST_TRUNCATE_NAMES, LIST_HORIZONTAL_SCROLL, LIST_NAME_COL_CHARS, LIST_MIN_HEIGHT, LIST_MAX_HEIGHT(0=縦は内容に合わせる), LIST_STRETCH_BEFORE_BUTTONS, 他 TITLE, MSG_HEADER, LIST_COLUMNS, WINDOW 等",
+        "WARNING": "ワーニング。TITLE, MSG, ICON(種類), ICON_SIZE(S/M/L), BTN_OK, BTN_OK_TOOLTIP, WINDOW"
+      }
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "WINDOW": {
+    "RESIZABLE": true,
+    "SHOW_MINIMIZE": true,
+    "SHOW_MAXIMIZE": true,
+    "STARTUP_POSITION": "center",
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "DEFAULT_WIDTH": 560,
+    "DEFAULT_HEIGHT": 420,
+    "TOPMOST": false
+  },
+  "MAIN": {
+    "WINDOW": {
+      "RESIZABLE": true,
+      "SHOW_MINIMIZE": true,
+      "SHOW_MAXIMIZE": true,
+      "STARTUP_POSITION": "center",
+      "CENTER_ON_EXCEL": true,
+      "SHOW_IN_TASKBAR": false,
+      "DEFAULT_WIDTH": 400,
+      "DEFAULT_HEIGHT": 320,
+      "TOPMOST": false
+    },
+    "TITLE": "ファイル分割",
+    "DESC": "アクティブシートの選択行を境界に分割し、各範囲を CSV で保存します。",
+    "DESC_VISIBLE": true,
+    "TABLE": {
+      "TOOLTIP": "分割範囲の一覧です。分割開始行・分割終了行のみ編集できます。行数は自動計算されます。",
+      "COLUMNS": [
+        {
+          "key": "no",
+          "title": "No",
+          "width": 30
+        },
+        {
+          "key": "file_name",
+          "title": "保存ファイル名",
+          "width": 150
+        },
+        {
+          "key": "start_row",
+          "title": "分割開始行",
+          "width": 65
+        },
+        {
+          "key": "end_row",
+          "title": "分割終了行",
+          "width": 65
+        },
+        {
+          "key": "row_count",
+          "title": "分割行数",
+          "width": 60
+        }
+      ]
+    },
+    "DIALOG_BUTTONS": {
+      "LEFT": [
+        {
+          "id": "add",
+          "label": "追加",
+          "tooltip": "分割行を1行追加します。追加された行は開始行・終了行を入力してください。"
+        },
+        {
+          "id": "remove",
+          "label": "削減",
+          "tooltip": "最後の分割行を削除します。"
+        }
+      ],
+      "RIGHT": [
+        {
+          "id": "start",
+          "label": "分割開始",
+          "tooltip": "保存先を指定し、分割ファイルを保存します。"
+        },
+        {
+          "id": "cancel",
+          "label": "キャンセル",
+          "tooltip": "分割画面を閉じて Excel に戻ります。"
+        }
+      ]
+    },
+    "DIALOGS": {
+      "FOLDER": {
+        "TITLE": "保存先フォルダを選択してください",
+        "DEFAULT_BASE_FILENAME": "",
+        "USE_NATIVE": false,
+        "WINDOW": {
+          "DEFAULT_WIDTH": 660,
+          "DEFAULT_HEIGHT": 400,
+          "TOPMOST": false
+        },
+        "SPLIT_SIZES": [
+          250,
+          420
+        ],
+        "LIST_COLUMN_WIDTHS": [
+          180,
+          80,
+          0,
+          100
+        ]
+      }
+    },
+    "CONFLICT": {
+      "ENABLED": true,
+      "WHEN_EXISTS": "ask",
+      "RENAME_SUFFIX_FORMAT": "_{n}",
+      "RENAME_START_INDEX": 1,
+      "RENAME_MAX_TRIES": 9999,
+      "ASK_DIALOG": {
+        "TITLE": "同名ファイルの確認",
+        "MSG": "保存先に同名ファイルが存在します。\n変更後ファイル名を確認し、不要な行は削除してから分割実施してください。",
+        "BTN_APPLY": "分割実施",
+        "BTN_DELETE": "削除",
+        "BTN_CANCEL": "キャンセル",
+        "CTX_DELETE": "削除",
+        "SHOW_DUPLICATE_LIST": true,
+        "MAX_LIST_ITEMS": 10,
+        "RENAME_COLUMN_TITLE": "変更後ファイル名",
+        "NOTICE_OVERWRITE_AFTER_RENAME": "※ 変更後ファイル名が既存ファイルと重複する場合は上書き保存されます。"
+      }
+    }
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "ファイル分割 進捗",
+      "TOOLTIP": "分割ファイルを保存しています。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": true
+      }
+    },
+    "DONE": {
+      "TITLE": "ファイル分割 完了",
+      "MSG_HEADER": "ファイル分割が完了しました。",
+      "MSG_COUNT_PREFIX": "保存ファイル数：",
+      "MSG_OUTPUT_DIR_PREFIX": "保存フォルダ：",
+      "MSG_TOTAL_ROWS_PREFIX": "総行数：",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "LIST_SPACING": 0,
+      "LIST_BG_SAME_AS_WINDOW": true,
+      "LIST_COLUMNS": [
+        "name",
+        "rows",
+        "size"
+      ],
+      "LIST_TRUNCATE_NAMES": false,
+      "LIST_HORIZONTAL_SCROLL": true,
+      "LIST_NAME_COL_CHARS": 48,
+      "LIST_MAX_HEIGHT": 0,
+      "LIST_STRETCH_BEFORE_BUTTONS": false,
+      "LIST_SIZE_UNIT": "auto",
+      "LIST_SIZE_DECIMALS": 1,
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 0,
+        "DEFAULT_HEIGHT": 0,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "WARNING": {
+      "TITLE": "ファイル分割",
+      "MSG": "Excelシート内のデータが不足しています。\n（２行以上・１列以上必要）",
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "閉じる",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 210,
+        "DEFAULT_HEIGHT": 180,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    }
+  }
+}

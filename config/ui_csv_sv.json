@@ -1,0 +1,103 @@
+{
+  "_header": {
+    "File": "ui_csv_sv.json",
+    "Function": "CSV保存",
+    "Created": "2026-03-05",
+    "Updated": "2026-04-07",
+    "Shared_UI": "ファイル保存は ui_qt.ui_fil。データなし時ワーニングは ui_qt.ui_common.create_warning_dialog。",
+    "Setting_details": {
+      "WINDOW": {
+        "説明": "ウィンドウ共通（将来の親子・中央配置用）。",
+        "CENTER_ON_EXCEL": "Excelウィンドウを基準に中央配置。true/false",
+        "SHOW_IN_TASKBAR": "タスクバーに表示するか。true/false",
+        "TOPMOST": false
+      },
+      "MAIN": {
+        "説明": "ファイル「名前を付けて保存」ダイアログの設定。",
+        "TITLE": "ダイアログのタイトル",
+        "FILTER": "ファイル種別フィルタ。例: CSVファイル (*.csv);;すべてのファイル (*.*)"
+      },
+      "SCREENS": {
+        "説明": "サブ画面（進捗・完了通知・ワーニング）。",
+        "DONE": "保存完了通知。csv_ld と同様の情報（シート名・ファイル名・容量・行数）を表示。",
+        "WARNING": "データなし時ワーニング。TITLE, MSG, ICON, ICON_SIZE, BTN_OK, WINDOW。",
+        "PROGRESS": {
+          "説明": "CSV保存の進捗画面。前面表示はExcelのみ（TOPMOST false で他アプリの上に出ない）。",
+          "TITLE": "CSV保存 進捗",
+          "TOOLTIP": "CSVを保存しています。",
+          "WINDOW": {
+            "RESIZABLE": false,
+            "SHOW_MINIMIZE": false,
+            "SHOW_MAXIMIZE": false,
+            "DEFAULT_WIDTH": 400,
+            "DEFAULT_HEIGHT": 120,
+            "CENTER_ON_EXCEL": true,
+            "SHOW_IN_TASKBAR": false,
+            "SHOW_CLOSE_BUTTON": false,
+            "TOPMOST": false
+          }
+        }
+      }
+    }
+  },
+  "_separator": "------------------- 以下、設定本体 -------------------",
+  "WINDOW": {
+    "CENTER_ON_EXCEL": true,
+    "SHOW_IN_TASKBAR": false,
+    "TOPMOST": false
+  },
+  "MAIN": {
+    "TITLE": "名前を付けてCSVを保存",
+    "FILTER": "CSVファイル (*.csv);;すべてのファイル (*.*)"
+  },
+  "SCREENS": {
+    "WARNING": {
+      "TITLE": "CSV保存",
+      "MSG": "Excelシートに有効なデータがありません。\n（1行以上・1列以上のデータが必要です）",
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 380,
+        "DEFAULT_HEIGHT": 140,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    },
+    "PROGRESS": {
+      "TITLE": "CSV保存 進捗",
+      "TOOLTIP": "CSVを保存しています。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": true
+      }
+    },
+    "DONE": {
+      "TITLE": "CSV保存 完了",
+      "MSG_HEADER": "保存が完了しました。",
+      "ICON": "Information",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 250,
+        "DEFAULT_HEIGHT": 200,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": false
+      }
+    }
+  }
+}

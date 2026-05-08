@@ -1,0 +1,73 @@
+{
+  "_header": {
+    "File": "ui_dt_ymd.json",
+    "Function": "日付変換 YYYY/MM/DD",
+    "Shared_UI": "進捗は ui_common.create_progress_dialog。完了通知は SCREENS.DONE、警告は WARNING。",
+    "DONE_WARNING_WINDOW": "画面制御は SCREENS.DONE（または WARNING）の WINDOW に書くほか、ルート WINDOW と MAIN.WINDOW が merge_screen_cfg_window_from_root で SCREENS の WINDOW に深マージされ apply_window_config に渡る。SHOW_IN_TASKBAR 既定 false。CENTER_ON_EXCEL 既定 true。TOPMOST・EXCEL_FRONT_FOLLOW で前面化。"
+  },
+  "_separator": "-------------------",
+  "MAIN": {},
+  "MESSAGES": {
+    "PHASE_READ": "Excelデータを読み込み中...",
+    "PHASE_ANALYZE": "日付パターンを詳細解析中...",
+    "PHASE_WRITE": "加工結果をセルへ反映中...",
+    "STATUS_DONE": "日付変換完了\n走査: {scanned:,} 行\n変換: {count:,} 件",
+    "WARNING_NOT_DATE": "選択範囲に日付形式のセルがありません。変換を実行しませんでした。",
+    "NO_SELECTION": "選択範囲がありません。",
+    "ERROR_PREFIX": "ERROR: 日付変換不全",
+    "PROGRESS_CUSTOM_READ": "読込中",
+    "PROGRESS_CUSTOM_ANALYZE": "演算中",
+    "PROGRESS_CUSTOM_WRITE": "書込中"
+  },
+  "SCREENS": {
+    "PROGRESS": {
+      "TITLE": "日付変換 (YYYY/MM/DD)",
+      "TOOLTIP": "選択範囲の日付を YYYY/MM/DD 形式に変換しています。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 400,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "SHOW_CLOSE_BUTTON": false,
+        "TOPMOST": true
+      }
+    },
+    "DONE": {
+      "TITLE": "日付変換",
+      "ICON": "Information",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "WARNING": {
+      "TITLE": "日付変換",
+      "ICON": "Warning",
+      "ICON_SIZE": "M",
+      "BTN_OK": "OK",
+      "BTN_OK_TOOLTIP": "閉じて Excel に戻ります。",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 360,
+        "DEFAULT_HEIGHT": 120,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    }
+  }
+}

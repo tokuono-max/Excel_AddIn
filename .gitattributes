@@ -1,0 +1,10 @@
+# Default: let Git detect text vs binary
+* text=auto
+
+# CRLF: Windows PowerShell 5.1 のパーサは LF のみの .ps1 で誤解析することがある
+*.ps1 text eol=crlf
+
+# CRLF: cmd / インストーラ系
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.iss text eol=crlf
