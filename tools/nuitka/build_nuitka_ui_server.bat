@@ -52,6 +52,8 @@ rem nofollow: UI does not bundle polars pandas numpy scipy.
   --enable-plugin=pyside6 ^
   --include-package=ui_qt ^
   --include-package=core ^
+  --include-module=svc.data_agg_cancel ^
+  --include-module=svc.svc_data_agg_write ^
   --nofollow-import-to=polars,pandas,numpy,scipy ^
   --noinclude-qt-translations ^
   --noinclude-qt-plugins=mediaservice ^

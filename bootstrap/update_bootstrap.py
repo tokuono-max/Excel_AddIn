@@ -674,11 +674,22 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     try:
                         pending["retry"] = {"patch_retry_in_run": i + 1, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "", "last_error_message": "", "last_failed_at": ""}
                         write_pending(paths, pending)
-                        mz, mclean, mstats, merr = materialize_manifest_patch_zip(
-                            install_root=install_root,
-                            patch_zip=patch_path,
-                            target_bin_version=target_bin,
-                        )
+                        t_mat0 = time.perf_counter()
+                        try:
+                            mz, mclean, mstats, merr = materialize_manifest_patch_zip(
+                                install_root=install_root,
+                                patch_zip=patch_path,
+                                target_bin_version=target_bin,
+                            )
+                        finally:
+                            sec = time.perf_counter() - t_mat0
+                            _tm = int(round(sec * 1000))
+                            _h, _r = divmod(_tm, 3600000)
+                            _m, _r = divmod(_r, 60000)
+                            _s, _ms = divmod(_r, 1000)
+                            msg = f"[et {_h:d}:{_m:02d}:{_s:02d}.{_ms:03d}]  patch materialize zip={patch_path.name}"
+                            _append(paths.log_path, msg)
+                            print(msg, flush=True)
                         if mstats is not None:
                             _append(paths.log_path, f"patch materialize ok stats={mstats}")
                         elif merr:

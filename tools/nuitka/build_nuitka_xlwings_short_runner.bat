@@ -36,8 +36,10 @@ if /i "%NUITKA_REMOVE_OUTPUT%"=="1" set "REMOVE_OUTPUT=--remove-output"
 echo [Nuitka] xlwings_short_runner -^> %NUITKA_OUT%  jobs=%NUITKA_JOBS%
 echo [Nuitka] Log file: %LOGFILE%
 rem Ensure short runner bundles project packages used by script snippets.
+rem svc_host (included) can import bootstrap.update_bootstrap for pending apply; tkinter needs tk-inter.
 "%PY%" "%~dp0nuitka_log_wrapper.py" "%LOGFILE%" xlwings_short_runner.py ^
   --standalone ^
+  --enable-plugin=tk-inter ^
   --assume-yes-for-downloads ^
   --windows-console-mode=disable ^
   --msvc=latest ^
@@ -47,6 +49,7 @@ rem Ensure short runner bundles project packages used by script snippets.
   --include-module=core.excel_session ^
   --include-module=core.shared_dll_bootstrap ^
   --include-module=svc.svc_host ^
+  --include-module=ui_qt.ipc_file ^
   --include-package=svc ^
   --include-package=core ^
   --nofollow-import-to=polars,pandas,numpy,scipy ^

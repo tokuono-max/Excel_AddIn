@@ -268,10 +268,46 @@ class ProgressDialog(QDialog):
         p = str(getattr(self, "_cancel_request_path", "") or "").strip()
         if not p:
             return
+        is_data_agg_batch = "cancel_req_data_agg_batch" in p
+        if _log is not None:
+            try:
+                _log.info(
+                    "[DATA_AGG] progress cancel clicked path=%s data_agg_batch=%s",
+                    p,
+                    is_data_agg_batch,
+                )
+            except Exception:
+                pass
+        if is_data_agg_batch:
+            try:
+                self._label_file.setText("中止しています…")
+            except Exception:
+                pass
         try:
             ipc_file.write_pickle(Path(p), {"cancel": True, "v": 1})
         except Exception:
             pass
+        if is_data_agg_batch:
+            try:
+                from svc.data_agg_cancel import force_data_agg_batch_cancel_from_ui  # noqa: WPS433
+
+                force_data_agg_batch_cancel_from_ui(
+                    cancel_path=Path(p),
+                    progress_path=getattr(self, "_progress_path", None),
+                    notify_parent=bool(self._req.get("data_agg_batch_notify_parent")),
+                    parent_hwnd=int(self._parent_hwnd or 0),
+                    scenario_id=str(self._req.get("data_agg_batch_scenario_id") or ""),
+                    scenario_path=str(self._req.get("data_agg_batch_scenario_path") or ""),
+                )
+            except Exception as _term_exc:
+                if _log is not None:
+                    try:
+                        _log.warning(
+                            "[DATA_AGG] batch force terminate failed: %s",
+                            _term_exc,
+                        )
+                    except Exception:
+                        pass
         try:
             b = getattr(self, "_btn_cancel", None)
             if b is not None:

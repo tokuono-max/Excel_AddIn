@@ -36,13 +36,20 @@
 #define MyAppName "CSV Tool"
 ; リポジトリルートの VERSION.txt と揃えること
 #define MyAppVersion "1.0.4"
-#define MyDefaultInstallDir "{autopf}\Excel_Addin\CSV_Tool"
+#define MyDefaultInstallDirUser "{localappdata}\Programs\CSV_Tool"
+#define MyDefaultInstallDirAdmin "{autopf}\CSV_Tool"
 
 ; 配布ルート（catalog.json 配置先）。互換で ...\current を指定してもよい
 ; ビルド時に上書き: ISCC の /DSHAREPAYLOAD=... または build_csv_tool_setup.bat の第 1 引数
 #ifndef SHAREPAYLOAD
 #define SHAREPAYLOAD "\\mcom\oec1\work\H05095_小野\releases\CSV_Tool"
 #endif
+
+; インストール先ページの内訳表示・ExtraDiskSpaceRequired 用（MiB）
+; 数値を変えたら DiskExtraBytes = (DiskPayloadMB+DiskWorkingMB)*1048576 を手動で一致させること
+#define DiskPayloadMB 588
+#define DiskWorkingMB 100
+#define DiskExtraBytes 721420288
 
 [Setup]
 ; 製品識別子（再インストール・アップグレード判定に使用。製品ごとに固定し変更しない）
@@ -52,6 +59,7 @@ AppPublisher=大井電気(株)
 AppVersion={#MyAppVersion}
 
 ; ウィザードで最初に表示される既定インストール先（x64 の Program Files 系 + 相対パス）
+;WizardSizePercent=150,120
 DefaultDirName={code:GetDefaultInstallDir}
 DefaultGroupName={#MyAppName}
 ; 生成 EXE の出力先（この .iss から見た相対: リポジトリの dist\）
@@ -60,8 +68,12 @@ OutputBaseFilename=CSV_Tool_Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-; 既定の Program Files 配下などに入れるため管理者権限を要求
-PrivilegesRequired=admin
+; Inno 6 既定は Welcome 非表示。配布セットバージョンを Welcome に出すため明示的に有効化。
+DisableWelcomePage=no
+; 既定は Current user（非昇格）。All users を選んだ場合のみ UAC 昇格を許可する。
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+UsePreviousPrivileges=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
@@ -70,16 +82,24 @@ ChangesEnvironment=yes
 UninstallDisplayIcon={app}\app\bin\hc_main.ico
 ; 薄いインストーラは [Files] でペイロードを持たないため、初回は {app} が空でも警告しない
 UsePreviousAppDir=no
+; 薄いインストーラのため [Files] ベースの必要容量表示は過小。
+; 実容量 + 作業容量（展開・コピー時の余裕）をバイトで上乗せ（内訳は SelectDir のカスタムラベル）。
+ExtraDiskSpaceRequired={#DiskExtraBytes}
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
 [Registry]
-; ユーザー環境変数（§1.3–1.4・docs\environment_variables.md）
-Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_INSTALL_ROOT"; ValueData: "{app}"; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_PACKAGED_DEPLOYMENT"; ValueData: "1"; Flags: uninsdeletevalue
-; 配布ルート（catalog.json の既定参照先）。値の算出は [Code] GetDeployRoot
-Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_DEPLOY_ROOT"; ValueData: "{code:GetDeployRoot}"; Flags: uninsdeletevalue
+; 環境変数（docs\environment_variables.md）
+; - Current user: HKCU\Environment
+; - All users:   HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_INSTALL_ROOT"; ValueData: "{app}"; Flags: uninsdeletevalue; Check: not IsAdminInstallMode
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_PACKAGED_DEPLOYMENT"; ValueData: "1"; Flags: uninsdeletevalue; Check: not IsAdminInstallMode
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "HC_DEPLOY_ROOT"; ValueData: "{code:GetDeployRoot}"; Flags: uninsdeletevalue; Check: not IsAdminInstallMode
+
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "HC_INSTALL_ROOT"; ValueData: "{app}"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "HC_PACKAGED_DEPLOYMENT"; ValueData: "1"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "HC_DEPLOY_ROOT"; ValueData: "{code:GetDeployRoot}"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
 
 [Icons]
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -99,6 +119,9 @@ var
   SetupIniPathCache: String;
   SetupIniDeployRoot: String;
   SetupIniInstallDir: String;
+  CatalogSetVersionForUi: String;
+  SelectDirSetVersionLabel: TNewStaticText;
+  SelectDirDiskBreakdownLabel: TNewStaticText;
 
 function TrimAndNormalizePath(const S: String): String;
 begin
@@ -153,14 +176,19 @@ begin
   if SetupIniInstallDir <> '' then
     Result := SetupIniInstallDir
   else
-    Result := ExpandConstant('{#MyDefaultInstallDir}');
+  begin
+    if IsAdminInstallMode then
+      Result := ExpandConstant('{#MyDefaultInstallDirAdmin}')
+    else
+      Result := ExpandConstant('{#MyDefaultInstallDirUser}');
+  end;
 end;
 
 procedure ProgressUpdate(const Status: String; Position, Max: Integer);
 begin
   if InstallProgressPage <> nil then
   begin
-    InstallProgressPage.SetText('初回導入 payload を適用中です。しばらくお待ちください。', Status);
+    InstallProgressPage.SetText('初回インストール 配布ファイルを適用中です。しばらくお待ちください。', Status);
     InstallProgressPage.SetProgress(Position, Max);
   end;
 end;
@@ -496,6 +524,31 @@ begin
     Result := '';
 end;
 
+function TryLoadCatalogSetVersionForUi(const DeployRoot: String; var SetVersion: String): Boolean;
+var
+  CatalogPath: String;
+  Raw: AnsiString;
+begin
+  Result := False;
+  SetVersion := '';
+  CatalogPath := AddBackslash(DeployRoot) + 'catalog.json';
+  if not LoadStringFromFile(CatalogPath, Raw) then
+  begin
+    Log('UI set_version load skipped: catalog.json not readable: ' + CatalogPath);
+    Exit;
+  end;
+
+  { catalog の文字列をそのまま表示（X.Y.Z / X.Y.Z.N など） }
+  SetVersion := Trim(JsonExtractSetVersion(String(Raw)));
+  if SetVersion = '' then
+  begin
+    Log('UI set_version load skipped: empty set_version in catalog.json');
+    Exit;
+  end;
+
+  Result := True;
+end;
+
 function NormalizeBootstrapVersion(const RawVersion: String): String;
 var
   I, StartPos, Count: Integer;
@@ -673,10 +726,176 @@ begin
     Log('Uninstall parent dir cleanup skipped: not found: ' + ParentDir);
     Exit;
   end;
+  { 任意パス（例: C:\Work\CSV_Tool）で親フォルダを消す事故を避けるため、親削除は legacy のみ許可 }
+  if CompareText(ExtractFileName(ParentDir), 'Excel_Addin') <> 0 then
+  begin
+    Log('Uninstall parent dir cleanup skipped: not legacy parent dir: ' + ParentDir);
+    Exit;
+  end;
   if RemoveDir(ParentDir) then
     Log('Uninstall parent dir cleanup removed: ' + ParentDir)
   else
     Log('Uninstall parent dir cleanup skipped: directory not empty or locked: ' + ParentDir);
+end;
+
+function NormLowerPath(const P: String): String;
+var
+  S: String;
+begin
+  S := Trim(P);
+  if S = '' then
+  begin
+    Result := '';
+    Exit;
+  end;
+  { normalize slashes }
+  StringChangeEx(S, '/', '\', True);
+  { ensure trailing backslash for prefix checks }
+  if (Length(S) > 0) and (S[Length(S)] <> '\') then
+    S := S + '\';
+  Result := Lowercase(S);
+end;
+
+function IsDriveRootPath(const P: String): Boolean;
+var
+  S: String;
+begin
+  S := Trim(P);
+  StringChangeEx(S, '/', '\', True);
+  Result := (Length(S) = 3) and (S[2] = ':') and (S[3] = '\');
+end;
+
+function StartsWithLower(const FullLower, PrefixLower: String): Boolean;
+begin
+  Result := (PrefixLower <> '') and (Copy(FullLower, 1, Length(PrefixLower)) = PrefixLower);
+end;
+
+function ValidateSelectedDir(SelectedDir: String): Boolean;
+var
+  sel, commonPf, commonPf32, win, sys, tmp: String;
+begin
+  Result := True;
+  if SelectedDir = '' then
+    Exit;
+
+  if IsDriveRootPath(SelectedDir) then
+  begin
+    MsgBox('ドライブ直下（例: C:\）は選択できません。'#13#10 + SelectedDir, mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  sel := NormLowerPath(SelectedDir);
+  // Program Files 判定は常に共通（machine）側を使う。
+  // {autopf} は install mode により user/local 側へ解決され得るため誤判定の原因になる。
+  commonPf := NormLowerPath(ExpandConstant('{commonpf}'));
+  commonPf32 := NormLowerPath(ExpandConstant('{commonpf32}'));
+  win := NormLowerPath(ExpandConstant('{win}'));
+  sys := NormLowerPath(ExpandConstant('{sys}'));
+  tmp := NormLowerPath(ExpandConstant('{tmp}'));
+
+  { Current user（非昇格）では Program Files を禁止 }
+  if (not IsAdminInstallMode) and (StartsWithLower(sel, commonPf) or StartsWithLower(sel, commonPf32)) then
+  begin
+    MsgBox(
+      'Current user（非管理者）では Program Files 配下は選択できません。'#13#10 +
+      'All users（管理者）を選択するか、ユーザー領域（例: %LOCALAPPDATA%\Programs）を指定してください。'#13#10#13#10 +
+      SelectedDir,
+      mbError, MB_OK
+    );
+    Result := False;
+    Exit;
+  end;
+
+  { 危険パスは拒否（自由度は残しつつ最低限のみ） }
+  if StartsWithLower(sel, win) or StartsWithLower(sel, sys) then
+  begin
+    MsgBox('Windows/System フォルダ配下は選択できません。'#13#10 + SelectedDir, mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  if StartsWithLower(sel, tmp) then
+  begin
+    MsgBox('一時フォルダ配下は選択できません。'#13#10 + SelectedDir, mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID = wpSelectDir then
+    Result := ValidateSelectedDir(WizardDirValue);
+end;
+
+procedure UpdateSelectDirSetVersionLabel;
+var
+  W: Integer;
+begin
+  { PageDescription はページ表示後に Inno が再セットするため上書きに負ける。
+    SelectDirPage 専用ラベルで配布バージョンを出す }
+  if SelectDirSetVersionLabel = nil then
+    Exit;
+  if CatalogSetVersionForUi = '' then
+  begin
+    SelectDirSetVersionLabel.Visible := False;
+    Exit;
+  end;
+  W := WizardForm.DirBrowseButton.Left + WizardForm.DirBrowseButton.Width - WizardForm.DirEdit.Left;
+  if W < ScaleX(100) then
+    W := ScaleX(320);
+  SelectDirSetVersionLabel.Caption := '配布セットバージョン: ' + CatalogSetVersionForUi;
+  SelectDirSetVersionLabel.Left := WizardForm.DirEdit.Left;
+  SelectDirSetVersionLabel.Top := WizardForm.DirEdit.Top + WizardForm.DirEdit.Height + ScaleY(10);
+  SelectDirSetVersionLabel.Width := W;
+  SelectDirSetVersionLabel.Height := ScaleY(40);
+  SelectDirSetVersionLabel.Visible := True;
+  SelectDirSetVersionLabel.AdjustHeight;
+end;
+
+procedure UpdateSelectDirDiskBreakdownLabel;
+var
+  PayloadMB, WorkingMB: Integer;
+  H: Integer;
+begin
+  if SelectDirDiskBreakdownLabel = nil then
+    Exit;
+  PayloadMB := StrToIntDef(ExpandConstant('{#DiskPayloadMB}'), 588);
+  WorkingMB := StrToIntDef(ExpandConstant('{#DiskWorkingMB}'), 100);
+  SelectDirDiskBreakdownLabel.Caption :=
+    '実容量(' + IntToStr(PayloadMB) + ' MB) + 作業容量(' + IntToStr(WorkingMB) + ' MB)';
+  SelectDirDiskBreakdownLabel.Left := WizardForm.DiskSpaceLabel.Left;
+  SelectDirDiskBreakdownLabel.Width := WizardForm.DiskSpaceLabel.Width;
+  SelectDirDiskBreakdownLabel.WordWrap := True;
+  SelectDirDiskBreakdownLabel.AdjustHeight;
+  H := SelectDirDiskBreakdownLabel.Height;
+  SelectDirDiskBreakdownLabel.Top := WizardForm.DiskSpaceLabel.Top - H - ScaleY(6);
+  SelectDirDiskBreakdownLabel.Visible := True;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpSelectDir then
+  begin
+    if CatalogSetVersionForUi = '' then
+    begin
+      if SelectDirSetVersionLabel <> nil then
+        SelectDirSetVersionLabel.Visible := False;
+    end
+    else
+      UpdateSelectDirSetVersionLabel;
+    UpdateSelectDirDiskBreakdownLabel;
+    Exit;
+  end;
+
+  if (CurPageID = wpReady) and (CatalogSetVersionForUi <> '') then
+  begin
+    if Pos('配布セットバージョン:', WizardForm.ReadyMemo.Text) = 0 then
+      WizardForm.ReadyMemo.Text :=
+        WizardForm.ReadyMemo.Text + #13#10#13#10 +
+        '配布セットバージョン: ' + CatalogSetVersionForUi;
+  end;
 end;
 
 function InitializeSetup: Boolean;
@@ -723,9 +942,40 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  DeployRoot, SetVersion: String;
 begin
   InstallProgressPage :=
     CreateOutputProgressPage('CSV Tool セットアップ', 'インストール後半の処理を実行しています。');
+
+  CatalogSetVersionForUi := '';
+  try
+    DeployRoot := GetDeployRoot('');
+    if (DeployRoot <> '') and TryLoadCatalogSetVersionForUi(DeployRoot, SetVersion) then
+    begin
+      CatalogSetVersionForUi := SetVersion;
+      WizardForm.WelcomeLabel2.Caption :=
+        WizardForm.WelcomeLabel2.Caption + #13#10#13#10 +
+        '配布セットバージョン: ' + CatalogSetVersionForUi;
+      WizardForm.Caption := WizardForm.Caption + ' （配布 ' + CatalogSetVersionForUi + '）';
+      Log('UI set_version caption appended: ' + CatalogSetVersionForUi);
+    end;
+  except
+    Log('UI set_version caption append failed: ' + GetExceptionMessage);
+  end;
+
+  SelectDirSetVersionLabel := TNewStaticText.Create(WizardForm);
+  SelectDirSetVersionLabel.Parent := WizardForm.SelectDirPage;
+  SelectDirSetVersionLabel.WordWrap := True;
+  SelectDirSetVersionLabel.Caption := '';
+  SelectDirSetVersionLabel.Visible := False;
+
+  SelectDirDiskBreakdownLabel := TNewStaticText.Create(WizardForm);
+  SelectDirDiskBreakdownLabel.Parent := WizardForm.SelectDirPage;
+  SelectDirDiskBreakdownLabel.WordWrap := True;
+  SelectDirDiskBreakdownLabel.Font.Color := clGray;
+  SelectDirDiskBreakdownLabel.Caption := '';
+  SelectDirDiskBreakdownLabel.Visible := False;
 end;
 
 // {app}\addin\xlwings.conf を生成（互換のため {app}\xlwings.conf にも出力）
@@ -812,7 +1062,7 @@ begin
     except
       Log('DeployByCatalog failed: ' + GetExceptionMessage);
       MsgBox(
-        'catalog.json から初回導入 payload を取得できませんでした。'#13#10 +
+        'catalog.json から初回導入 配布ファイルを取得できませんでした。'#13#10 +
         'インストールを中断します。'#13#10#13#10 +
         '配布ルート: ' + DeployRoot,
         mbError, MB_OK

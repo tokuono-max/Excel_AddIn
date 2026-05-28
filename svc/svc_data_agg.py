@@ -3,15 +3,22 @@
 Python: 3.12+
 Module: svc/svc_data_agg.py
 Created: 2026-03-18
-Updated: 2026-04-09
-Version: 0.4.1
+Updated: 2026-05-13
+Version: 0.4.7
 Purpose:
   データ集約・クレンジング。シナリオの保存・読込、ステップ実行（動作確認）、一括実行のオーケストレーション。
   画面は ui_qt.ui_data_agg + config/ui_data_agg.json。走査・シナリオ・抽出・書き込みはサブモジュールに分離する。
 History (latest 3):
+  - 0.4.9 (2026-05-28) 本番一括キャンセル: ポール無間隔・結合プール走査・Excel読込前・batch_cancel_scope で応答短縮。
+  - 0.4.8 (2026-05-28) 本番一括キャンセル: 押下・検知ログ、ポール 50ms、項目抽出・結合ループ内チェック、進捗「中止しています…」。
+  - 0.4.7 (2026-05-28) 本番一括: 進捗キャンセル（走査・集約計算、中止フラグ IPC）。途中データ破棄・STATUS_CANCEL 通知。
+  - 0.4.6 (2026-05-28) マスタプレビュー: file_pattern 複数時は OR 絞込（横断結合）。一括完了時は sheet_out を activate。
+  - 0.4.5 (2026-05-28) 結合キー代入: 横断結合・n_prim==1 は値一致行すべてへ書込み。同一ファイルの n_prim==n_join>1 のみ __iter_index==k。
+  - 0.4.4 (2026-05-27) 結合キー検索: 全ファイル走査後に結合→表化。スライス k は __iter_index==k で書込み。横断/同一ファイルのプール分離。結合ソース専用行の出力除外。
+  - 0.4.3 (2026-05-16) 結合キー検索: 主キー書込みと同一一致行へ link_defs を再適用（波及抑制 G1–G5）。
+  - 0.4.2 (2026-05-13) 照合キー結合フレームに連携先列を含め最終表へ反映。連携代入を merge_cell_for_write_mode＋当該項目 write_mode に統一（固定値空欄も有効）。
   - 0.4.1 (2026-04-09) main/progress/done/step_popup の IPC に excel_rect（Excel HWND の GetWindowRect）を付与。結合機能と同様の送信時点中央寄せ基準に統一。
   - 0.4.0 (2026-04-07) 進捗説明から「（ファイル i/n）」を削除。progress_hook に file_index, n_files を追加（後方互換 TypeError）。
-  - 0.3.9 (2026-04-07) 一括終了通知の処理時間をレポート「処理時間」列の total_ms と同一にする（elapsed_ms 明示）。
   - 0.3.8 (2026-04-07) 一括完了メッセージ末尾に wall 処理時間。レポートシートに「処理時間」列（サマリ行に出力）。
   - 0.3.7 (2026-04-07) 結合検索モード: 自列への主値先詰めをやめ不一致行への主値残りを防止。結合比較・書込みでスカラーをフル文字列化。
   - 0.3.6 (2026-04-07) HC_DIAG_DATA_AGG_JOIN: 結合キー検索書込みの [DATA_AGG_JOIN_DUMP] 診断ログ。
@@ -33,7 +40,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 _path_svc = Path(__file__).resolve().parent
 _root = _path_svc.parent
@@ -43,11 +50,13 @@ if str(_root) not in sys.path:
 from core.core_log import get_data_agg_diag_logger, get_logger  # noqa: E402
 from svc.data_agg_path_norm import normalize_source_path, path_is_under_directory  # noqa: E402
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
+from svc.data_agg_cancel import DataAggCancelled  # noqa: E402
 from svc.data_agg_value_post import _coerce_cell_scalar_to_full_text  # noqa: E402
+from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
 
 logger = get_logger(__name__)
 _agg_diag = get_data_agg_diag_logger()
-__version__ = "0.4.1"
+__version__ = "0.4.9"
 
 # data_agg_master_preview.MASTER_PREVIEW_DIAG_SOURCE と同一（循環 import 避け）
 _MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
@@ -67,17 +76,76 @@ def _master_preview_item_cap_idx(debug_diag: Any) -> int | None:
         return cap
     return None
 
+cst: Any = None
 try:
-    from core import core_cst as cst
+    from core import core_cst as _core_cst
+    cst = _core_cst
 except Exception:
-    cst = None  # type: ignore
+    pass
 
+get_ipc_root: Callable[[], Path] | None = None
+get_request_dir: Callable[[], Path] | None = None
+write_pickle: Callable[[Path, Any], None] | None = None
 try:
-    from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle  # noqa: E402
+    from ui_qt.ipc_file import (  # noqa: E402
+        get_ipc_root as _get_ipc_root_fn,
+        get_request_dir as _get_request_dir_fn,
+        write_pickle as _write_pickle_fn,
+    )
+    get_ipc_root = _get_ipc_root_fn
+    get_request_dir = _get_request_dir_fn
+    write_pickle = _write_pickle_fn
 except Exception:
-    get_ipc_root = None  # type: ignore[assignment,misc]
-    get_request_dir = None  # type: ignore
-    write_pickle = None  # type: ignore
+    pass
+
+
+def _require_ipc_root() -> Path:
+    """IPC ルート取得。型チェッカー向けに Optional 呼び出しをここに集約。"""
+    if get_ipc_root is None:
+        raise RuntimeError("IPC root unavailable")
+    return Path(get_ipc_root())
+
+
+def _batch_active_path(sheet_id: str, ipc_root: Path) -> Path:
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    sid = str(sheet_id or "").strip() or "default"
+    return d / ("data_agg_batch_active_%s.pkl" % sid)
+
+
+def _read_active_batch_run_id(sheet_id: str, ipc_root: Path) -> str:
+    try:
+        from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+        d = read_pickle(_batch_active_path(sheet_id, ipc_root))
+        if isinstance(d, dict):
+            return str(d.get("run_id") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _clear_active_batch_run_if_current(sheet_id: str, ipc_root: Path, run_id: str) -> None:
+    rid = str(run_id or "").strip()
+    if not rid:
+        return
+    try:
+        p = _batch_active_path(sheet_id, ipc_root)
+        from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+        d = read_pickle(p)
+        if isinstance(d, dict) and str(d.get("run_id") or "").strip() != rid:
+            return
+        p.unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            p = _batch_active_path(sheet_id, ipc_root)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -133,7 +201,7 @@ def _log_data_agg_ui_ipc(
     ipc = ""
     try:
         if get_ipc_root is not None:
-            ipc = str(Path(get_ipc_root()).resolve())
+            ipc = str(_require_ipc_root().resolve())
     except Exception:
         ipc = ""
     suffix = (" " + detail.strip()) if (detail and detail.strip()) else ""
@@ -235,12 +303,18 @@ def _assign_series_to_rows_by_context(
     values: list[Any],
     contexts: list[dict[str, Any]],
     file_path: str,
+    *,
+    write_mode: str = "fill_in",
 ) -> None:
     """
     file_path + iter_index で 1:1 マッチする行にのみ値を割り当てる。
     一致するコンテキストがない値は無視し、不足行は空欄のままにする。
+    write_mode: 連携キー代入に用いる（当該項目の主キー書込みモードと同一キーを渡す）。
+    空文字列も new として merge_cell_for_write_mode に渡す（固定値空欄を有効値として扱う）。
     """
-    if not rows or not values or not contexts:
+    if not rows or not contexts:
+        return
+    if not values:
         return
     by_key: dict[tuple[str, int], Any] = {}
     n = min(len(values), len(contexts))
@@ -254,6 +328,7 @@ def _assign_series_to_rows_by_context(
         key = (fp, ix)
         if key not in by_key:
             by_key[key] = values[i]
+    wm = str(write_mode or "fill_in").strip().lower() or "fill_in"
     for row in rows:
         rfp = str(row.get("__file_path") or file_path)
         try:
@@ -261,8 +336,11 @@ def _assign_series_to_rows_by_context(
         except (TypeError, ValueError):
             rix = 0
         key = (rfp, rix)
-        if key in by_key and (column_name not in row or row.get(column_name) in (None, "")):
-            row[column_name] = by_key[key]
+        if key not in by_key:
+            continue
+        new_v = by_key[key]
+        old_v = row.get(column_name)
+        row[column_name] = merge_cell_for_write_mode(old_v, new_v, wm)
 
 
 def _merge_rows_by_join_keys(
@@ -273,8 +351,11 @@ def _merge_rows_by_join_keys(
     if not join_key_names:
         return rows
     merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    from svc.data_agg_cancel import poll_active_cancel_every  # noqa: WPS433
+
     order: list[tuple[Any, ...]] = []
-    for row in rows:
+    for ri, row in enumerate(rows):
+        poll_active_cancel_every(ri, stride=32)
         raw_key = tuple(row.get(k) for k in join_key_names)
         fp = str(row.get("__file_path") or "")
         try:
@@ -283,6 +364,7 @@ def _merge_rows_by_join_keys(
             ix = 0
         # 反復単位での誤統合を防ぐため、結合キーに file/iter を常に含める。
         # （同一 join key が複数行で現れる座標取得シナリオで行崩れしやすいため）
+        key: tuple[Any, ...]
         if any(v in (None, "") for v in raw_key):
             key = ("__row__", fp, ix, id(row))
         else:
@@ -320,6 +402,284 @@ def _item_join_defs_list(it: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(pb, dict):
                 return [x for x in (pb.get("join_defs") or []) if isinstance(x, dict)]
     return []
+
+
+def _item_link_defs_list(it: dict[str, Any]) -> list[dict[str, Any]]:
+    for src in (it.get("sources") or []):
+        if isinstance(src, dict) and (src.get("type") or "").strip().lower() == "cell":
+            pb = source_ui_block(src)
+            if isinstance(pb, dict):
+                return [x for x in (pb.get("link_defs") or []) if isinstance(x, dict)]
+    return []
+
+
+def _join_search_targets_from_defs(join_defs: list[dict[str, Any]]) -> list[str]:
+    targets: list[str] = []
+    for jd in join_defs:
+        c = str(jd.get("item") or "").strip()
+        if c and c not in targets:
+            targets.append(c)
+    return targets
+
+
+def _join_search_n_join_slices(jv: dict[str, Any], targets: list[str]) -> int:
+    lens = [len(jv.get(t) or []) if isinstance(jv.get(t), list) else 0 for t in targets]
+    return min(lens) if lens else 0
+
+
+def _row_iter_index(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("__iter_index", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_match_key_frames_by_item(
+    merged_rows: list[Any],
+    items: list[Any],
+    item_ids_ordered: list[str],
+    headers: list[str],
+    match_cols: list[str],
+    linked_hdrs: list[str],
+) -> dict[str, Any]:
+    """照合キー結合のフレームに連携先列を含める（最終表で連携値が落ちないようにする）。"""
+    frames_by_item: dict[str, Any] = {}
+    for i, _it in enumerate(items):
+        iid = item_ids_ordered[i]
+        hname = headers[i]
+        frames_by_item[iid] = []
+        for r in merged_rows:
+            if not isinstance(r, dict):
+                continue
+            row_dict: dict[str, Any] = {c: r.get(c) for c in match_cols}
+            row_dict[hname] = r.get(hname)
+            for lt in linked_hdrs:
+                if lt not in row_dict:
+                    row_dict[lt] = r.get(lt)
+            frames_by_item[iid].append(row_dict)
+    return frames_by_item
+
+
+def _item_source_file_patterns(item: dict[str, Any]) -> list[str]:
+    """セル系 sources の file_pattern（小文字）を重複なく列挙。"""
+    patterns: list[str] = []
+    for src in item.get("sources") or []:
+        if not isinstance(src, dict):
+            continue
+        if str(src.get("type") or "cell").strip().lower() != "cell":
+            continue
+        block = source_ui_block(src)
+        if isinstance(block, dict):
+            p = str(block.get("file_pattern") or "").strip().lower()
+            if p and p not in patterns:
+                patterns.append(p)
+    return patterns
+
+
+def _file_path_matches_patterns(file_path: str, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    name = Path(str(file_path)).name.lower()
+    return any(p in name for p in patterns)
+
+
+def _item_sources_pass_file(item: dict[str, Any], file_path: str) -> bool:
+    from svc import svc_data_agg_extract as extract_mod  # noqa: E402
+
+    for src in item.get("sources") or []:
+        if isinstance(src, dict) and extract_mod.source_passes_file_name_filter(file_path, src):
+            return True
+    return False
+
+
+def _patterns_overlap(a: list[str], b: list[str]) -> bool:
+    if not a or not b:
+        return True
+    for pa in a:
+        for pb in b:
+            if pa in pb or pb in pa:
+                return True
+    return False
+
+
+def _join_host_needs_cross_file_pool(
+    host_item: dict[str, Any],
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> bool:
+    """
+    結合ホストの file_pattern と、結合比較列を供給する項目の pattern が異なるとき True
+    （光特性×紐づけのようなファイル横断照合）。
+    """
+    join_targets = _join_search_targets_from_defs(_item_join_defs_list(host_item))
+    if not join_targets:
+        return False
+    host_patterns = _item_source_file_patterns(host_item)
+
+    def _patterns_differ_from_host(other_patterns: list[str]) -> bool:
+        return bool(
+            host_patterns
+            and other_patterns
+            and not _patterns_overlap(host_patterns, other_patterns)
+        )
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        h = str(it.get("name") or it.get("id") or "").strip()
+        if h not in join_targets:
+            continue
+        other = _item_source_file_patterns(it)
+        if _patterns_differ_from_host(other):
+            return True
+    # 比較列が link_defs のみで載る場合（MAC 等）
+    for jt in join_targets:
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            for src in it.get("sources") or []:
+                if not isinstance(src, dict):
+                    continue
+                block = source_ui_block(src)
+                if not isinstance(block, dict):
+                    continue
+                for ld in block.get("link_defs") or []:
+                    if str(ld.get("item") or "").strip() != jt:
+                        continue
+                    lp = _item_source_file_patterns(it)
+                    if _patterns_differ_from_host(lp):
+                        return True
+    return False
+
+
+def _join_search_pool_scope(
+    pool: list[dict[str, Any]],
+    host_file_path: str,
+    cross_file: bool,
+) -> list[dict[str, Any]]:
+    if cross_file:
+        return pool
+    hf = str(host_file_path or "")
+    if not hf:
+        return pool
+    return [r for r in pool if isinstance(r, dict) and str(r.get("__file_path") or "") == hf]
+
+
+def _narrow_join_matched_rows_for_write(
+    rows: list[dict[str, Any]],
+    k: int,
+    n_prim: int,
+    n_join: int,
+    *,
+    cross_file: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    スライス k で書き込む行を絞る。
+    cross_file または n_prim==1: 値一致した行をすべて（__iter_index で絞らない）。
+    同一ファイルで n_prim>1 かつ n_join>1: __iter_index==k のみ（縦繰りペア）。
+    """
+    if not rows:
+        return rows
+    if cross_file or n_prim == 1:
+        return rows
+    if n_prim > 1 and n_join > 1:
+        return [r for r in rows if _row_iter_index(r) == k]
+    return rows
+
+
+def _anchor_headers_for_table_output(
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> list[str]:
+    """結合ホスト以外でセル系 sources を持つ項目名（出力行判定の錨）。"""
+    out: list[str] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        if _item_join_defs_list(it):
+            continue
+        if not (it.get("sources") or []):
+            continue
+        h = headers[i] if i < len(headers) else str(it.get("name") or "")
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def _row_should_emit_to_table(
+    row: dict[str, Any],
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> bool:
+    """
+    結合ソース専用ファイルの行（紐づけのみ等）をマスタ出力から除外する。
+    錨列に値がある行、または結合ホスト file_pattern に一致しないファイルの行は残す。
+    """
+    if not isinstance(row, dict):
+        return False
+    host_patterns: list[str] = []
+    for it in items:
+        if not isinstance(it, dict) or not _item_join_defs_list(it):
+            continue
+        host_patterns.extend(_item_source_file_patterns(it))
+    if not host_patterns:
+        return True
+    fp = str(row.get("__file_path") or "")
+    if not _file_path_matches_patterns(fp, host_patterns):
+        return True
+    anchors = _anchor_headers_for_table_output(items, headers)
+    return any(row.get(ah) not in (None, "") for ah in anchors)
+
+
+def _warn_join_values_length_mismatch(
+    bundle: dict[str, Any],
+    join_defs: list[dict[str, Any]],
+    n_prim: int,
+    item_col: str,
+) -> None:
+    targets = _join_search_targets_from_defs(join_defs)
+    jv = bundle.get("join_values") or {}
+    lens = [len(jv.get(t) or []) if isinstance(jv.get(t), list) else 0 for t in targets]
+    if not lens or n_prim <= 0:
+        return
+    n_join = min(lens)
+    if n_join != n_prim:
+        try:
+            _agg_diag.warning(
+                "[DATA_AGG_WARN] join_values length mismatch item_col=%s n_prim=%s "
+                "n_join=%s lens=%s targets=%s",
+                item_col,
+                n_prim,
+                n_join,
+                lens,
+                targets,
+            )
+        except Exception:
+            pass
+
+
+def _join_search_rows_for_slice(
+    pool: list[dict[str, Any]],
+    join_defs: list[dict[str, Any]],
+    jv: dict[str, Any],
+    targets: list[str],
+    k: int,
+) -> list[dict[str, Any]]:
+    """結合キー抽出スライス k と行上の結合列を AND 照合し、一致行を返す（主キー・連携の共通スコープ）。"""
+    ex_map: dict[str, Any] = {}
+    for t in targets:
+        lst = jv.get(t) or []
+        if not isinstance(lst, list) or k >= len(lst):
+            return []
+        ex_map[t] = lst[k]
+    from svc.data_agg_cancel import poll_active_cancel_every  # noqa: WPS433
+
+    out: list[dict[str, Any]] = []
+    for ri, r in enumerate(pool):
+        poll_active_cancel_every(ri, stride=8)
+        if isinstance(r, dict) and _row_satisfies_join_and(r, join_defs, ex_map):
+            out.append(r)
+    return out
 
 
 def _join_cell_compare_norm(v: Any) -> str:
@@ -445,7 +805,9 @@ def _apply_join_key_search_write(
     bundle: dict[str, Any],
     write_mode: str,
     *,
+    search_pool: Optional[list[dict[str, Any]]] = None,
     join_dump_ctx: Optional[dict[str, Any]] = None,
+    cross_file: bool = False,
 ) -> None:
     """
     結合キー新仕様: セルから読んだ値と、表上の同一マスタ列の値を AND で比較し、
@@ -479,11 +841,7 @@ def _apply_join_key_search_write(
 
     prim_vals = list(bundle.get("primary_values") or [])
     jv: dict[str, Any] = bundle.get("join_values") or {}
-    targets: list[str] = []
-    for jd in join_defs:
-        c = str(jd.get("item") or "").strip()
-        if c and c not in targets:
-            targets.append(c)
+    targets = _join_search_targets_from_defs(join_defs)
     if not targets:
         if _jd_on:
             _agg_diag.info(
@@ -493,7 +851,7 @@ def _apply_join_key_search_write(
             )
         return
     lens = [len(jv.get(t) or []) if isinstance(jv.get(t), list) else 0 for t in targets]
-    n_join = min(lens) if lens else 0
+    n_join = _join_search_n_join_slices(jv, targets)
     n_prim = len(prim_vals)
     if _jd_on:
         item_id = str(item.get("id") or "") if isinstance(item, dict) else ""
@@ -530,6 +888,7 @@ def _apply_join_key_search_write(
                 lens,
             )
         return
+    _warn_join_values_length_mismatch(bundle, join_defs, n_prim, item_col)
     if n_prim > 1 and n_join == 1:
         if _jd_on:
             _agg_diag.info(
@@ -542,18 +901,13 @@ def _apply_join_key_search_write(
             )
         return
 
+    _search = search_pool if search_pool is not None else pool
+
     def _rows_for_slice(k: int) -> list[dict[str, Any]]:
-        ex_map: dict[str, Any] = {}
-        for t in targets:
-            lst = jv.get(t) or []
-            if not isinstance(lst, list) or k >= len(lst):
-                return []
-            ex_map[t] = lst[k]
-        out: list[dict[str, Any]] = []
-        for r in pool:
-            if isinstance(r, dict) and _row_satisfies_join_and(r, join_defs, ex_map):
-                out.append(r)
-        return out
+        raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
+        return _narrow_join_matched_rows_for_write(
+            raw, k, n_prim, n_join, cross_file=cross_file
+        )
 
     max_sl = core_env.data_agg_join_dump_max_slices() if _jd_detail else 0
 
@@ -568,9 +922,11 @@ def _apply_join_key_search_write(
                     item_col,
                 )
             return
-        seen_id: set[int] = set()
+        from svc.data_agg_cancel import poll_active_cancel, poll_active_cancel_every  # noqa: WPS433
+
         n_write = 0
         for k in range(n_join):
+            poll_active_cancel(force=True)
             rows_k = _rows_for_slice(k)
             if _jd_detail and k < max_sl:
                 ex_map_log: dict[str, Any] = {}
@@ -591,17 +947,14 @@ def _apply_join_key_search_write(
                     len(rows_k),
                     prev_vals,
                 )
-            for r in rows_k:
-                rid = id(r)
-                if rid in seen_id:
-                    continue
-                seen_id.add(rid)
+            for ri, r in enumerate(rows_k):
+                poll_active_cancel_every(ri, stride=32)
                 r[item_col] = merge_cell_for_write_mode(r.get(item_col), pk_write, write_mode)
                 n_write += 1
         if _jd_on:
             _agg_diag.info(
                 "[DATA_AGG_JOIN_DUMP] phase=done %s mode=1prim_n_join item_col=%s "
-                "n_join_slices=%s distinct_writes=%s pk=%s",
+                "n_join_slices=%s row_writes=%s pk=%s",
                 _pfx,
                 item_col,
                 n_join,
@@ -610,9 +963,12 @@ def _apply_join_key_search_write(
             )
         return
 
+    from svc.data_agg_cancel import poll_active_cancel, poll_active_cancel_every  # noqa: WPS433
+
     n_op = min(n_prim, n_join)
     total_w = 0
     for k in range(n_op):
+        poll_active_cancel(force=True)
         pk = prim_vals[k]
         pk_write = _coerce_cell_scalar_to_full_text(pk).strip() if pk is not None else ""
         if not pk_write:
@@ -636,7 +992,8 @@ def _apply_join_key_search_write(
                 len(rows_k),
                 _join_dump_pv(pk_write),
             )
-        for r in rows_k:
+        for ri, r in enumerate(rows_k):
+            poll_active_cancel_every(ri, stride=32)
             r[item_col] = merge_cell_for_write_mode(r.get(item_col), pk_write, write_mode)
             total_w += 1
     if _jd_on:
@@ -647,6 +1004,216 @@ def _apply_join_key_search_write(
             n_op,
             total_w,
         )
+
+
+def _join_dump_col_filter_accepts_link_target(target_col: str) -> bool:
+    """DATA_AGG_JOIN_DUMP_COL: 連携先列名でも詳細ログを出す。"""
+    return _join_dump_col_filter_accepts(target_col)
+
+
+def _apply_join_key_search_link_write(
+    pool: list[dict[str, Any]],
+    item: dict[str, Any],
+    bundle: dict[str, Any],
+    write_mode: str,
+    header_set: set[str],
+    *,
+    search_pool: Optional[list[dict[str, Any]]] = None,
+    join_dump_ctx: Optional[dict[str, Any]] = None,
+    cross_file: bool = False,
+) -> None:
+    """
+    波及抑制 G1–G5: join_defs と link_defs を持つ項目のみ。
+    結合キー検索で主キーを書くのと同一スコープ（スライス k の一致行）へ link_values を適用する。
+    """
+    from core import core_env  # noqa: E402
+    from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
+
+    join_defs = _item_join_defs_list(item)
+    if not join_defs:
+        return
+    link_defs = _item_link_defs_list(item)
+    if not link_defs:
+        return
+
+    jv: dict[str, Any] = bundle.get("join_values") or {}
+    lv: dict[str, Any] = bundle.get("link_values") or {}
+    targets = _join_search_targets_from_defs(join_defs)
+    if not targets:
+        return
+    n_join = _join_search_n_join_slices(jv, targets)
+    if n_join < 1:
+        return
+
+    link_targets: list[str] = []
+    for ld in link_defs:
+        t = str(ld.get("item") or "").strip()
+        if t and t in header_set and t not in link_targets:
+            link_targets.append(t)
+    if not link_targets:
+        return
+
+    prim_vals = list(bundle.get("primary_values") or [])
+    n_prim = len(prim_vals)
+    if n_prim > 1 and n_join == 1:
+        return
+
+    _search = search_pool if search_pool is not None else pool
+
+    _jd_on = core_env.data_agg_join_dump_enabled()
+    _pfx = _join_dump_ctx_prefix(join_dump_ctx) if _jd_on else ""
+    _jd_detail = _jd_on and any(_join_dump_col_filter_accepts_link_target(t) for t in link_targets)
+    max_sl = core_env.data_agg_join_dump_max_slices() if _jd_detail else 0
+
+    def _rows_for_slice_link(k: int) -> list[dict[str, Any]]:
+        raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
+        return _narrow_join_matched_rows_for_write(
+            raw, k, n_prim, n_join, cross_file=cross_file
+        )
+
+    def _write_link_on_rows(rows_k: list[dict[str, Any]], k: int) -> int:
+        n_cell = 0
+        for tgt in link_targets:
+            vals = lv.get(tgt) or []
+            if not isinstance(vals, list):
+                continue
+            new_v = vals[k] if k < len(vals) else None
+            for r in rows_k:
+                if not isinstance(r, dict):
+                    continue
+                r[tgt] = merge_cell_for_write_mode(r.get(tgt), new_v, write_mode)
+                n_cell += 1
+        return n_cell
+
+    from svc.data_agg_cancel import poll_active_cancel, poll_active_cancel_every  # noqa: WPS433
+
+    total_w = 0
+    if n_prim == 1:
+        for k in range(n_join):
+            poll_active_cancel(force=True)
+            rows_k = _rows_for_slice_link(k)
+            if _jd_detail and k < max_sl:
+                _agg_diag.info(
+                    "[DATA_AGG_JOIN_DUMP] phase=link_on_matched %s k=%s/%s matched=%s targets=%s",
+                    _pfx,
+                    k,
+                    n_join - 1,
+                    len(rows_k),
+                    link_targets,
+                )
+            for ri, r in enumerate(rows_k):
+                poll_active_cancel_every(ri, stride=32)
+                for tgt in link_targets:
+                    vals = lv.get(tgt) or []
+                    if not isinstance(vals, list):
+                        continue
+                    new_v = vals[k] if k < len(vals) else None
+                    r[tgt] = merge_cell_for_write_mode(r.get(tgt), new_v, write_mode)
+                    total_w += 1
+    else:
+        n_op = min(n_prim, n_join)
+        for k in range(n_op):
+            poll_active_cancel(force=True)
+            rows_k = _rows_for_slice_link(k)
+            if _jd_detail and k < max_sl:
+                _agg_diag.info(
+                    "[DATA_AGG_JOIN_DUMP] phase=link_on_matched %s k=%s/%s matched=%s targets=%s",
+                    _pfx,
+                    k,
+                    n_op - 1,
+                    len(rows_k),
+                    link_targets,
+                )
+            total_w += _write_link_on_rows(rows_k, k)
+
+    if _jd_on:
+        _agg_diag.info(
+            "[DATA_AGG_JOIN_DUMP] phase=link_done %s write_mode=%s link_targets=%s "
+            "n_join_slices=%s cell_writes=%s",
+            _pfx,
+            write_mode,
+            link_targets,
+            n_join if n_prim == 1 else min(n_prim, n_join),
+            total_w,
+        )
+
+
+def _apply_join_key_search_across_file_passes(
+    global_pool: list[dict[str, Any]],
+    file_passes: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+    headers: list[str],
+    header_set: set[str],
+    column_modes: list[str],
+    *,
+    scenario_id: str,
+    probe_caller: Optional[str],
+    preview_master_mode: bool,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> None:
+    """
+    全ファイル走査後に結合キー検索を実行する（ファイル横断結合で table_rows へ先出ししないため）。
+    """
+    from core import core_env  # noqa: E402
+
+    if not global_pool or not file_passes:
+        return
+
+    def _poll_cancel(*, force: bool = False) -> None:
+        if cancel_check is not None:
+            cancel_check(force=force)
+
+    for ji, jit in enumerate(items):
+        _poll_cancel(force=True)
+        if not isinstance(jit, dict) or not _item_join_defs_list(jit):
+            continue
+        item_col = headers[ji] if ji < len(headers) else ""
+        wm = column_modes[ji] if ji < len(column_modes) else "fill_in"
+        cross = _join_host_needs_cross_file_pool(jit, items, headers)
+        for fp_info in file_passes:
+            _poll_cancel()
+            if not isinstance(fp_info, dict):
+                continue
+            file_path = str(fp_info.get("file_path") or "")
+            bundles = fp_info.get("bundles") or []
+            if not _item_sources_pass_file(jit, file_path):
+                continue
+            jb = bundles[ji] if ji < len(bundles) else {}
+            if not isinstance(jb, dict):
+                jb = {}
+            search_pool = _join_search_pool_scope(global_pool, file_path, cross)
+            _jd_ctx: Optional[dict[str, Any]] = None
+            try:
+                if core_env.data_agg_join_dump_enabled():
+                    _jd_ctx = {
+                        "scenario_id": scenario_id,
+                        "file_path": file_path,
+                        "caller": probe_caller or "",
+                        "preview_master": preview_master_mode,
+                        "item_idx": ji,
+                    }
+            except Exception:
+                _jd_ctx = None
+            _apply_join_key_search_write(
+                global_pool,
+                jit,
+                item_col,
+                jb,
+                wm,
+                search_pool=search_pool,
+                join_dump_ctx=_jd_ctx,
+                cross_file=cross,
+            )
+            _apply_join_key_search_link_write(
+                global_pool,
+                jit,
+                jb,
+                wm,
+                header_set,
+                search_pool=search_pool,
+                join_dump_ctx=_jd_ctx,
+                cross_file=cross,
+            )
 
 
 def resolve_join_path_header(
@@ -896,7 +1463,10 @@ def _apply_name_extract_path_assignment(
             continue
         n_ok_write = 0
         n_missing_path_ref = 0
+        from svc.data_agg_cancel import poll_active_cancel_every  # noqa: WPS433
+
         for ridx, r in enumerate(merged_rows):
+            poll_active_cancel_every(ridx, stride=16)
             before = r.get(col)
             path_meta_key = "__path_ref__%s" % path_col_i
             rp_raw = r.get(path_meta_key)
@@ -948,7 +1518,7 @@ def _apply_name_extract_path_assignment(
                 )
         if inv and (not inv_col or col == inv_col):
             try:
-                pv = val if val is None else str(val)
+                pv = "" if val is None else str(val)
                 if len(pv) > 120:
                     pv = pv[:117] + "..."
                 _agg_diag.info(
@@ -1006,7 +1576,7 @@ def _joined_result_to_table_rows(joined: Any, headers: list[str]) -> list[list[A
     if isinstance(joined, list):
         records = [x for x in joined if isinstance(x, dict)]
     elif hasattr(joined, "to_dicts"):
-        records = joined.to_dicts()  # type: ignore[assignment]
+        records = joined.to_dicts()
     else:
         return []
     return [[r.get(h) for h in headers] for r in records]
@@ -1055,14 +1625,14 @@ def _submit_main_ui(parent_hwnd: int, sheet_id: str) -> None:
     メイン画面（データ集約ツールのメインダイアログ）を表示するよう UI サーバに依頼する。
     req_*.pkl に payload を書き、ui_server が ui_data_agg.create_dialog を呼ぶ。
     """
-    if get_request_dir is None or write_pickle is None:
+    if get_request_dir is None or write_pickle is None or get_ipc_root is None:
         _log_data_agg_ui_ipc_skip("main", sheet_id, parent_hwnd, "ipc_unavailable")
         return
     try:
         from svc.svc_host import ensure_ui_server  # noqa: E402
 
         ensure_ui_server()
-        res_dir = Path(get_ipc_root()) / "result"
+        res_dir = _require_ipc_root() / "result"
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_data_agg_main_{ts_ms}_{os.getpid()}.pkl")
@@ -1098,14 +1668,14 @@ def _submit_progress_ui(
     extra_req: Optional[dict[str, Any]] = None,
 ) -> None:
     """進捗画面表示を UI サーバに依頼する。"""
-    if get_request_dir is None or write_pickle is None:
+    if get_request_dir is None or write_pickle is None or get_ipc_root is None:
         _log_data_agg_ui_ipc_skip("progress", sheet_id, parent_hwnd, "ipc_unavailable")
         return
     try:
         from svc.svc_host import ensure_ui_server  # noqa: E402
 
         ensure_ui_server()
-        res_dir = Path(get_ipc_root()) / "result"
+        res_dir = _require_ipc_root() / "result"
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_data_agg_progress_{ts_ms}_{os.getpid()}.pkl")
@@ -1144,14 +1714,14 @@ def _submit_done_ui(
     title: str = "データ集約",
 ) -> None:
     """完了通知を UI サーバに依頼する。"""
-    if get_request_dir is None or write_pickle is None:
+    if get_request_dir is None or write_pickle is None or get_ipc_root is None:
         _log_data_agg_ui_ipc_skip("done", sheet_id, parent_hwnd, "ipc_unavailable")
         return
     try:
         from svc.svc_host import ensure_ui_server  # noqa: E402
 
         ensure_ui_server()
-        res_dir = Path(get_ipc_root()) / "result"
+        res_dir = _require_ipc_root() / "result"
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_data_agg_done_{ts_ms}_{os.getpid()}.pkl")
@@ -1379,12 +1949,15 @@ def _snapshot_rows_for_path_trace(
 
 
 def filter_file_paths_for_master_preview(
-    file_paths: list[str],
+    file_paths: Sequence[str | Path],
     items: list[dict[str, Any]],
 ) -> list[str]:
     """
-    マスタ本番同等プレビュー用。cell ソースで file_pattern が空でない項目について、
-    すべての条件を source_passes_file_name_filter を満たすファイルに絞る（ステップ実行と整合）。
+    マスタ本番同等プレビュー用。cell ソースで file_pattern が空でない項目について絞る。
+
+    パターンが1種類のみ: その pattern に合うファイル。
+    複数パターン（光特性×紐づけ等のファイル横断結合）: OR（いずれかに合致）— AND だと該当ファイル0件になる。
+    本番一括は preview_master_mode 外のためこの関数は呼ばれない。
     """
     from svc import svc_data_agg_extract as extract_mod  # noqa: E402
 
@@ -1403,23 +1976,36 @@ def filter_file_paths_for_master_preview(
         if isinstance(block, dict) and str(block.get("file_pattern") or "").strip():
             restrictive.append(cell_src)
     if not restrictive:
-        return list(file_paths)
-    return [
-        fp
-        for fp in file_paths
-        if all(extract_mod.source_passes_file_name_filter(fp, s) for s in restrictive)
-    ]
+        return [str(p) for p in file_paths]
+    if len(restrictive) == 1:
+        s0 = restrictive[0]
+        return [
+            str(fp)
+            for fp in file_paths
+            if extract_mod.source_passes_file_name_filter(fp, s0)
+        ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for fp in file_paths:
+        fps = str(fp)
+        if fps in seen:
+            continue
+        if any(extract_mod.source_passes_file_name_filter(fps, s) for s in restrictive):
+            seen.add(fps)
+            out.append(fps)
+    return out
 
 
 def compute_batch_table_rows(
     data: dict[str, Any],
-    file_paths: list[str],
+    file_paths: Sequence[str | Path],
     iteration_contexts_out: Optional[list[dict[str, Any]]] = None,
     *,
     max_primary_rows: Optional[int] = None,
     max_table_rows: Optional[int] = None,
     progress_hook: Optional[Callable[..., None]] = None,
     probe_caller: Optional[str] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
 ) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
     """
     一括実行と同一の抽出・ファイル内マージ・match_keys 時の項目横結合（Excel 書込・イベントシート追記なし）。
@@ -1440,6 +2026,7 @@ def compute_batch_table_rows(
     from svc import svc_data_agg_scenario as scenario_mod  # noqa: E402
     from svc import svc_data_agg_write as write_mod  # noqa: E402
 
+    paths: list[str] = [str(p) for p in file_paths]
     items = data.get("items") or []
     if not items:
         return [], [], [], 0
@@ -1475,16 +2062,16 @@ def compute_batch_table_rows(
     path_trace_on, path_trace_max = _path_trace_settings(data)
     diag_on = bool(dd.get("enabled"))
     master_preview_cap_idx = _master_preview_item_cap_idx(dd)
-    n_paths_before = len(file_paths)
-    if preview_master_mode and file_paths:
-        file_paths = filter_file_paths_for_master_preview(file_paths, items)
+    n_paths_before = len(paths)
+    if preview_master_mode and paths:
+        paths = filter_file_paths_for_master_preview(paths, items)
     try:
         _agg_diag.info(
             "[DATA_AGG_PROBE] compute_batch scenario=%s paths_in=%s paths_after_filter=%s "
             "items=%s preview_master=%s max_primary_rows=%s max_table_rows=%s caller=%s",
             scenario_id,
             n_paths_before,
-            len(file_paths),
+            len(paths),
             len(items),
             preview_master_mode,
             max_primary_rows,
@@ -1498,26 +2085,35 @@ def compute_batch_table_rows(
             "[DATA_AGG_DIAG] compute_batch start scenario=%s files=%s items=%s "
             "max_primary_rows=%s max_table_rows=%s source=%s",
             scenario_id,
-            len(file_paths),
+            len(paths),
             len(items),
             max_primary_rows,
             max_table_rows,
             str(dd.get("source") or ""),
         )
-    n_files = len(file_paths)
+    n_files = len(paths)
     n_items = len(items)
     _prog_hook_interval = (
         0.045 if probe_caller == "excel_batch_submit" else 0.08
     )
 
+    def _poll_cancel(*, force: bool = False) -> None:
+        if cancel_check is not None:
+            cancel_check(force=True)
+
     def _ph(sub: int, suffix: str, *, file_index: int = 1) -> None:
+        _poll_cancel()
         if progress_hook is None:
             return
         try:
             progress_hook(sub, suffix, file_index, n_files)
+        except DataAggCancelled:
+            raise
         except TypeError:
             try:
                 progress_hook(sub, suffix)
+            except DataAggCancelled:
+                raise
             except Exception:
                 pass
         except Exception:
@@ -1531,6 +2127,7 @@ def compute_batch_table_rows(
 
     join_search_global_pool: list[dict[str, Any]] = []
     use_join_search_merge = _scenario_has_join_defs(items)
+    join_file_passes: list[dict[str, Any]] = []
 
     from core import core_env
 
@@ -1543,7 +2140,8 @@ def compute_batch_table_rows(
     bt_path_name = 0.0
     bt_table = 0.0
 
-    for fi, file_path in enumerate(file_paths, start=1):
+    for fi, file_path in enumerate(paths, start=1):
+        _poll_cancel(force=True)
         _ph(4, "", file_index=fi)
         _extract_prog_t0 = 0.0
         _tbl_prog_t0 = 0.0
@@ -1596,6 +2194,7 @@ def compute_batch_table_rows(
         bundles: list[dict[str, Any]] = []
         with extract_mod.xlsx_workbook_scope():
             for i, it in enumerate(items):
+                _poll_cancel()
                 item_id = it.get("id") or ("item_%s" % i)
                 col_name = headers[i]
                 srcs = it.get("sources") or []
@@ -1662,6 +2261,7 @@ def compute_batch_table_rows(
                     cell_positions=cell_positions,
                     join_path_header=path_col or None,
                     max_primary_rows=max_primary_rows,
+                    cancel_check=cancel_check,
                 )
                 bundles.append(b)
                 prim_vals = b.get("primary_values") or [None]
@@ -1694,12 +2294,18 @@ def compute_batch_table_rows(
                 ]
                 for tgt, vals in (b.get("link_values") or {}).items():
                     if tgt in header_set:
+                        wm_link = (
+                            column_modes[i]
+                            if i < len(column_modes)
+                            else "fill_in"
+                        )
                         _assign_series_to_rows_by_context(
                             item_rows,
                             tgt,
                             vals or [],
                             (b.get("link_contexts") or {}).get(tgt) or [],
                             str(file_path),
+                            write_mode=wm_link,
                         )
                 # 結合キー抽出値は比較列へ載せない（バンドル内 join_values のみ。行検索で使用）。
                 for tgt, vals in (b.get("path_item_values") or {}).items():
@@ -1711,6 +2317,7 @@ def compute_batch_table_rows(
                             vals or [],
                             (b.get("path_item_contexts") or {}).get(tgt) or [],
                             str(file_path),
+                            write_mode="fill_in",
                         )
                 norm_fp = normalize_source_path(file_path)
                 for row in item_rows:
@@ -1749,50 +2356,13 @@ def compute_batch_table_rows(
         _ph(5, "", file_index=fi)
         merged_rows = _merge_rows_by_join_keys(file_rows, join_key_names)
         if use_join_search_merge:
-            pool = join_search_global_pool + merged_rows
-            for ji, jit in enumerate(items):
-                if not isinstance(jit, dict):
-                    continue
-                if not _item_join_defs_list(jit):
-                    continue
-                jb = bundles[ji] if ji < len(bundles) else {}
-                wm = (
-                    column_modes[ji]
-                    if ji < len(column_modes)
-                    else "fill_in"
-                )
-                _jd_ctx: Optional[dict[str, Any]] = None
-                try:
-                    if core_env.data_agg_join_dump_enabled():
-                        _jd_ctx = {
-                            "scenario_id": scenario_id,
-                            "file_path": str(file_path),
-                            "caller": probe_caller or "",
-                            "preview_master": preview_master_mode,
-                            "item_idx": ji,
-                        }
-                except Exception:
-                    _jd_ctx = None
-                _apply_join_key_search_write(
-                    pool,
-                    jit,
-                    headers[ji] if ji < len(headers) else "",
-                    jb if isinstance(jb, dict) else {},
-                    wm,
-                    join_dump_ctx=_jd_ctx,
-                )
-            try:
-                _join_dump_post_merge_file(
-                    merged_rows,
-                    headers,
-                    items,
-                    file_path=str(file_path),
-                    scenario_id=scenario_id,
-                    caller=probe_caller or "",
-                    preview_master=preview_master_mode,
-                )
-            except Exception:
-                pass
+            join_file_passes.append(
+                {
+                    "file_path": str(file_path),
+                    "merged_rows": merged_rows,
+                    "bundles": bundles,
+                }
+            )
         if per_file_timing:
             pf_merge_ms = int((time.perf_counter() - pf_t_merge0) * 1000)
         if batch_timing:
@@ -1897,6 +2467,9 @@ def compute_batch_table_rows(
         # 項目横方向は既に 1 行にまとまっている。ここで join_on_match_keys を重ねると、
         # 照合キーが空・重複の行で Polars/辞書結合が潰れ、列ずれ・同一値の行全体複製が起きる。
         pf_t_tb0 = time.perf_counter() if per_file_timing else 0.0
+        if use_join_search_merge:
+            _emit_per_file_timing()
+            continue
         if not match_cols or preview_master_mode:
             _ph(7, "", file_index=fi)
             n_merged = len(merged_rows)
@@ -1965,8 +2538,8 @@ def compute_batch_table_rows(
                     if ix >= 0 and n_new > 0:
                         lim = min(n_new, _name_path_investigation_max_rows())
                         for j in range(_tbl_rows_before, _tbl_rows_before + lim):
-                            row = table_rows[j]
-                            head_vals.append(row[ix] if ix < len(row) else None)
+                            tbl_row = table_rows[j]
+                            head_vals.append(tbl_row[ix] if ix < len(tbl_row) else None)
                     _agg_diag.info(
                         "[DATA_AGG_DIAG] name_path_diag table_preview file=%s preview_col=%s "
                         "col_idx=%s n_new_rows=%s head_vals=%s merged_n=%s",
@@ -1993,14 +2566,15 @@ def compute_batch_table_rows(
             _emit_per_file_timing()
             continue
         pf_t_tb0 = time.perf_counter() if per_file_timing else 0.0
-        frames_by_item: dict[str, Any] = {}
-        for i, it in enumerate(items):
-            iid = item_ids_ordered[i]
-            hname = headers[i]
-            frames_by_item[iid] = [
-                {**{c: r.get(c) for c in match_cols}, hname: r.get(hname)}
-                for r in merged_rows
-            ]
+        linked_hdrs = sorted(linked_targets & header_set)
+        frames_by_item = _build_match_key_frames_by_item(
+            merged_rows,
+            items,
+            item_ids_ordered,
+            headers,
+            match_cols,
+            linked_hdrs,
+        )
         joined, join_events = pipeline_mod.join_on_match_keys(
             frames_by_item,
             match_cols,
@@ -2029,8 +2603,8 @@ def compute_batch_table_rows(
                 sh_idx = -1
             if sh_idx >= 0:
                 vals = []
-                for r in rows_to_add[:3]:
-                    vals.append(r[sh_idx] if sh_idx < len(r) else None)
+                for out_row in rows_to_add[:3]:
+                    vals.append(out_row[sh_idx] if sh_idx < len(out_row) else None)
                 _agg_diag.info(
                     "[DATA_AGG_DIAG] table_focus_joined file=%s header=%s idx=%s vals=%s",
                     str(file_path),
@@ -2061,6 +2635,139 @@ def compute_batch_table_rows(
         _emit_per_file_timing()
         if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
             break
+    if use_join_search_merge and join_search_global_pool:
+        _poll_cancel(force=True)
+        _ph(6, "", file_index=max(n_files, 1))
+        _apply_join_key_search_across_file_passes(
+            join_search_global_pool,
+            join_file_passes,
+            items,
+            headers,
+            header_set,
+            column_modes,
+            scenario_id=scenario_id,
+            probe_caller=probe_caller,
+            preview_master_mode=preview_master_mode,
+            cancel_check=cancel_check,
+        )
+        _poll_cancel(force=True)
+        for fp_info in join_file_passes:
+            if not isinstance(fp_info, dict):
+                continue
+            try:
+                _join_dump_post_merge_file(
+                    fp_info.get("merged_rows") or [],
+                    headers,
+                    items,
+                    file_path=str(fp_info.get("file_path") or ""),
+                    scenario_id=scenario_id,
+                    caller=probe_caller or "",
+                    preview_master=preview_master_mode,
+                )
+            except Exception:
+                pass
+    if use_join_search_merge and match_cols and not preview_master_mode:
+        _poll_cancel(force=True)
+        _ph(7, "", file_index=max(n_files, 1))
+        _tbl_t0 = time.perf_counter()
+        linked_hdrs = sorted(linked_targets & header_set)
+        for fp_info in join_file_passes:
+            _poll_cancel(force=True)
+            if not isinstance(fp_info, dict):
+                continue
+            file_path = str(fp_info.get("file_path") or "")
+            merged_rows = fp_info.get("merged_rows") or []
+            frames_by_item = _build_match_key_frames_by_item(
+                merged_rows,
+                items,
+                item_ids_ordered,
+                headers,
+                match_cols,
+                linked_hdrs,
+            )
+            joined, join_events = pipeline_mod.join_on_match_keys(
+                frames_by_item,
+                match_cols,
+                how="left",
+                item_value_cols=id_to_value_col,
+            )
+            join_events_total += len(join_events)
+            event_log_rows.extend(
+                write_mod.format_join_events_for_event_log(scenario_id, file_path, join_events)
+            )
+            joined_rows = _joined_result_to_table_rows(joined, headers)
+            rows_to_add = list(joined_rows)
+            if _apply_batch_sparse:
+                rows_to_add = [
+                    r for r in rows_to_add if not _batch_sparse_table_row_noise(r, headers)
+                ]
+            if max_table_rows is not None and max_table_rows > 0:
+                room = max_table_rows - len(table_rows)
+                rows_to_add = rows_to_add[: max(0, room)]
+            table_rows.extend(rows_to_add)
+            if iteration_contexts_out is not None:
+                for iter_i, _ in enumerate(rows_to_add):
+                    iteration_contexts_out.append(
+                        {
+                            "file_path": file_path,
+                            "iter_index": int(iter_i),
+                            "base_cell": None,
+                            "base_row": None,
+                            "base_col": None,
+                            "filter_snapshot": {"files": [file_path], "count": 1},
+                            "primary_value": rows_to_add[iter_i][0] if rows_to_add[iter_i] else None,
+                        }
+                    )
+        if batch_timing:
+            bt_table += time.perf_counter() - _tbl_t0
+    elif use_join_search_merge and (not match_cols or preview_master_mode):
+        _ph(7, "", file_index=max(n_files, 1))
+        _tbl_t0 = time.perf_counter()
+        pf_t_tb0 = _tbl_t0 if per_file_timing else 0.0
+        output_rows = sorted(
+            (
+                r
+                for r in join_search_global_pool
+                if isinstance(r, dict) and _row_should_emit_to_table(r, items, headers)
+            ),
+            key=lambda r: (str(r.get("__file_path") or ""), _row_iter_index(r)),
+        )
+        n_out = len(output_rows)
+        _tbl_prog_t0 = 0.0
+        for iter_i, r in enumerate(output_rows):
+            if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
+                break
+            if _apply_batch_sparse and _batch_sparse_merged_row_noise(r, headers):
+                continue
+            table_rows.append([r.get(h) for h in headers])
+            if iteration_contexts_out is not None:
+                iteration_contexts_out.append(
+                    {
+                        "file_path": str(r.get("__file_path") or ""),
+                        "iter_index": _row_iter_index(r),
+                        "base_cell": None,
+                        "base_row": None,
+                        "base_col": None,
+                        "filter_snapshot": {
+                            "files": [str(r.get("__file_path") or "")],
+                            "count": 1,
+                        },
+                        "primary_value": r.get(headers[0]) if headers else None,
+                    }
+                )
+            if progress_hook is not None and n_out > 0:
+                t_now = time.perf_counter()
+                ri = iter_i + 1
+                if (
+                    ri == 1
+                    or ri == n_out
+                    or ri % 10 == 0
+                    or (t_now - _tbl_prog_t0) >= _prog_hook_interval
+                ):
+                    _tbl_prog_t0 = t_now
+                    _ph(7, "行 %s/%s" % (ri, n_out), file_index=max(n_files, 1))
+        if batch_timing:
+            bt_table += time.perf_counter() - _tbl_t0
     if batch_timing:
         try:
             total_ms = int((time.perf_counter() - t_batch_start) * 1000)
@@ -2087,8 +2794,8 @@ def compute_batch_table_rows(
             sh_idx = -1
         if sh_idx >= 0:
             vals = []
-            for r in table_rows[:3]:
-                vals.append(r[sh_idx] if sh_idx < len(r) else None)
+            for tbl_row in table_rows[:3]:
+                vals.append(tbl_row[sh_idx] if sh_idx < len(tbl_row) else None)
             _agg_diag.info(
                 "[DATA_AGG_DIAG] table_focus_final header=%s idx=%s row_count=%s vals=%s",
                 "出荷番号",
@@ -2108,14 +2815,14 @@ def _submit_step_popup_ui(
     preview_values: list[Any],
 ) -> None:
     """ステップ実行用ポップ（次へ/中止）を UI サーバに依頼する。"""
-    if get_request_dir is None or write_pickle is None:
+    if get_request_dir is None or write_pickle is None or get_ipc_root is None:
         _log_data_agg_ui_ipc_skip("step_popup", sheet_id, parent_hwnd, "ipc_unavailable")
         return
     try:
         from svc.svc_host import ensure_ui_server  # noqa: E402
 
         ensure_ui_server()
-        res_dir = Path(get_ipc_root()) / "result"
+        res_dir = _require_ipc_root() / "result"
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_data_agg_step_{ts_ms}_{os.getpid()}.pkl")
@@ -2221,6 +2928,12 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     """
     t_batch_wall = time.perf_counter()
     notify_parent = bool(payload.get("notify_parent_dialog", False))
+    batch_run_id = str(payload.get("batch_run_id") or "").strip()
+    ipc_root_opt: Path | None = None
+    try:
+        ipc_root_opt = _require_ipc_root()
+    except Exception:
+        ipc_root_opt = None
 
     def _dlog(msg: str, *args: Any) -> None:
         try:
@@ -2246,6 +2959,11 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             msg = "%s\n処理時間: %s" % (msg, _w_time.format_elapsed_ms_ja(_ms_wall))
         except Exception:
             pass
+        try:
+            if ipc_root_opt is not None and batch_run_id:
+                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
+        except Exception:
+            pass
         _batch_done_notify(
             parent_hwnd, sheet_id, title, msg, ok=ok, use_parent_dialog=notify_parent
         )
@@ -2264,7 +2982,46 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         return
     scenario_path_user = str(payload.get("scenario_path") or "").strip()
     scenario_snapshot_path = str(payload.get("scenario_snapshot_path") or "").strip()
+    if ipc_root_opt is not None and batch_run_id:
+        active_run_id = _read_active_batch_run_id(sheet_id, ipc_root_opt)
+        if active_run_id and active_run_id != batch_run_id:
+            logger.info(
+                "[DATA_AGG] stale batch_run skipped sheet_id=%s run_id=%s active_run_id=%s",
+                sheet_id,
+                batch_run_id,
+                active_run_id,
+            )
+            try:
+                _agg_diag.info(
+                    "[DATA_AGG_DIAG] batch_run stale_skip sheet_id=%s run_id=%s active_run_id=%s",
+                    sheet_id,
+                    batch_run_id,
+                    active_run_id,
+                )
+            except Exception:
+                pass
+            if scenario_snapshot_path:
+                try:
+                    Path(scenario_snapshot_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
     load_path = scenario_snapshot_path or scenario_path_user
+    if scenario_snapshot_path and not Path(scenario_snapshot_path).is_file():
+        if scenario_path_user:
+            logger.info(
+                "[DATA_AGG] snapshot missing; fallback to scenario_path sheet_id=%s snapshot=%s",
+                sheet_id,
+                scenario_snapshot_path,
+            )
+            load_path = scenario_path_user
+        else:
+            logger.info(
+                "[DATA_AGG] stale batch_run skipped sheet_id=%s reason=missing_snapshot snapshot=%s",
+                sheet_id,
+                scenario_snapshot_path,
+            )
+            return
     if not load_path:
         _dlog("abort reason=no_scenario_path")
         _finish("シナリオパスが指定されていません。", ok=False)
@@ -2329,11 +3086,12 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         )
         return
     _app, _book, sheet, _hwnd = ctx
+    sheet_out: Any = sheet
 
-    def _reactivate_data_agg_sheet() -> None:
-        """イベントログや出力先シート操作後も、ツール紐付けのマスターシートを前面に戻す。"""
+    def _activate_output_sheet() -> None:
+        """集約結果を書いたシート（sheet_out）を前面にする。新規シート出力時は集約データシート。"""
         try:
-            sheet.activate()
+            sheet_out.activate()
         except Exception:
             pass
 
@@ -2356,7 +3114,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             error=str(e),
             total_ms=_tms,
         )
-        _reactivate_data_agg_sheet()
+        _activate_output_sheet()
         _finish("シナリオの読込に失敗しました: %s" % e, ok=False, elapsed_ms=_tms)
         return
     finally:
@@ -2381,7 +3139,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
             total_ms=_tms,
         )
-        _reactivate_data_agg_sheet()
+        _activate_output_sheet()
         _finish("シナリオの検証エラー:\n" + "\n".join(errs[:5]), ok=False, elapsed_ms=_tms)
         return
     items = data.get("items") or []
@@ -2400,7 +3158,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
             total_ms=_tms,
         )
-        _reactivate_data_agg_sheet()
+        _activate_output_sheet()
         _finish("項目が定義されていません。", ok=False, elapsed_ms=_tms)
         return
     # データ集約の優先順: 対象ファイルは scan_folder が返すリスト順（基準フォルダ配下を自然順でソート）。
@@ -2410,55 +3168,40 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
-    file_paths = scan_mod.scan_folder(
-        start_path,
-        recursive=rec,
-        extensions=ext_t,
-        keyword=kw,
+    from svc.data_agg_cancel import (  # noqa: WPS433
+        batch_cancel_scope,
+        cancel_request_path_data_agg_batch,
+        clear_batch_worker_pid,
+        delete_output_sheet_if_any,
+        log_cancel_detected,
+        make_cancel_check,
+        register_batch_worker_pid,
+        reset_cancel_path,
     )
-    mk = data.get("match_keys") or []
-    mk_n = len(mk) if isinstance(mk, list) else 0
-    item_labels: list[str] = []
-    for it in items[:12]:
-        if isinstance(it, dict):
-            item_labels.append(
-                str(it.get("name") or it.get("id") or "?").strip() or "?"
-            )
-        else:
-            item_labels.append("?")
-    _dlog(
-        "scenario_loaded id=%s items=%s item_head=%s match_keys=%s scan start_path=%s recursive=%s "
-        "extensions=%s keyword=%r",
-        str(data.get("id") or Path(str(load_path)).stem),
-        len(items),
-        item_labels,
-        mk_n,
-        start_path,
-        rec,
-        ext_t,
-        kw,
-    )
-    if not file_paths:
-        _dlog("abort reason=zero_files_after_scan scan_start_path=%s", start_path)
-        _tms = int((time.perf_counter() - t_batch_wall) * 1000)
-        _append_batch_event(
-            scenario_id_arg=scenario_id,
-            ok=False,
-            files_n=0,
-            error="zero_files_after_scan",
-            excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
-            total_ms=_tms,
-        )
-        _reactivate_data_agg_sheet()
-        _finish("対象ファイルが 0 件でした。", ok=False, elapsed_ms=_tms)
-        return
-    head_paths = [str(p) for p in file_paths[:5]]
-    _dlog(
-        "scan_ok file_count=%s head_paths=%s",
-        len(file_paths),
-        head_paths,
-    )
-    prog_path = Path(get_ipc_root()) / "progress" / (
+
+    ipc_root = ipc_root_opt if ipc_root_opt is not None else _require_ipc_root()
+    cancel_path = cancel_request_path_data_agg_batch(sheet_id, ipc_root)
+    reset_cancel_path(cancel_path)
+    cancel_check = make_cancel_check(cancel_path, min_interval_sec=0.0)
+    register_batch_worker_pid(sheet_id, ipc_root)
+    _finish_release = _finish
+
+    def _finish(  # noqa: F811
+        msg: str,
+        *,
+        ok: bool,
+        title: str = "データ集約",
+        elapsed_ms: int | None = None,
+    ) -> None:
+        try:
+            clear_batch_worker_pid(sheet_id, ipc_root)
+        except Exception:
+            pass
+        _finish_release(msg, ok=ok, title=title, elapsed_ms=elapsed_ms)
+
+    batch_sheet_pending_delete: list[Any] = []
+
+    prog_path = ipc_root / "progress" / (
         "data_agg_batch_%s_%s.pkl" % (os.getpid(), int(time.time() * 1000))
     )
     try:
@@ -2466,7 +3209,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     except OSError:
         pass
     prog_seq = [0]
-    prog_last_pct = [5]
+    prog_last_pct = [2]
+    cfg_msgs = (_get_config().get("MESSAGES") or {})
 
     def _prog_write(**kw: Any) -> None:
         if write_pickle is None:
@@ -2507,13 +3251,60 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             total=1,
         )
 
+    def _prog_cancel() -> None:
+        _prog_write(
+            status="CANCEL",
+            pct=max(prog_last_pct[0], 5),
+            phase="中止",
+            phase_i=4,
+            done=prog_last_pct[0],
+            total=100,
+        )
+
+    def _abort_batch_cancel(
+        *,
+        phase: str = "compute",
+        files_n: int = 0,
+        extra_rows: list[list[Any]] | None = None,
+        compute_ms: int | None = None,
+    ) -> None:
+        log_cancel_detected(sheet_id=sheet_id, phase=phase, files_n=files_n)
+        _dlog(
+            "cancel detected phase=%s files_n=%s compute_ms=%s",
+            phase,
+            files_n,
+            compute_ms,
+        )
+        if batch_sheet_pending_delete:
+            delete_output_sheet_if_any(batch_sheet_pending_delete[0])
+            batch_sheet_pending_delete.clear()
+        _tms = int((time.perf_counter() - t_batch_wall) * 1000)
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=files_n,
+            compute_ms=compute_ms,
+            total_ms=_tms,
+            error="cancelled",
+            extra_rows=extra_rows,
+            excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
+        )
+        _prog_cancel()
+        _activate_output_sheet()
+        msg = str(cfg_msgs.get("STATUS_CANCEL") or "一括実行を中止しました。").strip()
+        _finish(msg, ok=False, elapsed_ms=_tms)
+
     _ph_labels = {4: "取り出し", 5: "行のまとめ", 6: "照合・パス", 7: "一覧の組立"}
+    file_paths_holder: list[list[Path]] = [[]]
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
-        nf_l = max(len(file_paths), 1)
+        fps = file_paths_holder[0]
+        nf_l = max(len(fps), 1)
         ni_l = max(len(items), 1)
         fi_kw = int(rest[0]) if len(rest) >= 1 else None
         nf_kw = int(rest[1]) if len(rest) >= 2 else None
+        if cancel_check is not None:
+            cancel_check(force=True)
         raw = _batch_progress_pct_from_hook(
             sub,
             suffix,
@@ -2530,8 +3321,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         if fi_kw is not None:
             try:
                 ix = int(fi_kw) - 1
-                if 0 <= ix < len(file_paths):
-                    cf = Path(str(file_paths[ix])).name
+                if 0 <= ix < len(fps):
+                    cf = Path(str(fps[ix])).name
             except Exception:
                 pass
         else:
@@ -2539,8 +3330,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             if mfp:
                 try:
                     ix = int(mfp.group(1)) - 1
-                    if 0 <= ix < len(file_paths):
-                        cf = Path(str(file_paths[ix])).name
+                    if 0 <= ix < len(fps):
+                        cf = Path(str(fps[ix])).name
                 except Exception:
                     pass
         _prog_write(
@@ -2554,17 +3345,79 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
 
     _prog_write(
         pct=2,
-        phase="準備中…",
+        phase=str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中..."),
         phase_i=0,
         done=0,
-        total=max(1, len(file_paths)),
+        total=100,
     )
     _submit_progress_ui(
         parent_hwnd,
         sheet_id,
         str(prog_path),
         phase_total=4,
-        extra_req={"done_delay_ms": 450, "progress_poll_ms": 90},
+        extra_req={
+            "done_delay_ms": 450,
+            "progress_poll_ms": 90,
+            "cancel_request_path": str(cancel_path),
+            "data_agg_batch_notify_parent": notify_parent,
+            "data_agg_batch_scenario_id": str(scenario_id),
+            "data_agg_batch_scenario_path": str(scenario_path_log),
+        },
+    )
+    with batch_cancel_scope(cancel_check):
+        try:
+            file_paths = scan_mod.scan_folder(
+                start_path,
+                recursive=rec,
+                extensions=ext_t,
+                keyword=kw,
+                cancel_check=cancel_check,
+            )
+        except DataAggCancelled:
+            _abort_batch_cancel(phase="scan")
+            return
+        file_paths_holder[0] = list(file_paths)
+    mk = data.get("match_keys") or []
+    mk_n = len(mk) if isinstance(mk, list) else 0
+    item_labels: list[str] = []
+    for it in items[:12]:
+        if isinstance(it, dict):
+            item_labels.append(
+                str(it.get("name") or it.get("id") or "?").strip() or "?"
+            )
+        else:
+            item_labels.append("?")
+    _dlog(
+        "scenario_loaded id=%s items=%s item_head=%s match_keys=%s scan start_path=%s recursive=%s "
+        "extensions=%s keyword=%r",
+        str(data.get("id") or Path(str(load_path)).stem),
+        len(items),
+        item_labels,
+        mk_n,
+        start_path,
+        rec,
+        ext_t,
+        kw,
+    )
+    if not file_paths:
+        _dlog("abort reason=zero_files_after_scan scan_start_path=%s", start_path)
+        _tms = int((time.perf_counter() - t_batch_wall) * 1000)
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=0,
+            error="zero_files_after_scan",
+            excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
+            total_ms=_tms,
+        )
+        _activate_output_sheet()
+        _finish("対象ファイルが 0 件でした。", ok=False, elapsed_ms=_tms)
+        return
+    head_paths = [str(p) for p in file_paths[:5]]
+    _dlog(
+        "scan_ok file_count=%s head_paths=%s",
+        len(file_paths),
+        head_paths,
     )
     _prog_write(pct=6, phase="集約を実行中", phase_i=1, done=0, total=len(file_paths))
 
@@ -2573,12 +3426,23 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     event_log_rows: list[list[Any]] = []
     t_compute = time.perf_counter()
     try:
-        headers, table_rows, event_log_rows, join_events_total = compute_batch_table_rows(
-            data,
-            file_paths,
-            probe_caller="excel_batch_submit",
-            progress_hook=_batch_hook,
+        with batch_cancel_scope(cancel_check):
+            headers, table_rows, event_log_rows, join_events_total = compute_batch_table_rows(
+                data,
+                file_paths,
+                probe_caller="excel_batch_submit",
+                progress_hook=_batch_hook,
+                cancel_check=cancel_check,
+            )
+    except DataAggCancelled:
+        dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)
+        _abort_batch_cancel(
+            phase="compute",
+            files_n=len(file_paths),
+            extra_rows=event_log_rows,
+            compute_ms=dt_compute_ms,
         )
+        return
     except Exception as e:
         logger.exception("[DATA_AGG] compute_batch_table_rows failed: %s", e)
         try:
@@ -2601,7 +3465,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             excel_write_summary=_excel_options_log_summary(data.get("excel_options")),
         )
         _prog_done()
-        _reactivate_data_agg_sheet()
+        _activate_output_sheet()
         _finish("集約計算中にエラーが発生しました: %s" % e, ok=False, elapsed_ms=_tms)
         return
     dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)
@@ -2617,6 +3481,47 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     table_rows = write_mod.sort_table_rows_for_excel_options(
         headers, table_rows, excel_opts
     )
+    if cancel_check is not None:
+        try:
+            cancel_check(force=True)
+        except DataAggCancelled:
+            _abort_batch_cancel(
+                phase="pre_write",
+                files_n=len(file_paths),
+                extra_rows=event_log_rows,
+                compute_ms=dt_compute_ms,
+            )
+            return
+
+    def _abort_before_excel_write(*, err_code: str, user_msg: str, detail_err: str) -> None:
+        _tms = int((time.perf_counter() - t_batch_wall) * 1000)
+        logger.error("[DATA_AGG] %s: %s", err_code, detail_err)
+        try:
+            _agg_diag.error(
+                "[DATA_AGG_DIAG] batch_run abort reason=%s detail=%s scenario_path=%s",
+                err_code,
+                detail_err,
+                scenario_path_log,
+            )
+        except Exception:
+            pass
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=len(file_paths),
+            output_rows=len(table_rows),
+            join_ev=join_events_total,
+            compute_ms=dt_compute_ms,
+            total_ms=_tms,
+            error="%s: %s" % (err_code, detail_err),
+            extra_rows=event_log_rows,
+            excel_write_summary=_excel_options_log_summary(excel_opts),
+            output_sheet_name=_sheet_name_for_event_log(sheet_out),
+        )
+        _prog_done()
+        _activate_output_sheet()
+        _finish(user_msg, ok=False, elapsed_ms=_tms)
+
     sheet_out = sheet
     new_sheet_created = False
     if excel_opts.get("output_target") == "new_sheet":
@@ -2628,11 +3533,17 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
                 custom_sheet_name=str(excel_opts.get("new_sheet_custom_name") or ""),
             )
             new_sheet_created = True
+            batch_sheet_pending_delete[:] = [sheet_out]
         except Exception as e:
-            logger.warning(
-                "[DATA_AGG] 新規シート追加に失敗、アクティブシートへ出力します: %s", e
+            _abort_before_excel_write(
+                err_code="new_sheet_create_failed",
+                user_msg=(
+                    "新規シートの作成に失敗したため処理を中断しました。"
+                    "シート名規則または同名シートの有無を確認してください。"
+                ),
+                detail_err=str(e),
             )
-            sheet_out = sheet
+            return
     tr, tc = 1, 1
     wm_ex = str(excel_opts.get("write_mode") or "append")
     if wm_ex == "anchor_cell":
@@ -2642,9 +3553,15 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         if parsed:
             tr, tc = parsed
         else:
-            logger.warning(
-                "[DATA_AGG] excel_options.anchor_cell が無効のため左上は A1 にフォールバックします"
+            _abort_before_excel_write(
+                err_code="anchor_cell_invalid",
+                user_msg=(
+                    "指定セルの形式が不正なため処理を中断しました。"
+                    "A1形式（例: B3）で指定してください。"
+                ),
+                detail_err="anchor_cell=%r" % str(excel_opts.get("anchor_cell") or ""),
             )
+            return
     jump_reg = bool(excel_opts.get("jump_register_name"))
     match_cols = _resolve_match_keys_to_headers(data.get("match_keys") or [], items, headers)
     key_indices = [headers.index(c) for c in match_cols if c in headers]
@@ -2710,9 +3627,15 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             try:
                 core_xlc.clear_sheet_used_range(sheet_out)
             except Exception as e:
-                logger.warning(
-                    "[DATA_AGG] クリア書込み: シートのクリアに失敗しました（続行）: %s", e
+                _abort_before_excel_write(
+                    err_code="clear_write_clear_failed",
+                    user_msg=(
+                        "シートのクリアに失敗したため処理を中断しました。"
+                        "シート保護状態や編集権限を確認してください。"
+                    ),
+                    detail_err=str(e),
                 )
+                return
         # 新規追加シートは空であるべきだが、UsedRange だけが広いと読取が狂い追記先がずれる。
         # クリア書込みも同様に明示空で読み取りをスキップする。
         force_empty_existing = ex_clear or new_sheet_created
@@ -2775,7 +3698,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             output_sheet_name=_sheet_name_for_event_log(sheet_out),
         )
         _prog_done()
-        _reactivate_data_agg_sheet()
+        _activate_output_sheet()
         _finish("マスターへの書き込み中にエラーが発生しました: %s" % e, ok=False, elapsed_ms=_tms)
         return
     dt_write_ms = int((time.perf_counter() - t_write) * 1000)
@@ -2835,7 +3758,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         excel_write_summary=_excel_options_log_summary(excel_opts),
         output_sheet_name=_sheet_name_for_event_log(sheet_out),
     )
-    _reactivate_data_agg_sheet()
+    batch_sheet_pending_delete.clear()
+    _activate_output_sheet()
     _prog_done()
     _finish(msg, ok=True, elapsed_ms=dt_total_ms)
 

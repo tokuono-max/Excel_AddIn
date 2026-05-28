@@ -68,6 +68,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +123,7 @@ from ui_qt.ui_data_agg_scenario_layout import (
 )
 from ui_qt.ipc_file import (
     delete_batch_done_notify,
+    write_pickle,
     get_last_folder,
     set_last_folder,
     try_read_batch_done_notify,
@@ -219,6 +221,13 @@ _EXCEL_EDIT_ANCHOR_W = 88
 _EXCEL_COMBO_SORT_ITEM_W = 220
 _EXCEL_COMBO_SORT_ORDER_W = 88
 _EXCEL_SORT_BTN_MAX_H = 26
+
+
+def _batch_active_path(sheet_id: str, ipc_root: Path) -> Path:
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    sid = str(sheet_id or "").strip() or "default"
+    return d / ("data_agg_batch_active_%s.pkl" % sid)
 
 
 def _excel_compact_control(w: QWidget, max_width: int | None = None) -> None:
@@ -1991,10 +2000,10 @@ class _DataAggMainWindow(QDialog):
             )
 
     def _on_item_read_sheet(self) -> None:
-        """アクティブシートの1行目から項目名を読込む。"""
+        """押下時点のアクティブシートの1行目から項目名を読込む。"""
         try:
             from core.core_xlc import get_excel_context_from_hwnd
-            ctx = get_excel_context_from_hwnd(self._parent_hwnd, self._sheet_id)
+            ctx = get_excel_context_from_hwnd(self._parent_hwnd, "")
             if not ctx:
                 QMessageBox.warning(
                     self,
@@ -3376,9 +3385,11 @@ class _DataAggMainWindow(QDialog):
         )
         return data
 
-    def _start_batch_done_poll(self) -> None:
+    def _start_batch_done_poll_for_sheet(self, sheet_id: str) -> None:
         """別プロセス一括の完了 pickle をポーリングし、親ダイアログでメッセージを出す。"""
-        delete_batch_done_notify(self._sheet_id)
+        sid = str(sheet_id or "").strip() or str(self._sheet_id or "")
+        self._batch_poll_sheet_id = sid
+        delete_batch_done_notify(sid)
         self._batch_poll_deadline = time.time() + 7200.0
         if self._batch_poll_timer is None:
             self._batch_poll_timer = QTimer(self)
@@ -3390,10 +3401,11 @@ class _DataAggMainWindow(QDialog):
             if self._batch_poll_timer is not None:
                 self._batch_poll_timer.stop()
             return
-        d = try_read_batch_done_notify(self._sheet_id)
+        sid = str(getattr(self, "_batch_poll_sheet_id", "") or "").strip() or str(self._sheet_id or "")
+        d = try_read_batch_done_notify(sid)
         if not d:
             return
-        delete_batch_done_notify(self._sheet_id)
+        delete_batch_done_notify(sid)
         if self._batch_poll_timer is not None:
             self._batch_poll_timer.stop()
         title = str(d.get("title") or "データ集約")
@@ -3406,6 +3418,26 @@ class _DataAggMainWindow(QDialog):
     def _on_batch_run(self) -> None:
         """一括実行を開始する。"""
         self._run_execution("batch_run")
+
+    def _resolve_live_excel_target(self) -> tuple[int, str]:
+        """実行時点の Excel アクティブシート情報（hwnd, sheet_id）を返す。"""
+        hwnd = int(self._parent_hwnd or 0)
+        sheet_id = str(self._sheet_id or "")
+        if hwnd <= 0:
+            return hwnd, sheet_id
+        try:
+            from core.core_xlc import get_excel_context_from_hwnd, get_sheet_prop
+
+            ctx = get_excel_context_from_hwnd(hwnd, "")
+            if ctx:
+                _app, _book, active_sheet, live_hwnd = ctx
+                hwnd = int(live_hwnd or hwnd)
+                sid = str(get_sheet_prop(active_sheet, "HC_GUID_B64") or "").strip()
+                if sid:
+                    sheet_id = sid
+        except Exception:
+            pass
+        return hwnd, sheet_id
 
     def _run_execution(self, action: str) -> None:
         """一括実行を IPC で svc に依頼する（メイン本番は一括のみ）。"""
@@ -3439,6 +3471,11 @@ class _DataAggMainWindow(QDialog):
         show_batch_start = bool(self._ui.get("SHOW_BATCH_START_MESSAGE", False))
         notify_parent_dialog = bool(self._ui.get("BATCH_NOTIFY_PARENT_DIALOG", True))
         try:
+            excel_opts_runtime = self._excel_options_from_ui()
+            if str(excel_opts_runtime.get("output_target") or "active_sheet") == "active_sheet":
+                run_parent_hwnd, run_sheet_id = self._resolve_live_excel_target()
+            else:
+                run_parent_hwnd, run_sheet_id = int(self._parent_hwnd or 0), str(self._sheet_id or "")
             proj_root = Path(__file__).resolve().parents[1]
             from core import runtime_layout
 
@@ -3479,6 +3516,12 @@ class _DataAggMainWindow(QDialog):
                 "scenario_snapshot_path": snapshot_path,
                 "notify_parent_dialog": notify_parent_dialog,
             }
+            batch_run_id = "%s_%s_%s" % (
+                int(time.time() * 1000),
+                os.getpid(),
+                uuid.uuid4().hex[:8],
+            )
+            payload["batch_run_id"] = batch_run_id
             fd, payload_path = tempfile.mkstemp(suffix=".json", prefix="data_agg_payload_")
             try:
                 os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -3497,8 +3540,8 @@ class _DataAggMainWindow(QDialog):
             ) % (
                 str(Path(payload_path)),
                 str(proj_root),
-                int(self._parent_hwnd),
-                str(self._sheet_id),
+                int(run_parent_hwnd),
+                str(run_sheet_id),
             )
             fd_py, script_path = tempfile.mkstemp(
                 suffix=".py", prefix="data_agg_batch_", text=False
@@ -3519,13 +3562,25 @@ class _DataAggMainWindow(QDialog):
             ipc_root = core_env.ipc_dir_raw()
             if ipc_root:
                 env["HC_IPC_ROOT"] = ipc_root
+                try:
+                    write_pickle(
+                        _batch_active_path(str(run_sheet_id), Path(ipc_root)),
+                        {
+                            "run_id": str(batch_run_id),
+                            "sheet_id": str(run_sheet_id),
+                            "scenario_snapshot_path": str(snapshot_path),
+                            "ts_ms": int(time.time() * 1000),
+                        },
+                    )
+                except Exception:
+                    pass
             if install_root is not None:
                 env["HC_INSTALL_ROOT"] = str(install_root)
             env["PYTHONPATH"] = str(proj_root) + (os.pathsep + env.get("PYTHONPATH", ""))
             if use_short_runner and install_root is not None:
                 env = runtime_layout.env_with_packaged_dll_search_path(env, install_root)
             if notify_parent_dialog:
-                self._start_batch_done_poll()
+                self._start_batch_done_poll_for_sheet(run_sheet_id)
             spawn_cwd = str(install_root) if install_root is not None else str(proj_root)
             subprocess.Popen(cmd, cwd=spawn_cwd, env=env)
             if show_batch_start:
