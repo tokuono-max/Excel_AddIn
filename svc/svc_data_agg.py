@@ -436,6 +436,85 @@ def _row_iter_index(row: dict[str, Any]) -> int:
         return 0
 
 
+def _apply_master_preview_frozen_overlay(
+    merged_rows: list[dict[str, Any]],
+    *,
+    frozen_prior: dict[str, Any],
+    headers: list[str],
+    frozen_through_mi: int,
+    file_path: str,
+) -> None:
+    """
+    マスタプレビュー凍結列: 完了項目 j<=frozen_through_mi のセル値を行キーで merged_rows に注入する。
+    行番号マージは行わない（__norm_path + __iter_index のみ）。
+    """
+    rows_by_key = frozen_prior.get("rows_by_key")
+    if not isinstance(rows_by_key, dict) or not headers:
+        return
+    np = normalize_source_path(file_path)
+    ft = int(frozen_through_mi)
+    if ft < 0:
+        return
+    frozen_headers = headers[: ft + 1]
+    existing: set[tuple[str, int]] = set()
+    for row in merged_rows:
+        if not isinstance(row, dict):
+            continue
+        row.setdefault("__norm_path", np)
+        row.setdefault("__file_path", str(file_path))
+        key = (str(row.get("__norm_path") or np), _row_iter_index(row))
+        existing.add(key)
+        frozen_row = rows_by_key.get(key)
+        if not isinstance(frozen_row, list):
+            continue
+        for j, h in enumerate(frozen_headers):
+            if j < len(frozen_row):
+                row[h] = frozen_row[j]
+    for key, frozen_row in rows_by_key.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        if str(key[0]) != np or key in existing:
+            continue
+        if not isinstance(frozen_row, list):
+            continue
+        stub: dict[str, Any] = {
+            "__file_path": str(file_path),
+            "__norm_path": np,
+            "__iter_index": int(key[1]),
+        }
+        for j, h in enumerate(headers):
+            if j <= ft and j < len(frozen_row):
+                stub[h] = frozen_row[j]
+        merged_rows.append(stub)
+
+
+def _finalize_master_preview_frozen_capture(
+    data: dict[str, Any],
+    headers: list[str],
+    file_paths: list[str],
+    *,
+    pool_rows: list[dict[str, Any]],
+) -> None:
+    dd = data.get("__debug_diag")
+    if not isinstance(dd, dict):
+        return
+    cap_out = dd.get("frozen_capture_out")
+    if not isinstance(cap_out, dict):
+        return
+    mi_cap = dd.get("mi_idx")
+    if not isinstance(mi_cap, int) or mi_cap < 0 or not pool_rows:
+        return
+    from svc.data_agg_master_preview import build_master_preview_frozen_snapshot  # noqa: WPS433
+
+    build_master_preview_frozen_snapshot(
+        cap_out,
+        pool_rows=pool_rows,
+        headers=headers,
+        through_mi=int(mi_cap),
+        file_paths=file_paths,
+    )
+
+
 def _build_match_key_frames_by_item(
     merged_rows: list[Any],
     items: list[Any],
@@ -616,13 +695,22 @@ class _TableRowEmitContext:
     anchors: tuple[str, ...]
 
     @classmethod
-    def from_items(cls, items: list[dict[str, Any]], headers: list[str]) -> _TableRowEmitContext:
+    def from_items(
+        cls,
+        items: list[dict[str, Any]],
+        headers: list[str],
+        *,
+        anchor_headers_override: list[str] | None = None,
+    ) -> _TableRowEmitContext:
         host_patterns: list[str] = []
         for it in items:
             if not isinstance(it, dict) or not _item_join_defs_list(it):
                 continue
             host_patterns.extend(_item_source_file_patterns(it))
-        anchors = tuple(_anchor_headers_for_table_output(items, headers))
+        if anchor_headers_override is not None:
+            anchors = tuple(str(h) for h in anchor_headers_override if h)
+        else:
+            anchors = tuple(_anchor_headers_for_table_output(items, headers))
         return cls(tuple(host_patterns), anchors)
 
     def should_emit(self, row: dict[str, Any]) -> bool:
@@ -2860,6 +2948,23 @@ def compute_batch_table_rows(
                 join_key_names = ["__file_path", "__iter_index"]
             _ph(5, "", file_index=fi)
             merged_rows = _merge_rows_by_join_keys(file_rows, join_key_names)
+            if (
+                preview_master_mode
+                and isinstance(dd, dict)
+                and isinstance(dd.get("frozen_prior"), dict)
+                and dd.get("frozen_through_mi") is not None
+            ):
+                _apply_master_preview_frozen_overlay(
+                    merged_rows,
+                    frozen_prior=dd["frozen_prior"],
+                    headers=headers,
+                    frozen_through_mi=int(dd["frozen_through_mi"]),
+                    file_path=str(file_path),
+                )
+            if isinstance(dd, dict) and isinstance(dd.get("frozen_capture_acc"), list):
+                dd["frozen_capture_acc"].extend(
+                    [r for r in merged_rows if isinstance(r, dict)]
+                )
             if use_join_search_merge:
                 join_file_passes.append(
                     {
@@ -3251,6 +3356,14 @@ def compute_batch_table_rows(
         _tbl_t0 = time.perf_counter()
         pf_t_tb0 = _tbl_t0 if per_file_timing else 0.0
         _emit_ctx = _TableRowEmitContext.from_items(items, headers)
+        if preview_master_mode and isinstance(dd, dict):
+            _frozen_anchors = dd.get("frozen_anchor_headers")
+            if isinstance(_frozen_anchors, list) and _frozen_anchors:
+                _emit_ctx = _TableRowEmitContext.from_items(
+                    items,
+                    headers,
+                    anchor_headers_override=[str(h) for h in _frozen_anchors],
+                )
         filtered_rows = [
             r
             for r in join_search_global_pool
@@ -3305,6 +3418,18 @@ def compute_batch_table_rows(
             table_rows.extend(_merged_dict_rows_to_table_rows(rows_for_table, headers))
         if batch_timing:
             bt_table += time.perf_counter() - _tbl_t0
+    if preview_master_mode and isinstance(dd, dict):
+        cap_pool: list[dict[str, Any]] = []
+        if use_join_search_merge and join_search_global_pool:
+            cap_pool = [r for r in join_search_global_pool if isinstance(r, dict)]
+        else:
+            acc = dd.get("frozen_capture_acc")
+            if isinstance(acc, list):
+                cap_pool = [r for r in acc if isinstance(r, dict)]
+        if cap_pool:
+            _finalize_master_preview_frozen_capture(
+                data, headers, paths, pool_rows=cap_pool
+            )
     if batch_timing:
         try:
             total_ms = int((time.perf_counter() - t_batch_start) * 1000)

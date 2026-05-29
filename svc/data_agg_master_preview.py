@@ -19,6 +19,7 @@ from svc.svc_data_agg import resolve_path_column_for_merge
 _logger = logging.getLogger(__name__)
 
 MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
+FROZEN_SNAPSHOT_VERSION = 1
 
 
 def master_preview_one_shot_eligible(
@@ -82,6 +83,109 @@ def scenario_for_full_preview(scenario_base: dict[str, Any]) -> dict[str, Any]:
     return s
 
 
+def build_master_preview_frozen_snapshot(
+    out: dict[str, Any],
+    *,
+    pool_rows: list[dict[str, Any]],
+    headers: list[str],
+    through_mi: int,
+    file_paths: list[str],
+) -> None:
+    """join プール行（__norm_path + __iter_index）から凍結スナップショットを out に書き込む。"""
+    from svc.svc_data_agg import _row_iter_index, normalize_source_path  # noqa: WPS433
+
+    paths = [str(p) for p in file_paths]
+    rows_by_key: dict[tuple[str, int], list[Any]] = {}
+    for r in pool_rows:
+        if not isinstance(r, dict):
+            continue
+        np = str(r.get("__norm_path") or "")
+        if not np:
+            fp = str(r.get("file_path") or "")
+            if fp:
+                np = normalize_source_path(fp)
+        if not np:
+            continue
+        key = (np, int(_row_iter_index(r)))
+        rows_by_key[key] = [r.get(h) for h in headers]
+    out.clear()
+    out.update(
+        {
+            "version": FROZEN_SNAPSHOT_VERSION,
+            "headers": list(headers),
+            "through_mi": int(through_mi),
+            "paths_head": tuple(paths[:8]),
+            "paths_count": len(paths),
+            "rows_by_key": rows_by_key,
+        }
+    )
+
+
+def preview_compute_file_paths(
+    scenario_base: dict[str, Any],
+    scan_paths: list[str],
+) -> list[str]:
+    """compute_batch と同じ cell 条件によるファイル絞り込み後のパス一覧。"""
+    from svc.svc_data_agg import filter_file_paths_for_master_preview  # noqa: WPS433
+
+    items = list((scenario_base or {}).get("items") or [])
+    raw = [str(p) for p in scan_paths]
+    if not raw:
+        return []
+    return filter_file_paths_for_master_preview(raw, items)
+
+
+def frozen_snapshot_invalid_reason(
+    snapshot: dict[str, Any] | None,
+    *,
+    headers: list[str],
+    file_paths: list[str],
+    expected_through_mi: int,
+) -> str | None:
+    """有効なら None。無効ならログ用 reason コード。"""
+    if not isinstance(snapshot, dict):
+        return "no_snapshot"
+    if snapshot.get("version") != FROZEN_SNAPSHOT_VERSION:
+        return "version"
+    if int(snapshot.get("through_mi", -1)) != int(expected_through_mi):
+        return "through_mi"
+    snap_headers = snapshot.get("headers")
+    if not isinstance(snap_headers, list) or list(snap_headers) != list(headers):
+        return "headers"
+    paths = [str(p) for p in file_paths]
+    if int(snapshot.get("paths_count", -1)) != len(paths):
+        return "paths_count"
+    head = snapshot.get("paths_head")
+    if isinstance(head, list):
+        head = tuple(head)
+    if not isinstance(head, tuple):
+        return "paths_head"
+    if head != tuple(paths[:8]):
+        return "paths_head"
+    rbk = snapshot.get("rows_by_key")
+    if not isinstance(rbk, dict) or len(rbk) <= 0:
+        return "empty_rows"
+    return None
+
+
+def validate_frozen_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    headers: list[str],
+    file_paths: list[str],
+    expected_through_mi: int,
+) -> bool:
+    return (
+        frozen_snapshot_invalid_reason(
+            snapshot,
+            headers=headers,
+            file_paths=file_paths,
+            expected_through_mi=expected_through_mi,
+        )
+        is None
+    )
+
+
 def scenario_for_stepped_preview(
     scenario_base: dict[str, Any],
     *,
@@ -89,6 +193,10 @@ def scenario_for_stepped_preview(
     master_step_idx: int,
     active_slot_indices: list[int],
     use_max_sources_for_current_item: bool = False,
+    frozen_through_mi: int | None = None,
+    frozen_prior: dict[str, Any] | None = None,
+    frozen_capture_out: dict[str, Any] | None = None,
+    frozen_capture_acc: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     一括OFF: j < mi はフルソース、j == mi は実行済みシナリオ分だけ、j > mi はソース空（セル取得と同様）。
@@ -106,6 +214,13 @@ def scenario_for_stepped_preview(
         for i, it in enumerate(items_orig)
     ]
     path_col_hint = resolve_path_column_for_merge(items_orig, headers_full) or ""
+    frozen_anchor_headers: list[str] | None = None
+    if frozen_through_mi is not None and isinstance(frozen_prior, dict):
+        from svc.svc_data_agg import _anchor_headers_for_table_output  # noqa: WPS433
+
+        frozen_anchor_headers = _anchor_headers_for_table_output(
+            items_orig, headers_full
+        )
     new_items: list[dict[str, Any]] = []
     active = list(active_slot_indices)
     for j, it in enumerate(items_orig):
@@ -114,7 +229,8 @@ def scenario_for_stepped_preview(
             itc = {"name": "?"}
         sources = list(itc.get("sources") or [])
         if j < mi_idx:
-            pass
+            if frozen_through_mi is not None and j <= int(frozen_through_mi):
+                itc["sources"] = []
         elif j == mi_idx:
             if use_max_sources_for_current_item and active:
                 n_pick = len(active)
@@ -132,11 +248,22 @@ def scenario_for_stepped_preview(
             itc["sources"] = []
         new_items.append(itc)
     scen["items"] = new_items
+    diag_extra: dict[str, Any] = {}
+    if frozen_through_mi is not None and isinstance(frozen_prior, dict):
+        diag_extra["frozen_through_mi"] = int(frozen_through_mi)
+        diag_extra["frozen_prior"] = frozen_prior
+        if frozen_anchor_headers:
+            diag_extra["frozen_anchor_headers"] = list(frozen_anchor_headers)
+    if frozen_capture_out is not None:
+        diag_extra["frozen_capture_out"] = frozen_capture_out
+    if frozen_capture_acc is not None:
+        diag_extra["frozen_capture_acc"] = frozen_capture_acc
     scen["__debug_diag"] = {
         "enabled": False,
         "source": MASTER_PREVIEW_DIAG_SOURCE,
         "mi_idx": int(mi_idx),
         "path_col_hint": str(path_col_hint),
+        **diag_extra,
     }
     return scen
 

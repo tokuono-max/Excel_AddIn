@@ -229,6 +229,14 @@ def data_agg_master_progress_one_shot_enabled() -> bool:
     return True
 
 
+def data_agg_master_frozen_columns_enabled() -> bool:
+    """マスタ進捗: 完了項目列を行キー付き凍結し、次項目以降の compute で再走査しない。DATA_AGG_MASTER_FROZEN_COLUMNS=0 で無効。"""
+    raw = os.environ.get("DATA_AGG_MASTER_FROZEN_COLUMNS", "").strip().lower()
+    if raw == "0":
+        return False
+    return True
+
+
 def diag_log_file_enabled() -> bool:
     """hc_csv_diag.log へ書き込むか（マスタ診断・data_agg 診断・conflict HWND 診断・UI 前面診断・タイトルバー診断）。"""
     return (

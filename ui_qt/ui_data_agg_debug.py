@@ -80,7 +80,10 @@ from ui_qt.ui_common import create_progress_dialog
 _data_agg_probe_log = get_data_agg_diag_logger()
 
 from svc.data_agg_master_preview import (
+    FROZEN_SNAPSHOT_VERSION,
+    frozen_snapshot_invalid_reason,
     master_preview_one_shot_eligible,
+    preview_compute_file_paths,
     run_preview_compute,
     scenario_for_stepped_preview,
 )
@@ -803,6 +806,8 @@ class DataAggDebugDialog(QDialog):
         self._mpv_progress_rows_by_mi: dict[int, tuple[int, list[list[Any]]]] = {}
         # 直近まで compute 済みの項目（実行可能シナリオなし項目へ移ったときの prog フォールバック用）
         self._last_master_completed_mi_idx: int | None = None
+        # mpv: 完了項目列の凍結（行キー __norm_path + __iter_index）。次項目 compute の再走査を抑える。
+        self._mpv_frozen_snapshots: dict[int, dict[str, Any]] = {}
         # 描画時に「現在列」として扱う項目 index（フォールバック表示整合用）
         self._mpv_display_mi_idx: int | None = None
         # シナリオなし項目の直後に「実行あり」項目へ入ったとき、入場直後の value グリッド再構築を
@@ -2604,6 +2609,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()
+        self._mpv_frozen_snapshots.clear()
         self._last_master_completed_mi_idx = None
         self._mpv_display_mi_idx = None
         self._mpv_deferred_value_grid_mi = None
@@ -3318,6 +3324,79 @@ class DataAggDebugDialog(QDialog):
             tuple(int(x) for x in self._active_slot_indices),
         )
 
+    def _mpv_frozen_columns_enabled(self) -> bool:
+        from core import core_env  # noqa: WPS433
+
+        return core_env.data_agg_master_frozen_columns_enabled()
+
+    def _mpv_preview_headers(self) -> list[str]:
+        items = list((self._scenario_for_dry_run or {}).get("items") or [])
+        return [
+            it.get("name") or it.get("id") or ("項目_%s" % i)
+            for i, it in enumerate(items)
+        ]
+
+    def _mpv_preview_compute_paths(self) -> list[str]:
+        """compute_batch 内部 filter と同じ絞り込み後パス（凍結検証用）。"""
+        return preview_compute_file_paths(
+            self._scenario_for_dry_run or {},
+            list(self._debug_scan_paths or []),
+        )
+
+    def _mpv_frozen_context_for_mi(self, mi_idx: int) -> tuple[dict[str, Any] | None, int | None]:
+        """次項目 compute 用: (frozen_prior, frozen_through_mi)。不適格時は (None, None)。"""
+        if not self._mpv_frozen_columns_enabled():
+            return None, None
+        if int(mi_idx) <= 0:
+            return None, None
+        expected_through = int(mi_idx) - 1
+        snap = self._mpv_frozen_snapshots.get(expected_through)
+        headers = self._mpv_preview_headers()
+        paths = self._mpv_preview_compute_paths()
+        reason = frozen_snapshot_invalid_reason(
+            snap,
+            headers=headers,
+            file_paths=paths,
+            expected_through_mi=expected_through,
+        )
+        if reason is not None:
+            try:
+                scan_n = len(self._debug_scan_paths or [])
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] mpv_frozen skip mi_idx=%s reason=%s "
+                    "expected_through=%s snap_through=%s paths_filter=%s scan_paths=%s",
+                    mi_idx,
+                    reason,
+                    expected_through,
+                    (snap or {}).get("through_mi") if isinstance(snap, dict) else None,
+                    len(paths),
+                    scan_n,
+                )
+            except Exception:
+                pass
+            return None, None
+        return snap, expected_through
+
+    def _mpv_store_frozen_snapshot(self, cap: dict[str, Any]) -> None:
+        if cap.get("version") != FROZEN_SNAPSHOT_VERSION:
+            return
+        through = cap.get("through_mi")
+        if not isinstance(through, int) or through < 0:
+            return
+        stored = dict(cap)
+        self._mpv_frozen_snapshots[int(through)] = stored
+        try:
+            rbk = stored.get("rows_by_key") or {}
+            _data_agg_probe_log.info(
+                "[DATA_AGG_DIAG] mpv_frozen stored through_mi=%s keys=%s paths=%s snapshots=%s",
+                through,
+                len(rbk) if isinstance(rbk, dict) else 0,
+                stored.get("paths_count"),
+                len(self._mpv_frozen_snapshots),
+            )
+        except Exception:
+            pass
+
     def _mpv_one_shot_eligible(self) -> bool:
         from core import core_env
 
@@ -3362,14 +3441,33 @@ class DataAggDebugDialog(QDialog):
         use_max_sources: bool,
         progress_hook: Any,
         probe_caller: str,
+        frozen_capture_out: dict[str, Any] | None = None,
     ) -> list[list[Any]]:
+        frozen_prior, frozen_through = self._mpv_frozen_context_for_mi(int(mi_idx))
+        cap_acc: list[dict[str, Any]] | None = (
+            [] if frozen_capture_out is not None else None
+        )
         scen = scenario_for_stepped_preview(
             scenario_base,
             mi_idx=int(mi_idx),
             master_step_idx=int(master_step_idx),
             active_slot_indices=list(active_slot_indices),
             use_max_sources_for_current_item=bool(use_max_sources),
+            frozen_through_mi=frozen_through,
+            frozen_prior=frozen_prior,
+            frozen_capture_out=frozen_capture_out,
+            frozen_capture_acc=cap_acc,
         )
+        if frozen_prior is not None and frozen_through is not None:
+            try:
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] mpv_frozen compute mi_idx=%s through=%s caller=%s",
+                    mi_idx,
+                    frozen_through,
+                    probe_caller,
+                )
+            except Exception:
+                pass
         _h, table_rows, _ev, _jt = run_preview_compute(
             scen,
             scan_paths,
@@ -3378,7 +3476,10 @@ class DataAggDebugDialog(QDialog):
             progress_hook=progress_hook,
             probe_caller=probe_caller,
         )
-        return [list(r) for r in table_rows]
+        rows_out = [list(r) for r in table_rows]
+        if frozen_capture_out is not None:
+            self._mpv_store_frozen_snapshot(frozen_capture_out)
+        return rows_out
 
     def _mpv_store_step_cache(
         self,
@@ -3910,6 +4011,13 @@ class DataAggDebugDialog(QDialog):
                     and n_pick_req == n_act_compute
                     and n_act_compute > 0
                 )
+                frozen_cap: dict[str, Any] | None = None
+                if (
+                    self._mpv_frozen_columns_enabled()
+                    and n_act_compute > 0
+                    and n_pick_req >= n_act_compute
+                ):
+                    frozen_cap = {}
                 _off_hook = None
                 try:
                     _pd = getattr(self, "_run_progress_dlg", None)
@@ -3930,6 +4038,7 @@ class DataAggDebugDialog(QDialog):
                         use_max_sources=use_max,
                         progress_hook=_off_hook,
                         probe_caller="mpv_progress",
+                        frozen_capture_out=frozen_cap,
                     )
                 except Exception:
                     _logger.exception("mpv progress batch rows failed")
@@ -4629,6 +4738,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()
+        self._mpv_frozen_snapshots.clear()
         self._last_master_completed_mi_idx = None
         self._mpv_display_mi_idx = None
         self._mpv_deferred_value_grid_mi = None
@@ -5586,6 +5696,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()
+        self._mpv_frozen_snapshots.clear()
         self._last_master_completed_mi_idx = None
         self._mpv_display_mi_idx = None
         self._summary_rows.clear()
