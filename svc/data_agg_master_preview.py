@@ -21,6 +21,43 @@ _logger = logging.getLogger(__name__)
 MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
 
 
+def master_preview_one_shot_eligible(
+    scenario_base: dict[str, Any],
+    mi_idx: int,
+    active_slot_indices: list[int],
+) -> bool:
+    """
+    同一マスタ項目内の複数シナリオを、到達分ごとの段階 compute ではなく
+    全 active ソース一括 compute + ステップ別キャッシュで賄えるか。
+
+    結合キー探索ありシナリオは段階プールが変わるため False（従来どおり段階 compute）。
+    """
+    active = [int(x) for x in active_slot_indices if isinstance(x, int)]
+    if len(active) < 2:
+        return False
+    items = list((scenario_base or {}).get("items") or [])
+    if mi_idx < 0 or mi_idx >= len(items):
+        return False
+    from svc.svc_data_agg import _scenario_has_join_defs  # noqa: WPS433
+
+    if _scenario_has_join_defs(items):
+        return False
+    it = items[mi_idx]
+    if not isinstance(it, dict):
+        return False
+    sources = list(it.get("sources") or [])
+    for si in active:
+        if not (0 <= si < len(sources)):
+            continue
+        src = sources[si]
+        if not isinstance(src, dict):
+            return False
+        typ = str(src.get("type") or "cell").strip().lower()
+        if typ not in ("cell", "csv"):
+            return False
+    return True
+
+
 def scenario_for_full_preview(scenario_base: dict[str, Any]) -> dict[str, Any]:
     """
     フルソース・cell 条件によるファイル絞り込みのみ有効なプレビュー用シナリオ。

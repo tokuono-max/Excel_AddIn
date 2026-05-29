@@ -4,7 +4,7 @@ Python: 3.12+
 Module: ui_qt/ui_data_agg_debug.py
 Purpose: データ集約デバッグウィンドウ（要求定義 §3.1.3）。文言・列見出し・ツールチップは config/ui_data_agg.json の SCREENS.DEBUG（TIP_*）。
 History: 連続実行（シナリオ／マスタ一括）正常完了時に QMessageBox（SCREENS.DEBUG の MSG_RUN_ALL_*_DONE）。
-  本番コードに内蔵デモデータは含めない。live_items なし時は空状態プレースホルダ。抽出は svc_data_agg_extract。マスタプレビュー（mpv）は進捗行ベースの結合表示＋列マージバッファ（svc.data_agg_master_preview / run_preview_compute）。シナリオモード: 連携／結合フェーズかつ検出ファイルが多いとき、svc_data_agg_debug_run の progress_hook で非モーダル進捗を表示。build_master_items_live / _mpv_extract_colvals はファイル単位で xlsx_workbook_scope を張り .xlsx の load_workbook を再利用。
+  本番コードに内蔵デモデータは含めない。live_items なし時は空状態プレースホルダ。抽出は svc_data_agg_extract。マスタプレビュー（mpv）は進捗行ベースの結合表示＋列マージバッファ（svc.data_agg_master_preview / run_preview_compute）。結合探索なし・複数シナリオ時は項目内一括 compute＋段階キャッシュ先読み／バックフィル（DATA_AGG_MASTER_ONE_SHOT=0 で無効）。シナリオモード: 連携／結合フェーズかつ検出ファイルが多いとき、svc_data_agg_debug_run の progress_hook で非モーダル進捗を表示。build_master_items_live / _mpv_extract_colvals はファイル単位で xlsx_workbook_scope を張り .xlsx の load_workbook を再利用。
   2026-04-14: デバッグ—シナリオ/マスタでウィンドウタイトル（TITLE_SCENARIO/TITLE_MASTER）と連続実行ボタン（BTN_RUN_ALL_*、TIP_RUN_ALL_*）をモード連動。
   2026-04-14: 結果一覧: 列幅プログラム変更直後の遅延 sectionResized で user_resized が誤立ちしないよう、programmatic 解除を QTimer.singleShot(0) に遅延（世代で連続フィットに対応）。bump も同じセッション内で保護。
   2026-04-14: 診断: 結果一覧列幅—_fit_value_grid_columns で復元／内容フィットの分岐・viewport・先頭列幅・代表列 lo/hi/raw/fin を DATA_AGG_DIAG に出力。
@@ -80,6 +80,7 @@ from ui_qt.ui_common import create_progress_dialog
 _data_agg_probe_log = get_data_agg_diag_logger()
 
 from svc.data_agg_master_preview import (
+    master_preview_one_shot_eligible,
     run_preview_compute,
     scenario_for_stepped_preview,
 )
@@ -778,6 +779,8 @@ class DataAggDebugDialog(QDialog):
         self._mpv_grid: list[list[Any]] | None = None
         # mpv: extract_item_bundle 主値列のキャッシュ（(mi_idx, scenario_si)）
         self._mpv_extract_cache: dict[tuple[int, int], list[str]] = {}
+        # mpv: step 中に確定した現在列値のキャッシュ（軽量 progress 合成用）
+        self._mpv_colvals_cache: dict[tuple[int, int], list[str]] = {}
         # mpv 描画: 進捗マスク用の部分 compute_batch 行キャッシュ (key, rows)
         self._mpv_progress_rows_cache: tuple[Any, list[list[Any]]] | None = None
         # mpv 描画: n_pick（現在項目に取り込むソース本数）単位の progress 行キャッシュ
@@ -2597,6 +2600,7 @@ class DataAggDebugDialog(QDialog):
         self._scenario_bundle_caches.clear()
         self._master_sparse_notice_shown = False
         self._mpv_extract_cache.clear()
+        self._mpv_colvals_cache.clear()
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()
@@ -3314,6 +3318,194 @@ class DataAggDebugDialog(QDialog):
             tuple(int(x) for x in self._active_slot_indices),
         )
 
+    def _mpv_one_shot_eligible(self) -> bool:
+        from core import core_env
+
+        if not core_env.data_agg_master_progress_one_shot_enabled():
+            return False
+        if self._mode != 1:
+            return False
+        return master_preview_one_shot_eligible(
+            self._scenario_for_dry_run or {},
+            int(self._mi_idx),
+            list(self._active_slot_indices or []),
+        )
+
+    def _mpv_progress_step_cache_key_for(
+        self,
+        n_pick: int,
+        *,
+        mi_idx: int,
+        active_slot_indices: list[int],
+        scenario_id: int,
+        scan_paths: list[str],
+    ) -> tuple[Any, ...]:
+        head = tuple(str(scan_paths[i]) for i in range(min(5, len(scan_paths))))
+        return (
+            int(mi_idx),
+            int(n_pick),
+            scenario_id,
+            len(scan_paths),
+            head,
+            tuple(int(x) for x in active_slot_indices),
+        )
+
+    def _mpv_compute_progress_table_rows(
+        self,
+        *,
+        mi_idx: int,
+        master_step_idx: int,
+        active_slot_indices: list[int],
+        scenario_base: dict[str, Any],
+        scan_paths: list[str],
+        n_pick: int,
+        use_max_sources: bool,
+        progress_hook: Any,
+        probe_caller: str,
+    ) -> list[list[Any]]:
+        scen = scenario_for_stepped_preview(
+            scenario_base,
+            mi_idx=int(mi_idx),
+            master_step_idx=int(master_step_idx),
+            active_slot_indices=list(active_slot_indices),
+            use_max_sources_for_current_item=bool(use_max_sources),
+        )
+        _h, table_rows, _ev, _jt = run_preview_compute(
+            scen,
+            scan_paths,
+            max_primary_rows=self._master_preview_read_rows(),
+            max_table_rows=self._master_preview_display_rows(),
+            progress_hook=progress_hook,
+            probe_caller=probe_caller,
+        )
+        return [list(r) for r in table_rows]
+
+    def _mpv_store_step_cache(
+        self,
+        sk: tuple[Any, ...],
+        rows: list[list[Any]],
+        *,
+        mi_idx: int,
+        master_step_idx: int,
+    ) -> None:
+        self._mpv_progress_rows_step_cache[sk] = [list(r) for r in rows]
+        self._mpv_progress_rows_by_mi[int(mi_idx)] = (
+            int(master_step_idx),
+            list(rows),
+        )
+        n_act = len(self._active_slot_indices or [])
+        if rows and (n_act <= 0 or int(master_step_idx) >= n_act):
+            self._last_master_completed_mi_idx = int(mi_idx)
+
+    def _mpv_schedule_step_cache_backfill(
+        self,
+        *,
+        cancel_gen: int,
+        mi_idx: int,
+        n_act: int,
+        scenario_base: dict[str, Any],
+        active_copy: list[int],
+        paths_copy: list[str],
+    ) -> None:
+        """一括 compute 後、未到達 n_pick の段階行をバックグラウンドでキャッシュする。"""
+        if n_act < 2:
+            return
+        scen_id = id(scenario_base)
+        jobs: list[tuple[tuple[Any, ...], int]] = []
+        for k in range(1, n_act):
+            sk = self._mpv_progress_step_cache_key_for(
+                k,
+                mi_idx=mi_idx,
+                active_slot_indices=active_copy,
+                scenario_id=scen_id,
+                scan_paths=paths_copy,
+            )
+            if sk not in self._mpv_progress_rows_step_cache:
+                jobs.append((sk, k))
+
+        if not jobs:
+            return
+
+        def _worker() -> None:
+            for sk, k in jobs:
+                if cancel_gen != self._mpv_prefetch_cancel_gen:
+                    return
+                if sk in self._mpv_progress_rows_step_cache:
+                    continue
+                if not self._mpv_prog_compute_lock.acquire(blocking=False):
+                    return
+                try:
+                    if cancel_gen != self._mpv_prefetch_cancel_gen:
+                        continue
+                    if sk in self._mpv_progress_rows_step_cache:
+                        continue
+                    rows = self._mpv_compute_progress_table_rows(
+                        mi_idx=mi_idx,
+                        master_step_idx=k,
+                        active_slot_indices=active_copy,
+                        scenario_base=scenario_base,
+                        scan_paths=paths_copy,
+                        n_pick=k,
+                        use_max_sources=False,
+                        progress_hook=None,
+                        probe_caller="mpv_progress_backfill",
+                    )
+                except Exception:
+                    _logger.exception("mpv progress backfill failed n_pick=%s", k)
+                    continue
+                finally:
+                    self._mpv_prog_compute_lock.release()
+                dlg = self
+                QTimer.singleShot(
+                    0,
+                    lambda cg=cancel_gen, key=sk, r=rows, kk=k, m=mi_idx: dlg._mpv_backfill_apply(
+                        cg, key, r, kk, m
+                    ),
+                )
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="mpv_prog_backfill",
+        ).start()
+
+    def _mpv_backfill_apply(
+        self,
+        cancel_gen: int,
+        sk: tuple[Any, ...],
+        rows: list[list[Any]],
+        n_pick: int,
+        mi_idx: int,
+    ) -> None:
+        if cancel_gen != self._mpv_prefetch_cancel_gen:
+            return
+        if sk in self._mpv_progress_rows_step_cache:
+            return
+        self._mpv_progress_rows_step_cache[sk] = [list(r) for r in rows]
+        try:
+            _data_agg_probe_log.info(
+                "[DATA_AGG_DIAG] mpv_progress backfill=done mi_idx=%s n_pick=%s rows=%s",
+                mi_idx,
+                n_pick,
+                len(rows),
+            )
+        except Exception:
+            pass
+
+    def _mpv_can_colvals_from_progress(self) -> bool:
+        """結合プレビュー行から当該列を切り出す（extract 回避）。"""
+        if not self._scenario_for_dry_run or not self._debug_scan_paths:
+            return False
+        if int(self._master_step_idx) <= 1:
+            return True
+        if not self._mpv_one_shot_eligible():
+            return False
+        n_act = len(self._active_slot_indices or [])
+        if n_act <= 0:
+            return False
+        sk_full = self._mpv_progress_step_cache_key(n_act)
+        return sk_full in self._mpv_progress_rows_step_cache
+
     def _bump_mpv_prefetch_cancel(self) -> None:
         self._mpv_prefetch_cancel_gen += 1
 
@@ -3333,17 +3525,34 @@ class DataAggDebugDialog(QDialog):
             job = self._mpv_prefetch_q.get()
             if job is None:
                 break
-            (
-                cancel_gen,
-                sk_next,
-                scenario_base,
-                mi_idx,
-                next_master_step,
-                active_copy,
-                paths_copy,
-                max_pr,
-                max_tr,
-            ) = job
+            if len(job) >= 11:
+                (
+                    cancel_gen,
+                    sk_next,
+                    scenario_base,
+                    mi_idx,
+                    next_master_step,
+                    active_copy,
+                    paths_copy,
+                    max_pr,
+                    max_tr,
+                    use_max_sources,
+                    schedule_backfill,
+                ) = job
+            else:
+                (
+                    cancel_gen,
+                    sk_next,
+                    scenario_base,
+                    mi_idx,
+                    next_master_step,
+                    active_copy,
+                    paths_copy,
+                    max_pr,
+                    max_tr,
+                ) = job
+                use_max_sources = False
+                schedule_backfill = False
             if cancel_gen != self._mpv_prefetch_cancel_gen:
                 continue
             if sk_next in self._mpv_progress_rows_step_cache:
@@ -3365,21 +3574,18 @@ class DataAggDebugDialog(QDialog):
                 elif sk_next in self._mpv_progress_rows_step_cache:
                     pass
                 else:
-                    scen = scenario_for_stepped_preview(
-                        scenario_base,
+                    dlg = self
+                    out_rows = dlg._mpv_compute_progress_table_rows(
                         mi_idx=mi_idx,
                         master_step_idx=next_master_step,
                         active_slot_indices=active_copy,
-                    )
-                    _h, table_rows, _ev, _jt = run_preview_compute(
-                        scen,
-                        paths_copy,
-                        max_primary_rows=max_pr,
-                        max_table_rows=max_tr,
+                        scenario_base=scenario_base,
+                        scan_paths=paths_copy,
+                        n_pick=int(next_master_step),
+                        use_max_sources=bool(use_max_sources),
                         progress_hook=None,
                         probe_caller="mpv_progress_prefetch",
                     )
-                    out_rows = [list(r) for r in table_rows]
                     apply_after = True
             except Exception:
                 _logger.exception("mpv progress prefetch failed")
@@ -3389,8 +3595,16 @@ class DataAggDebugDialog(QDialog):
                 dlg = self
                 QTimer.singleShot(
                     0,
-                    lambda cg=cancel_gen, k=sk_next, r=out_rows: dlg._mpv_prefetch_apply(
-                        cg, k, r
+                    lambda cg=cancel_gen,
+                    k=sk_next,
+                    r=out_rows,
+                    m=mi_idx,
+                    na=next_master_step,
+                    sb=schedule_backfill,
+                    sc=scenario_base,
+                    ac=active_copy,
+                    pc=paths_copy: dlg._mpv_prefetch_apply(
+                        cg, k, r, m, na, sb, sc, ac, pc
                     ),
                 )
 
@@ -3399,20 +3613,38 @@ class DataAggDebugDialog(QDialog):
         cancel_gen: int,
         sk: tuple[Any, ...],
         rows: list[list[Any]],
+        mi_idx: int,
+        next_master_step: int,
+        schedule_backfill: bool,
+        scenario_base: dict[str, Any],
+        active_copy: list[int],
+        paths_copy: list[str],
     ) -> None:
         if cancel_gen != self._mpv_prefetch_cancel_gen:
             return
         if sk in self._mpv_progress_rows_step_cache:
             return
-        self._mpv_progress_rows_step_cache[sk] = rows
+        self._mpv_progress_rows_step_cache[sk] = [list(r) for r in rows]
         try:
             _data_agg_probe_log.info(
-                "[DATA_AGG_DIAG] mpv_progress prefetch=done n_pick=%s rows=%s",
+                "[DATA_AGG_DIAG] mpv_progress prefetch=done n_pick=%s rows=%s one_shot=%s",
                 sk[1] if len(sk) > 1 else "?",
                 len(rows),
+                schedule_backfill,
             )
         except Exception:
             pass
+        if schedule_backfill:
+            n_act = len(active_copy)
+            self._mpv_schedule_step_cache_backfill(
+                cancel_gen=cancel_gen,
+                mi_idx=int(mi_idx),
+                n_act=n_act,
+                scenario_base=scenario_base,
+                active_copy=active_copy,
+                paths_copy=paths_copy,
+            )
+            return
         tail = sk[-1] if isinstance(sk, tuple) and sk else ()
         n_act = len(tail) if isinstance(tail, tuple) else 0
         try:
@@ -3451,11 +3683,20 @@ class DataAggDebugDialog(QDialog):
         n_act = len(act)
         if n_act <= 0:
             return
-        if next_master_step_override is not None:
+        one_shot = self._mpv_one_shot_eligible()
+        if one_shot:
+            next_master_step = n_act
+            use_max_sources = True
+            schedule_backfill = True
+        elif next_master_step_override is not None:
             next_master_step = int(next_master_step_override)
+            use_max_sources = False
+            schedule_backfill = False
         else:
             step_idx = int(self._master_step_idx)
             next_master_step = step_idx + 1
+            use_max_sources = False
+            schedule_backfill = False
         if next_master_step > n_act or next_master_step < 1:
             return
         sk_next = self._mpv_progress_step_cache_key(next_master_step)
@@ -3478,6 +3719,8 @@ class DataAggDebugDialog(QDialog):
             paths_copy,
             max_pr,
             max_tr,
+            use_max_sources,
+            schedule_backfill,
         )
         try:
             self._mpv_prefetch_q.put_nowait(job)
@@ -3628,6 +3871,18 @@ class DataAggDebugDialog(QDialog):
                 pass
             self._mpv_progress_rows_cache = (key, rows)
             return rows
+        n_pick_req = self._mpv_progress_n_pick()
+        composed_rows = self._mpv_try_compose_progress_rows_from_cache(n_pick=n_pick_req)
+        if composed_rows is not None:
+            self._mpv_progress_rows_cache = (key, composed_rows)
+            sk_comp = self._mpv_progress_step_cache_key(n_pick_req)
+            self._mpv_store_step_cache(
+                sk_comp,
+                composed_rows,
+                mi_idx=int(self._mi_idx),
+                master_step_idx=int(self._master_step_idx),
+            )
+            return composed_rows
         t0 = time.perf_counter()
         self._mpv_display_mi_idx = int(self._mi_idx)
         try:
@@ -3640,7 +3895,6 @@ class DataAggDebugDialog(QDialog):
             )
         except Exception:
             pass
-        n_pick_req = self._mpv_progress_n_pick()
         sk_need = self._mpv_progress_step_cache_key(n_pick_req)
         from_prefetch_wait = False
         rows: list[list[Any]] = []
@@ -3650,11 +3904,11 @@ class DataAggDebugDialog(QDialog):
                 rows = [list(r) for r in hit_after_wait]
                 from_prefetch_wait = True
             else:
-                scen = scenario_for_stepped_preview(
-                    self._scenario_for_dry_run or {},
-                    mi_idx=int(self._mi_idx),
-                    master_step_idx=int(self._mpv_effective_master_step_for_preview()),
-                    active_slot_indices=list(self._active_slot_indices),
+                n_act_compute = len(self._active_slot_indices or [])
+                use_max = bool(
+                    self._mpv_one_shot_eligible()
+                    and n_pick_req == n_act_compute
+                    and n_act_compute > 0
                 )
                 _off_hook = None
                 try:
@@ -3664,15 +3918,19 @@ class DataAggDebugDialog(QDialog):
                 except Exception:
                     _off_hook = None
                 try:
-                    _h, table_rows, _ev, _jt = run_preview_compute(
-                        scen,
-                        self._debug_scan_paths,
-                        max_primary_rows=self._master_preview_read_rows(),
-                        max_table_rows=self._master_preview_display_rows(),
+                    rows = self._mpv_compute_progress_table_rows(
+                        mi_idx=int(self._mi_idx),
+                        master_step_idx=int(
+                            self._mpv_effective_master_step_for_preview()
+                        ),
+                        active_slot_indices=list(self._active_slot_indices),
+                        scenario_base=self._scenario_for_dry_run or {},
+                        scan_paths=list(self._debug_scan_paths),
+                        n_pick=int(n_pick_req),
+                        use_max_sources=use_max,
                         progress_hook=_off_hook,
                         probe_caller="mpv_progress",
                     )
-                    rows = list(table_rows)
                 except Exception:
                     _logger.exception("mpv progress batch rows failed")
                     rows = []
@@ -3702,17 +3960,74 @@ class DataAggDebugDialog(QDialog):
                 pass
         sk_store = sk_need
         if not from_prefetch_wait:
-            self._mpv_progress_rows_step_cache[sk_store] = [list(r) for r in rows]
-        self._mpv_progress_rows_by_mi[int(self._mi_idx)] = (
-            int(self._master_step_idx),
-            list(rows),
-        )
+            self._mpv_store_step_cache(
+                sk_store,
+                rows,
+                mi_idx=int(self._mi_idx),
+                master_step_idx=int(self._master_step_idx),
+            )
         n_act_done = len(self._active_slot_indices or [])
-        if rows and (n_act_done <= 0 or int(self._master_step_idx) >= n_act_done):
-            self._last_master_completed_mi_idx = int(self._mi_idx)
+        use_max_done = bool(
+            self._mpv_one_shot_eligible()
+            and n_pick_req == n_act_done
+            and n_act_done > 0
+        )
+        if use_max_done and not from_prefetch_wait:
+            self._mpv_schedule_step_cache_backfill(
+                cancel_gen=self._mpv_prefetch_cancel_gen,
+                mi_idx=int(self._mi_idx),
+                n_act=n_act_done,
+                scenario_base=copy.deepcopy(self._scenario_for_dry_run or {}),
+                active_copy=list(self._active_slot_indices or []),
+                paths_copy=list(self._debug_scan_paths),
+            )
         self._mpv_progress_rows_cache = (key, rows)
         self._mpv_maybe_enqueue_progress_prefetch()
         return rows
+
+    def _mpv_try_compose_progress_rows_from_cache(
+        self, *, n_pick: int
+    ) -> list[list[Any]] | None:
+        if not (self._scenario_for_dry_run and self._debug_scan_paths):
+            return None
+        act = list(self._active_slot_indices or [])
+        if len(act) != 1:
+            return None
+        cur_mi = int(self._mi_idx)
+        if cur_mi <= 0:
+            return None
+        prev_ent = self._mpv_progress_rows_by_mi.get(cur_mi - 1)
+        if prev_ent is None or not prev_ent[1]:
+            return None
+        scen_items = list((self._scenario_for_dry_run or {}).get("items") or [])
+        ncols = len(scen_items)
+        if ncols <= 0 or cur_mi >= ncols:
+            return None
+        base_rows: list[list[Any]] = []
+        for r in prev_ent[1]:
+            rr = list(r)
+            if len(rr) < ncols:
+                rr.extend([None] * (ncols - len(rr)))
+            elif len(rr) > ncols:
+                rr = rr[:ncols]
+            base_rows.append(rr)
+        if not base_rows:
+            return None
+        # step0（n_pick=0）は現在列が空の仕様。前項目 rows をそのまま再利用する。
+        if int(n_pick) <= 0:
+            try:
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] mpv_progress reuse=prev_item_rows_step0 mi_idx=%s step_idx=%s rows=%s",
+                    self._mi_idx,
+                    self._master_step_idx,
+                    len(base_rows),
+                )
+            except Exception:
+                pass
+            return base_rows
+        # n_pick>0 の段階は「前項目 rows + 現在列を行インデックスで差し込み」だと
+        # join/item の行順差でズレる可能性があるため、従来どおり compute_batch を使う。
+        return None
 
     def _mpv_extract_colvals(self, mi_idx: int, si: int) -> list[str]:
         """
@@ -4310,6 +4625,7 @@ class DataAggDebugDialog(QDialog):
         self._master_exec_armed = False
         self._mpv_grid = None
         self._mpv_extract_cache.clear()
+        self._mpv_colvals_cache.clear()
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()
@@ -4900,7 +5216,20 @@ class DataAggDebugDialog(QDialog):
         colvals = self._icap(list(slot.get("values_prod", slot["values_column"])))
         if self._scenario_for_dry_run and self._debug_scan_paths:
             # 速度優先: まず progress 側の本番同等行から現在列を取り、取れない場合のみ extract にフォールバック。
-            use_progress_colvals = int(self._master_step_idx) <= 1
+            use_progress_colvals = self._mpv_can_colvals_from_progress()
+            n_pick_now = int(self._mpv_progress_n_pick())
+            if use_progress_colvals and n_pick_now <= 0:
+                use_progress_colvals = False
+                try:
+                    _data_agg_probe_log.info(
+                        "[DATA_AGG_DIAG] mpv_colvals_from_progress skip=n_pick_zero "
+                        "mi_idx=%s step_idx=%s si=%s",
+                        self._mi_idx,
+                        self._master_step_idx,
+                        si,
+                    )
+                except Exception:
+                    pass
             col_from_prog: list[str] = []
             if use_progress_colvals:
                 try:
@@ -4926,7 +5255,7 @@ class DataAggDebugDialog(QDialog):
             else:
                 try:
                     _data_agg_probe_log.info(
-                        "[DATA_AGG_DIAG] mpv_colvals_from_progress skip=late_step "
+                        "[DATA_AGG_DIAG] mpv_colvals_from_progress skip=no_progress_cache "
                         "mi_idx=%s step_idx=%s si=%s",
                         self._mi_idx,
                         self._master_step_idx,
@@ -4960,6 +5289,7 @@ class DataAggDebugDialog(QDialog):
                     )
                 except Exception:
                     pass
+            self._mpv_colvals_cache[(int(self._mi_idx), int(si))] = list(colvals)
         gr = self._master_global_row_idx
         self._show_run_progress(
             _MASTER_DEBUG_PROGRESS_PHASES[1], 2, sub_total, window_title=prog_wt
@@ -5252,6 +5582,7 @@ class DataAggDebugDialog(QDialog):
         self._master_global_row_idx = 0
         self._mpv_grid = None
         self._mpv_extract_cache.clear()
+        self._mpv_colvals_cache.clear()
         self._mpv_progress_rows_cache = None
         self._mpv_progress_rows_step_cache.clear()
         self._mpv_progress_rows_by_mi.clear()

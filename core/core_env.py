@@ -221,6 +221,14 @@ def data_agg_master_progress_prefetch_enabled() -> bool:
     return os.environ.get("DATA_AGG_MASTER_OFF_PREFETCH", "").strip() == "1"
 
 
+def data_agg_master_progress_one_shot_enabled() -> bool:
+    """マスタ進捗の項目内一括 compute（結合探索なし時）。DATA_AGG_MASTER_ONE_SHOT=0 で無効。"""
+    raw = os.environ.get("DATA_AGG_MASTER_ONE_SHOT", "").strip().lower()
+    if raw == "0":
+        return False
+    return True
+
+
 def diag_log_file_enabled() -> bool:
     """hc_csv_diag.log へ書き込むか（マスタ診断・data_agg 診断・conflict HWND 診断・UI 前面診断・タイトルバー診断）。"""
     return (

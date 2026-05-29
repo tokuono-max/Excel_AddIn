@@ -50,6 +50,12 @@ call tools\dev\start_excel_packaged_test.bat
 - リポジトリルートへ **`cd`** し、**`HC_INSTALL_ROOT` / `HC_PACKAGED_DEPLOYMENT` を空にする**。
 - **Excel は起動しない。**
 
+## `repair_venv_python_dlls.bat`
+
+- **`.venv\Scripts\pythonw.exe`** が **`python312.dll` が見つからない`** と出るとき、ベース Python（`pyvenv.cfg` の `home`）から **`python312.dll` / `python3.dll`** を `.venv\Scripts` にコピーする。
+- xlwings は RunPython 時に **`cd` で Scripts に移ってから `pythonw` を起動**するため、DLL が Scripts に無いと失敗することがある（`python.exe` だけでは再現しない場合あり）。
+- 例: `call tools\dev\repair_venv_python_dlls.bat`
+
 ## `start_excel.bat`
 
 - **引数なし** … `choice` で **1＝配布** / **2＝開発**（いずれも **`HC_*` のみ変更**）。
