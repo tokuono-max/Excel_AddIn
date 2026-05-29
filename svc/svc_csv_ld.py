@@ -3,14 +3,17 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-04-10
-Version: 1.3.13
+Updated: 2026-05-29
+Version: 1.3.16
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.16 (2026-05-29) 進捗滑らか化: Excel 書込み 50k 刻み + 時間ベース IPC・UI バー補間・poll 100ms。
+  - 1.3.15 (2026-05-29) 進捗 IPC 既定間隔を 50k 行に戻し UI 更新を高頻度化（Excel 書込み最適化は維持）。
+  - 1.3.14 (2026-05-29) Excel 書込み高速化: チャンク 100k 既定・書式 @ をシート単位一括・進捗 IPC 間引き・EnableEvents 抑止・ループ内 yield 削減。
   - 1.3.13 (2026-04-10) 計測: `pick_to_done_ms`（ファイル確定〜`load_csv_flow_done`）。`phase=pick_confirmed` で区間 B 始点。docs/csv_ld_perf_measurement.md 参照。
   - 1.3.12 (2026-04-07) ファイル選択後・処理完了後に core_w32.bring_to_front で Excel 前面復帰（背面に回る事象の緩和）。ui_csv_ld のダイアログ終了時も同対応。
   - 1.3.11 (2026-04-06) 環境変数: HC_PROGRESS_WINDOW_STARTUP_WAIT_SEC / HC_EXCEL_HWND を core.core_env 経由に統一。
@@ -37,7 +40,7 @@ from core.core_cursor import notify_ui_ready, notify_wait_form_ready
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.13"
+__version__ = "1.3.16"
 
 try:
     from core import core_cst as cst
@@ -87,9 +90,98 @@ def _ld_trace(fmt: str, *args: object) -> None:
 
 # 物理制約定数（hc_csv_ld と同様）
 CHUNK_PCT_BASE: float = 0.1
-MAX_CHUNK_LIMIT: int = 50000
+MAX_CHUNK_LIMIT: int = 100000
 MIN_CHUNK_LIMIT: int = 100
 MAX_ROWS_PER_SHEET: int = 1000000
+DEFAULT_PROGRESS_STRIDE_ROWS: int = 25000
+DEFAULT_EXCEL_WRITE_STEP_ROWS: int = 50000
+DEFAULT_PROGRESS_MIN_INTERVAL_SEC: float = 0.35
+_PERF_MODE_SAVED: dict[int, dict[str, Any]] = {}
+
+
+def _max_chunk_rows() -> int:
+    """HC_CSV_LD_MAX_CHUNK_ROWS で上書き可能（既定 MAX_CHUNK_LIMIT）。"""
+    raw = core_env.get("HC_CSV_LD_MAX_CHUNK_ROWS")
+    if raw is not None:
+        try:
+            return max(MIN_CHUNK_LIMIT, min(500000, int(str(raw).strip())))
+        except ValueError:
+            pass
+    return MAX_CHUNK_LIMIT
+
+
+def resolve_read_chunk_size(val_total: int) -> int:
+    """pandas read_csv の chunksize。行数の 10% を cap 内に収める。"""
+    calc_chunk_v = int(max(0, int(val_total)) * CHUNK_PCT_BASE)
+    cap = _max_chunk_rows()
+    return min(cap, max(MIN_CHUNK_LIMIT, calc_chunk_v))
+
+
+def resolve_excel_write_step_rows(val_total: int) -> int:
+    """write_chunk の COM 分割行数（pandas 読込 chunk より小さくし進捗を細かく更新）。"""
+    raw = core_env.get("HC_CSV_LD_EXCEL_WRITE_ROWS")
+    if raw is not None:
+        try:
+            return max(5000, min(200000, int(str(raw).strip())))
+        except ValueError:
+            pass
+    vt = max(1, int(val_total))
+    return max(5000, min(DEFAULT_EXCEL_WRITE_STEP_ROWS, vt))
+
+
+def resolve_progress_min_interval_sec() -> float:
+    """進捗 IPC の最短更新間隔（秒）。HC_CSV_LD_PROGRESS_MIN_INTERVAL_SEC。"""
+    raw = core_env.get("HC_CSV_LD_PROGRESS_MIN_INTERVAL_SEC")
+    if raw is not None:
+        try:
+            return max(0.1, min(2.0, float(str(raw).strip())))
+        except ValueError:
+            pass
+    return DEFAULT_PROGRESS_MIN_INTERVAL_SEC
+
+
+def resolve_progress_stride_rows(val_total: int) -> int:
+    """進捗 pickle 更新の行間隔。HC_CSV_LD_PROGRESS_STRIDE_ROWS で上書き可能。"""
+    raw = core_env.get("HC_CSV_LD_PROGRESS_STRIDE_ROWS")
+    if raw is not None:
+        try:
+            return max(5000, int(str(raw).strip()))
+        except ValueError:
+            pass
+    vt = max(1, int(val_total))
+    return max(5000, min(DEFAULT_PROGRESS_STRIDE_ROWS, vt))
+
+
+def should_emit_progress_update(
+    val_accum_total: int,
+    val_total: int,
+    last_progress_at: int,
+    *,
+    stride: int,
+    last_progress_mono: float = 0.0,
+    min_interval_sec: float = DEFAULT_PROGRESS_MIN_INTERVAL_SEC,
+) -> bool:
+    """進捗 IPC を書くべきタイミング（行数 stride または最短時間経過）。"""
+    now = time.monotonic()
+    if last_progress_mono > 0 and (now - last_progress_mono) >= max(0.1, float(min_interval_sec)):
+        return True
+    if val_accum_total <= 0:
+        return True
+    if val_accum_total >= val_total:
+        return True
+    if last_progress_at <= 0:
+        return True
+    return (val_accum_total - last_progress_at) >= max(1, int(stride))
+
+
+def _apply_sheet_text_number_format(sh: Any, last_row: int, max_col: int) -> None:
+    """データ範囲全体を文字列書式 (@) に一括設定（chunk 毎 COM 呼び出しを避ける）。"""
+    if last_row <= 0 or max_col <= 0:
+        return
+    try:
+        sh.range((1, 1), (last_row, max_col)).number_format = "@"
+    except Exception:
+        pass
 
 def _submit_request_dict(req_dict: dict[str, Any]) -> Path:
     """ui_server への要求を request_dir に pickle で投げる。"""
@@ -159,6 +251,8 @@ def _submit_progress_ui(
             "progress_path": str(progress_path),
             "phase_total": int(phase_total),
             "excel_lock": False,
+            "progress_poll_ms": 100,
+            "progress_bar_creep_pct": 2,
             # 枠だけ表示を避けるため Qt 描画を使用（WA_NativeWindow を付けない）
             "no_native_window": True,
         }
@@ -181,12 +275,31 @@ def _submit_progress_ui(
 
 
 def _set_performance_mode(app: Any, on: bool) -> None:
-    """Excel の画面更新・計算を抑止/復帰させる（高速化）。on=True のとき画面更新を抑止。"""
+    """Excel の画面更新・計算・イベントを抑止/復帰（一括書込み高速化）。"""
     try:
         api = getattr(app, "api", None) or app
-        # 抑止時は ScreenUpdating=False（on=True → False）。復帰時は True。
-        api.ScreenUpdating = not on
-        api.Calculation = -4135 if on else -4105  # xlCalculationManual / xlCalculationAutomatic
+        key = id(api)
+        if on:
+            _PERF_MODE_SAVED[key] = {
+                "ScreenUpdating": api.ScreenUpdating,
+                "Calculation": api.Calculation,
+                "EnableEvents": api.EnableEvents,
+                "DisplayAlerts": api.DisplayAlerts,
+            }
+            api.ScreenUpdating = False
+            api.Calculation = -4135  # xlCalculationManual
+            api.EnableEvents = False
+            api.DisplayAlerts = False
+        else:
+            saved = _PERF_MODE_SAVED.pop(key, None)
+            if saved is not None:
+                api.ScreenUpdating = saved.get("ScreenUpdating", True)
+                api.Calculation = saved.get("Calculation", -4105)
+                api.EnableEvents = saved.get("EnableEvents", True)
+                api.DisplayAlerts = saved.get("DisplayAlerts", True)
+            else:
+                api.ScreenUpdating = True
+                api.Calculation = -4105  # xlCalculationAutomatic
     except Exception:
         pass
 
@@ -456,8 +569,61 @@ def _execute_jit_import(
     sh_target = None
     max_col = 0  # 書き込み列数（オートフィット用）
 
-    calc_chunk_v = int(val_total * CHUNK_PCT_BASE)
-    chunk_size_v = min(MAX_CHUNK_LIMIT, max(MIN_CHUNK_LIMIT, calc_chunk_v))
+    chunk_size_v = resolve_read_chunk_size(val_total)
+    write_step_v = resolve_excel_write_step_rows(val_total)
+    progress_stride = resolve_progress_stride_rows(val_total)
+    progress_min_sec = resolve_progress_min_interval_sec()
+    last_progress_rows = 0
+    last_progress_mono = 0.0
+    logger.info(
+        "[CSV_LD] phase=jit_import_config rows=%s chunk_size=%s write_step=%s "
+        "progress_stride=%s progress_min_sec=%s",
+        val_total,
+        chunk_size_v,
+        write_step_v,
+        progress_stride,
+        progress_min_sec,
+    )
+    _ld_trace(
+        "[CSV_LD_TRACE] jit_import_config rows=%s chunk_size=%s write_step=%s "
+        "progress_stride=%s progress_min_sec=%s",
+        val_total,
+        chunk_size_v,
+        write_step_v,
+        progress_stride,
+        progress_min_sec,
+    )
+
+    def _emit_write_progress(done_rows: int) -> None:
+        nonlocal progress_seq, last_progress_rows, last_progress_mono
+        if progress_path is None:
+            return
+        if not should_emit_progress_update(
+            done_rows,
+            val_total,
+            last_progress_rows,
+            stride=progress_stride,
+            last_progress_mono=last_progress_mono,
+            min_interval_sec=progress_min_sec,
+        ):
+            return
+        pct = min(99, int((done_rows / val_total) * 100)) if val_total else 0
+        _progress_write(
+            progress_path,
+            {
+                "status": "RUN",
+                "phase_i": 2,
+                "phase": "Excelへ書き込み中",
+                "done": done_rows,
+                "total": val_total,
+                "pct": pct,
+                "current_file": str_fname,
+                "seq": progress_seq,
+            },
+        )
+        progress_seq += 1
+        last_progress_rows = done_rows
+        last_progress_mono = time.monotonic()
     # 読込値は全て文字列として扱う（空セルは NaN にせず '' のまま）
     reader = pd.read_csv(
         str_path,
@@ -510,6 +676,8 @@ def _execute_jit_import(
             while processed_chunk_idx < val_rows_in_chunk:
                 if sh_target is None or val_accum_in_sheet >= MAX_ROWS_PER_SHEET:
                     if sh_target is not None:
+                        if max_col > 0:
+                            _apply_sheet_text_number_format(sh_target, val_accum_in_sheet, max_col)
                         if xlc and max_col > 0:
                             xlc.clear_used_range_overflow(sh_target, val_accum_in_sheet, max_col)
                         _finalize_sheet_context(
@@ -527,8 +695,6 @@ def _execute_jit_import(
                             sh_target = _add_new_sheet_direct(book, str_target_name)
                     else:
                         sh_target = _add_new_sheet_direct(book, str_target_name)
-                        if xlc:
-                            xlc.yield_to_excel()
                     val_accum_in_sheet = 0
                     is_new_sheet_boundary = True
                 else:
@@ -553,51 +719,37 @@ def _execute_jit_import(
                 if matrix and len(matrix[0]) > max_col:
                     max_col = len(matrix[0])
 
-                # 全セルを文字列に正規化して Excel へ文字列で書き込む（None/nan は '' に）
-                matrix = [_normalize_row_to_strings(row) for row in matrix]
-
                 start_row = val_accum_in_sheet + 1
-                nrows, ncols = len(matrix), len(matrix[0]) if matrix else 0
-                try:
-                    if nrows and ncols:
-                        sh_target.range((start_row, 1), (start_row + nrows - 1, ncols)).number_format = "@"
-                except Exception:
-                    pass
-                if xlc:
-                    xlc.write_chunk(sh_target, start_row, 1, matrix, None)
+                nrows = len(matrix)
+                pending_base = val_accum_total
+                if xlc and nrows:
+
+                    def _write_progress_cb(sub_rows: int, _base: int = pending_base) -> None:
+                        if not matrix:
+                            return
+                        ratio = min(1.0, float(sub_rows) / float(len(matrix)))
+                        est_done = _base + int(rows_to_write * ratio)
+                        _emit_write_progress(est_done)
+
+                    xlc.write_chunk(
+                        sh_target,
+                        start_row,
+                        1,
+                        matrix,
+                        None,
+                        chunk_rows=write_step_v,
+                        progress_cb=_write_progress_cb,
+                    )
 
                 val_accum_total += rows_to_write
                 val_accum_in_sheet += len(matrix)
                 processed_chunk_idx += rows_to_write
-
-                if progress_path is not None:
-                    pct = int((val_accum_total / val_total) * 100)
-                    _progress_write(
-                        progress_path,
-                        {
-                            "status": "RUN",
-                            "phase_i": 2,
-                            "phase": "Excelへ書き込み中",
-                            "done": val_accum_total,
-                            "total": val_total,
-                            "pct": pct,
-                            "current_file": str_fname,
-                            "seq": progress_seq,
-                        },
-                    )
-                    progress_seq += 1
-                try:
-                    if is_split_mode:
-                        book.app.api.StatusBar = f"Excel書込中... {sh_target.name} [分割：{curr_part_idx}/{val_sheets_total}]"
-                    else:
-                        book.app.api.StatusBar = "Excel書込中..."
-                except Exception:
-                    pass
-                if xlc:
-                    xlc.yield_to_excel()
+                _emit_write_progress(val_accum_total)
 
         # 更新停止のまま: 最終シートのクリア・確定 → オートフィット → その後 with を抜けて更新開始
         if sh_target is not None:
+            if max_col > 0:
+                _apply_sheet_text_number_format(sh_target, val_accum_in_sheet, max_col)
             if xlc and max_col > 0:
                 xlc.clear_used_range_overflow(sh_target, val_accum_in_sheet, max_col)
             _finalize_sheet_context(

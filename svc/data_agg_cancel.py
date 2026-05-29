@@ -135,6 +135,141 @@ def delete_output_sheet_if_any(sheet: Any) -> None:
         pass
 
 
+def batch_active_path(sheet_id: str, ipc_root: Path) -> Path:
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    sid = str(sheet_id or "").strip() or "default"
+    return d / ("data_agg_batch_active_%s.pkl" % sid)
+
+
+def batch_cancel_tombstone_path(sheet_id: str, ipc_root: Path) -> Path:
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    sid = str(sheet_id or "").strip() or "default"
+    return d / ("data_agg_batch_cancelled_%s.pkl" % sid)
+
+
+def clear_batch_active_run(sheet_id: str, ipc_root: Path) -> None:
+    try:
+        batch_active_path(sheet_id, ipc_root).unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            p = batch_active_path(sheet_id, ipc_root)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def clear_batch_cancel_tombstone(sheet_id: str, ipc_root: Path) -> None:
+    try:
+        batch_cancel_tombstone_path(sheet_id, ipc_root).unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            p = batch_cancel_tombstone_path(sheet_id, ipc_root)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def write_batch_cancel_tombstone(
+    sheet_id: str,
+    ipc_root: Path,
+    *,
+    run_id: str = "",
+) -> None:
+    """強制中止後の svc_req 再実行を防ぐ tombstone。"""
+    try:
+        from ui_qt.ipc_file import write_pickle  # noqa: WPS433
+
+        write_pickle(
+            batch_cancel_tombstone_path(sheet_id, ipc_root),
+            {
+                "run_id": str(run_id or "").strip(),
+                "ts_ms": int(time.time() * 1000),
+            },
+        )
+    except Exception:
+        pass
+
+
+def batch_cancel_tombstone_blocks(
+    sheet_id: str,
+    ipc_root: Path,
+    run_id: str = "",
+) -> bool:
+    """中止 tombstone が残っていれば同一 run_id（または run_id 未指定 replay）をブロック。"""
+    try:
+        from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+        d = read_pickle(batch_cancel_tombstone_path(sheet_id, ipc_root))
+        if not isinstance(d, dict):
+            return False
+        t_run = str(d.get("run_id") or "").strip()
+        rid = str(run_id or "").strip()
+        if t_run and rid:
+            return t_run == rid
+        if t_run and not rid:
+            return True
+        return bool(t_run or d.get("ts_ms"))
+    except Exception:
+        return False
+
+
+def _svc_req_is_data_agg_batch_for_sheet(req_path: Path, sheet_id: str) -> bool:
+    sid = str(sheet_id or "").strip()
+    if not sid:
+        return False
+    try:
+        from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+        req = read_pickle(req_path)
+        if not isinstance(req, dict):
+            return False
+        if str(req.get("action") or "").strip() != "data_agg":
+            return False
+        kwargs = req.get("kwargs")
+        if not isinstance(kwargs, dict):
+            return False
+        if str(kwargs.get("sheet_id") or "").strip() != sid:
+            return False
+        payload = kwargs.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        return str(payload.get("action") or "").strip() == "batch_run"
+    except Exception:
+        return False
+
+
+def purge_pending_data_agg_batch_svc_requests(ipc_root: Path, sheet_id: str) -> int:
+    """未処理の data_agg batch_run svc_req を削除（svc_server 強制終了時の残骸対策）。"""
+    req_dir = ipc_root / "svc_requests"
+    if not req_dir.is_dir():
+        return 0
+    removed = 0
+    for p in sorted(req_dir.glob("svc_req_*.pkl")):
+        if not _svc_req_is_data_agg_batch_for_sheet(p, sheet_id):
+            continue
+        try:
+            p.unlink(missing_ok=True)  # type: ignore[call-arg]
+            removed += 1
+        except TypeError:
+            try:
+                if p.exists():
+                    p.unlink()
+                    removed += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return removed
+
+
 def batch_worker_pid_path(sheet_id: str, ipc_root: Path) -> Path:
     d = ipc_root / "progress"
     d.mkdir(parents=True, exist_ok=True)
@@ -406,6 +541,18 @@ def force_data_agg_batch_cancel_from_ui(
             )
         except Exception:
             pass
+    active_run_id = ""
+    try:
+        from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+        active = read_pickle(batch_active_path(sid, root))
+        if isinstance(active, dict):
+            active_run_id = str(active.get("run_id") or "").strip()
+    except Exception:
+        pass
+    write_batch_cancel_tombstone(sid, root, run_id=active_run_id)
+    clear_batch_active_run(sid, root)
+    purged = purge_pending_data_agg_batch_svc_requests(root, sid)
     if notify_parent:
         try:
             from ui_qt.ipc_file import write_batch_done_notify  # noqa: WPS433
@@ -428,12 +575,14 @@ def force_data_agg_batch_cancel_from_ui(
 
         get_logger(__name__).info(
             "[DATA_AGG] batch force terminate from UI sheet_id=%s terminated=%s "
-            "cooperative_done=%s wait_ms=%s progress=%s",
+            "cooperative_done=%s wait_ms=%s progress=%s purged_svc_req=%s run_id=%s",
             sid,
             terminated,
             exited_cooperatively,
             int(cooperative_wait_ms or 0),
             bool(progress_path),
+            purged,
+            active_run_id or "-",
         )
     except Exception:
         pass

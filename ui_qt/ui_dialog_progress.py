@@ -259,6 +259,12 @@ class ProgressDialog(QDialog):
         # 進捗の順序保証: RUN を一度でも表示したか。DONE は _run_seen が True のときだけ処理する。
         self._run_seen = False
         self._last_seen_seq = -1
+        try:
+            _creep = int(self._req.get("progress_bar_creep_pct", 0) or 0)
+        except (TypeError, ValueError):
+            _creep = 0
+        self._progress_bar_creep_pct = max(0, min(10, _creep))
+        self._progress_display_target = 0
         # データ集約デバッグ進捗: phase_i / done / total 表示の単調化（戻り見え防止）
         self._nm_pi_disp = 0
         self._nm_done_disp = 0
@@ -798,6 +804,19 @@ class ProgressDialog(QDialog):
                 prev = int(self._bar.value())
                 if pct < prev:
                     pct = prev
+            creep = int(getattr(self, "_progress_bar_creep_pct", 0) or 0)
+            if status_u == "RUN" and creep > 0:
+                self._progress_display_target = max(
+                    int(getattr(self, "_progress_display_target", 0) or 0), pct
+                )
+                cur_bar = int(self._bar.value())
+                tgt = int(self._progress_display_target)
+                if tgt > cur_bar:
+                    pct = min(tgt, cur_bar + creep)
+                else:
+                    pct = tgt
+            elif status_u == "RUN":
+                self._progress_display_target = pct
             total = d.get("total")
             done = d.get("done")
             phase_i = int(d.get("phase_i", 0) or 0)

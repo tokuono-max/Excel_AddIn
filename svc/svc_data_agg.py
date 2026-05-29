@@ -3645,6 +3645,29 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     scenario_path_user = str(payload.get("scenario_path") or "").strip()
     scenario_snapshot_path = str(payload.get("scenario_snapshot_path") or "").strip()
     if ipc_root_opt is not None and batch_run_id:
+        try:
+            from svc.data_agg_cancel import batch_cancel_tombstone_blocks  # noqa: WPS433
+
+            if batch_cancel_tombstone_blocks(sheet_id, ipc_root_opt, batch_run_id):
+                logger.info(
+                    "[DATA_AGG] stale batch_run skipped sheet_id=%s run_id=%s reason=cancel_tombstone",
+                    sheet_id,
+                    batch_run_id,
+                )
+                _dlog(
+                    "stale_skip sheet_id=%s run_id=%s reason=cancel_tombstone",
+                    sheet_id,
+                    batch_run_id,
+                )
+                if scenario_snapshot_path:
+                    try:
+                        Path(scenario_snapshot_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return
+        except Exception:
+            pass
+    if ipc_root_opt is not None and batch_run_id:
         active_run_id = _read_active_batch_run_id(sheet_id, ipc_root_opt)
         if active_run_id and active_run_id != batch_run_id:
             logger.info(
@@ -3670,6 +3693,30 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             return
     load_path = scenario_snapshot_path or scenario_path_user
     if scenario_snapshot_path and not Path(scenario_snapshot_path).is_file():
+        if batch_run_id:
+            logger.info(
+                "[DATA_AGG] stale batch_run skipped sheet_id=%s run_id=%s "
+                "reason=missing_snapshot snapshot=%s",
+                sheet_id,
+                batch_run_id,
+                scenario_snapshot_path,
+            )
+            try:
+                _agg_diag.info(
+                    "[DATA_AGG_DIAG] batch_run stale_skip sheet_id=%s run_id=%s "
+                    "reason=missing_snapshot snapshot=%s",
+                    sheet_id,
+                    batch_run_id,
+                    scenario_snapshot_path,
+                )
+            except Exception:
+                pass
+            try:
+                if ipc_root_opt is not None and batch_run_id:
+                    _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
+            except Exception:
+                pass
+            return
         if scenario_path_user:
             logger.info(
                 "[DATA_AGG] snapshot missing; fallback to scenario_path sheet_id=%s snapshot=%s",

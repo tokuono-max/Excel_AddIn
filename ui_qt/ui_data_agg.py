@@ -3563,6 +3563,9 @@ class _DataAggMainWindow(QDialog):
             if ipc_root:
                 env["HC_IPC_ROOT"] = ipc_root
                 try:
+                    from svc.data_agg_cancel import clear_batch_cancel_tombstone  # noqa: WPS433
+
+                    clear_batch_cancel_tombstone(str(run_sheet_id), Path(ipc_root))
                     write_pickle(
                         _batch_active_path(str(run_sheet_id), Path(ipc_root)),
                         {

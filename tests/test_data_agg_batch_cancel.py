@@ -9,18 +9,24 @@ import pytest
 
 from svc.data_agg_cancel import (
     DataAggCancelled,
+    batch_cancel_tombstone_blocks,
+    batch_cancel_tombstone_path,
     batch_worker_pid_path,
     cancel_request_path_data_agg_batch,
     cancel_requested,
+    clear_batch_active_run,
+    clear_batch_cancel_tombstone,
     clear_batch_worker_pid,
     force_data_agg_batch_cancel_from_ui,
     make_cancel_check,
+    purge_pending_data_agg_batch_svc_requests,
     read_batch_worker_pid,
     register_batch_worker_pid,
     reset_cancel_path,
     sheet_id_from_cancel_path,
     terminate_pid_tree,
     wait_batch_worker_exit,
+    write_batch_cancel_tombstone,
 )
 from svc.svc_data_agg_scan import scan_folder
 from ui_qt.ipc_file import write_pickle
@@ -144,3 +150,81 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     assert called["append"] == 1
     d = __import__("ui_qt.ipc_file", fromlist=["read_pickle"]).read_pickle(progress_path)
     assert isinstance(d, dict) and str(d.get("status", "")).upper() == "CANCEL"
+    assert batch_cancel_tombstone_path(sid, tmp_path).is_file()
+
+
+def test_batch_cancel_tombstone_blocks_matching_run_id(tmp_path: Path) -> None:
+    sid = "SHEET_T1"
+    write_batch_cancel_tombstone(sid, tmp_path, run_id="run_a")
+    assert batch_cancel_tombstone_blocks(sid, tmp_path, "run_a") is True
+    assert batch_cancel_tombstone_blocks(sid, tmp_path, "run_b") is False
+
+
+def test_force_cancel_clears_active_and_purges_svc_req(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sid = "SHEET_PURGE"
+    ipc = tmp_path
+    req_dir = ipc / "svc_requests"
+    req_dir.mkdir(parents=True)
+    active = ipc / "progress"
+    active.mkdir(parents=True)
+    write_pickle(
+        active / ("data_agg_batch_active_%s.pkl" % sid),
+        {"run_id": "run_x", "sheet_id": sid},
+    )
+    req_path = req_dir / "svc_req_test.pkl"
+    write_pickle(
+        req_path,
+        {
+            "action": "data_agg",
+            "kwargs": {
+                "sheet_id": sid,
+                "payload": {"action": "batch_run", "batch_run_id": "run_x"},
+            },
+        },
+    )
+    cancel_path = cancel_request_path_data_agg_batch(sid, ipc)
+    cancel_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "svc.data_agg_cancel.wait_batch_worker_exit",
+        lambda *args, **kwargs: True,
+    )
+    force_data_agg_batch_cancel_from_ui(
+        cancel_path=cancel_path,
+        ipc_root=ipc,
+        cooperative_wait_ms=0,
+    )
+    assert not (active / ("data_agg_batch_active_%s.pkl" % sid)).exists()
+    assert not req_path.exists()
+    assert batch_cancel_tombstone_blocks(sid, ipc, "run_x") is True
+
+
+def test_purge_pending_data_agg_batch_svc_requests(tmp_path: Path) -> None:
+    sid = "SHEET_P2"
+    req_dir = tmp_path / "svc_requests"
+    req_dir.mkdir(parents=True)
+    keep = req_dir / "svc_req_other.pkl"
+    write_pickle(keep, {"action": "csv_mg", "kwargs": {"sheet_id": sid}})
+    drop = req_dir / "svc_req_batch.pkl"
+    write_pickle(
+        drop,
+        {
+            "action": "data_agg",
+            "kwargs": {
+                "sheet_id": sid,
+                "payload": {"action": "batch_run"},
+            },
+        },
+    )
+    assert purge_pending_data_agg_batch_svc_requests(tmp_path, sid) == 1
+    assert not drop.exists()
+    assert keep.exists()
+
+
+def test_clear_batch_cancel_tombstone(tmp_path: Path) -> None:
+    sid = "SHEET_CLR"
+    write_batch_cancel_tombstone(sid, tmp_path, run_id="r1")
+    assert batch_cancel_tombstone_blocks(sid, tmp_path, "r1") is True
+    clear_batch_cancel_tombstone(sid, tmp_path)
+    assert batch_cancel_tombstone_blocks(sid, tmp_path, "r1") is False
