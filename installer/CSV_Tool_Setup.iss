@@ -101,6 +101,11 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "HC_PACKAGED_DEPLOYMENT"; ValueData: "1"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "HC_DEPLOY_ROOT"; ValueData: "{code:GetDeployRoot}"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
 
+; 注: 更新時の権限判定用 InstallScope は [Registry] では書かない。
+;     Inno が "Saving uninstall information" で {AppId}_is1 キーを再生成するタイミングで
+;     [Registry] 経由の書き込みは消える経路があるため、[Code] の ssPostInstall 後に
+;     WriteInstallScopeToUninstallKey で通常側のみへ書く（WOW6432Node には書かない）。
+
 [Icons]
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
@@ -583,6 +588,113 @@ begin
     Result := '';
 end;
 
+{ DisplayName をインストールモード別に決定する。
+  - Current user: 'CSV Tool (User)'
+  - All users:    'CSV Tool (All User)'
+  プログラムと機能でどちらでインストールしたかを一目で判別できるようにする。 }
+function GetDisplayNameForMode: String;
+begin
+  if IsAdminInstallMode then
+    Result := 'CSV Tool (All User)'
+  else
+    Result := 'CSV Tool (User)';
+end;
+
+{ 更新時の権限判定用 InstallScope を Uninstall キー配下に書く。
+  Inno の "Saving uninstall information" による Uninstall キー再生成の後に呼ぶこと
+  （[Registry] では書かない理由はファイル冒頭コメント参照）。
+  WOW6432Node には書かない: 参照側 core/packaged_update.py が通常側を優先で読むため、
+  通常側だけに集約しておけば必要十分。 }
+procedure WriteInstallScopeToUninstallKey;
+var
+  ScopeSubKey: String;
+  RootKey: Integer;
+  Scope: String;
+begin
+  ScopeSubKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1';
+
+  if IsAdminInstallMode then
+  begin
+    RootKey := HKLM;
+    Scope := 'all';
+  end
+  else
+  begin
+    RootKey := HKCU;
+    Scope := 'current';
+  end;
+
+  if not RegKeyExists(RootKey, ScopeSubKey) then
+  begin
+    Log('InstallScope sync skipped (uninstall key not found): root=' + IntToStr(RootKey) + ' key=' + ScopeSubKey);
+    Exit;
+  end;
+
+  try
+    if RegWriteStringValue(RootKey, ScopeSubKey, 'InstallScope', Scope) then
+      Log('InstallScope written: root=' + IntToStr(RootKey) + ' key=' + ScopeSubKey + ' value=' + Scope)
+    else
+      Log('InstallScope write returned false: root=' + IntToStr(RootKey) + ' key=' + ScopeSubKey);
+  except
+    Log('InstallScope write failed (exception): root=' + IntToStr(RootKey) + ' key=' + ScopeSubKey);
+  end;
+end;
+
+{ 反対モードの残骸（_is1 キー / HC_* 環境変数）を削除する。
+  自モード内の WOW6432Node 残骸（過去ビルドで [Registry] が書いたもの）も併せて掃除。
+  Current user 起動時に HKLM 残骸が見つかった場合は権限不足のため警告ログのみ。
+  ssInstall フェーズ（[Files] 前、Inno の Uninstall キー操作前）で呼ぶこと。 }
+procedure CleanupCrossModeRemnants;
+var
+  IsKey, IsKeyWow, EnvUser: String;
+begin
+  IsKey    := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1';
+  IsKeyWow := 'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1';
+  EnvUser  := 'Environment';
+
+  if IsAdminInstallMode then
+  begin
+    { 自分は All users → Current user 側残骸（HKCU）を削除する }
+    if RegKeyExists(HKCU, IsKey) then
+    begin
+      if RegDeleteKeyIncludingSubkeys(HKCU, IsKey) then
+        Log('Cleanup: deleted opposite-mode key: HKCU\' + IsKey)
+      else
+        Log('Cleanup: failed to delete: HKCU\' + IsKey);
+    end;
+    if RegKeyExists(HKCU, IsKeyWow) then
+    begin
+      if RegDeleteKeyIncludingSubkeys(HKCU, IsKeyWow) then
+        Log('Cleanup: deleted opposite-mode key: HKCU\' + IsKeyWow)
+      else
+        Log('Cleanup: failed to delete: HKCU\' + IsKeyWow);
+    end;
+    if RegValueExists(HKCU, EnvUser, 'HC_INSTALL_ROOT') then
+      RegDeleteValue(HKCU, EnvUser, 'HC_INSTALL_ROOT');
+    if RegValueExists(HKCU, EnvUser, 'HC_PACKAGED_DEPLOYMENT') then
+      RegDeleteValue(HKCU, EnvUser, 'HC_PACKAGED_DEPLOYMENT');
+    if RegValueExists(HKCU, EnvUser, 'HC_DEPLOY_ROOT') then
+      RegDeleteValue(HKCU, EnvUser, 'HC_DEPLOY_ROOT');
+    Log('Cleanup: HKCU HC_* environment values purged (if any).');
+  end
+  else
+  begin
+    { 自分は Current user → All users 側残骸（HKLM）は権限不足で削除不可 }
+    if RegKeyExists(HKLM, IsKey) then
+      Log('Cleanup: HKLM remnant detected but not removable (no admin): HKLM\' + IsKey);
+    if RegKeyExists(HKLM, IsKeyWow) then
+      Log('Cleanup: HKLM WOW remnant detected but not removable (no admin): HKLM\' + IsKeyWow);
+    { 同モード内 WOW6432Node 残骸の掃除（過去ビルドが書いたもの） }
+    if RegKeyExists(HKCU, IsKeyWow) then
+    begin
+      if RegDeleteKeyIncludingSubkeys(HKCU, IsKeyWow) then
+        Log('Cleanup: deleted same-mode WOW remnant: HKCU\' + IsKeyWow)
+      else
+        Log('Cleanup: failed to delete: HKCU\' + IsKeyWow);
+    end;
+  end;
+end;
+
 procedure TrySyncDisplayValues(const RootKey: Integer; const SubKey, DisplayName, DisplayVersion: String; var AnyWritten: Boolean);
 begin
   if not RegKeyExists(RootKey, SubKey) then
@@ -656,9 +768,9 @@ begin
   if SelectedKey <> '' then
   begin
     if RegKeyExists(HKLM, SelectedKey) then
-      TrySyncDisplayValues(HKLM, SelectedKey, 'CSV Tool', DisplayVersion, AnyWritten)
+      TrySyncDisplayValues(HKLM, SelectedKey, GetDisplayNameForMode, DisplayVersion, AnyWritten)
     else if RegKeyExists(HKCU, SelectedKey) then
-      TrySyncDisplayValues(HKCU, SelectedKey, 'CSV Tool', DisplayVersion, AnyWritten);
+      TrySyncDisplayValues(HKCU, SelectedKey, GetDisplayNameForMode, DisplayVersion, AnyWritten);
   end;
 
   if not AnyWritten then
@@ -1043,6 +1155,13 @@ var
   DeployRoot: String;
   Dest: String;
 begin
+  { 反対モード残骸の掃除は [Files] 等の前（Inno の Uninstall キー操作前）に行う }
+  if CurStep = ssInstall then
+  begin
+    CleanupCrossModeRemnants;
+    Exit;
+  end;
+
   if CurStep <> ssPostInstall then
     Exit;
 
@@ -1080,8 +1199,13 @@ begin
     if not FileExists(Dest + '\bootstrap\update_bootstrap.exe') then
       RaiseException('Install folder does not contain bootstrap\update_bootstrap.exe.');
 
-    { DisplayVersion は catalog.set_version（X.Y.Z.N）を優先して同期。無い場合は bin/config から合成 }
+    { DisplayVersion / DisplayName は catalog.set_version 優先で同期。
+      DisplayName はモードで切替（CSV Tool (User) / CSV Tool (All User)）。 }
     SyncDisplayVersionFromCatalog(DeployRoot);
+    { 更新時の権限判定用 InstallScope を Uninstall キーに書く。
+      Inno の Uninstall キー再生成（Saving uninstall information → Creating new uninstall key）の
+      後にここで実施することで、書き込みが消えないようにする。 }
+    WriteInstallScopeToUninstallKey;
     { bootstrap 版（X.Y.Z）を catalog.bootstrap.latest_version から同期 }
     SyncBootstrapVersionFromCatalog(DeployRoot, Dest);
     WriteXlwingsConf(Dest);

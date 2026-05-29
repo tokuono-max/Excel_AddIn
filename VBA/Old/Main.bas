@@ -151,22 +151,14 @@ End Sub
 ' 公開: Private（RibbonCallback_hc_main からのみ呼ぶ）
 ' 引数: control ? Tag プロパティが hc_main.invoke(action=...) の action と一致すること。
 ' ---------------------------------------------------------------------------------------------------------------------
-' Packaged update: RunPython only (not svc bridge). tag=check_for_updates in CSV_Tool_xml.txt
-Private Sub RunPythonCheckForUpdatesRibbon()
-    On Error GoTo Fail
-    Application.Cursor = xlWait
-    RunPython "from core.packaged_update import check_for_updates_interactive; check_for_updates_interactive('ribbon')"
-    GoTo Done
-Fail:
-    Call HC_Log.Error("Main", "RunPythonCheckForUpdatesRibbon: " & Err.Description)
-Done:
-    Application.Cursor = xlDefault
-End Sub
 
 
 Private Sub RibbonInvokeFromControl(ByVal control As Object)
     Dim sId As String
     Dim act As String
+    Dim isUpdateCheck As Boolean
+    Dim bookFullName As String
+    Dim bookName As String
     On Error GoTo ErrorHandler
     act = Trim$(control.tag)
     If Len(act) = 0 Then
@@ -174,25 +166,31 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
         Call HC_RibbonPerf.RibbonPerfEnd
         Exit Sub
     End If
-    If StrComp(act, "check_for_updates", vbTextCompare) = 0 Then
-        Call HC_WaitForm.BeginWaitForRibbon(control.ID, act)
-        Call RunPythonCheckForUpdatesRibbon
-        Call HC_WaitForm.NotifyUiReady
-        Call HC_RibbonPerf.RibbonPerfEnd
-        Exit Sub
-    End If
-    If ActiveSheet Is Nothing Then
-        Call HC_RibbonPerf.RibbonPerfEnd
-        Exit Sub
-    End If
-    sId = ExcelUtil.GetSheetIdSafe(ActiveSheet)
+    isUpdateCheck = (StrComp(act, "check_for_updates", vbTextCompare) = 0)
+
+    If (Not isUpdateCheck) And ActiveSheet Is Nothing Then
+        Call HC_RibbonPerf.RibbonPerfEnd
+        Exit Sub
+    End If
+    If Not ActiveSheet Is Nothing Then
+        sId = ExcelUtil.GetSheetIdSafe(ActiveSheet)
+    Else
+        sId = vbNullString
+    End If
     ' # 【目的】リボンは全て bridge_runner → svc_server（RunPython 短命を避ける）。bridge 依頼 JSON は UTF-8。
-    If ActiveWorkbook Is Nothing Then
+    If (Not isUpdateCheck) And ActiveWorkbook Is Nothing Then
         Call HC_Log.Info("Main", "Ribbon bridge: ActiveWorkbook が Nothing のためスキップ")
-        Call HC_WaitForm.NotifyUiReady
-        Call HC_RibbonPerf.RibbonPerfEnd
-        Exit Sub
-    End If
+        Call HC_WaitForm.NotifyUiReady
+        Call HC_RibbonPerf.RibbonPerfEnd
+        Exit Sub
+    End If
+    If Not ActiveWorkbook Is Nothing Then
+        bookFullName = ActiveWorkbook.FullName
+        bookName = ActiveWorkbook.Name
+    Else
+        bookFullName = vbNullString
+        bookName = vbNullString
+    End If
     Dim selAreasJson As String
     Dim dupliCf As String
     selAreasJson = vbNullString
@@ -203,7 +201,7 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
     End If
     Call HC_WaitForm.BeginWaitForRibbon(control.ID, act)
     Call HC_RibbonPerf.RibbonPerfMark("before_bridge_submit")
-    Call Main.SubmitSvcRequestViaBridge(act, Application.hwnd, sId, ActiveWorkbook.FullName, ActiveWorkbook.Name, selAreasJson, dupliCf)
+    Call Main.SubmitSvcRequestViaBridge(act, Application.hwnd, sId, bookFullName, bookName, selAreasJson, dupliCf)
     Call HC_RibbonPerf.RibbonPerfMark("after_bridge_submit")
     Call HC_RibbonPerf.RibbonPerfEnd
     Exit Sub

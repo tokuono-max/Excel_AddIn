@@ -14,9 +14,9 @@ for %%I in ("%CD%\%CSV_TOOL_STAGING%") do set "STAGING_ABS=%%~fI"
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "ASSEMBLE_LOG_TS=%%i"
 set "ASSEMBLE_LOG=%CD%\logs\nuitka\assemble_staging_%ASSEMBLE_LOG_TS%.log"
 if not exist "%CD%\logs\nuitka" mkdir "%CD%\logs\nuitka"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] ========== assemble_csv_tool_staging start =========="
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] cwd=%CD%"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] STAGING_ABS=%STAGING_ABS%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] ========== assemble_csv_tool_staging start =========="
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] cwd=%CD%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] STAGING_ABS=%STAGING_ABS%"
 echo [staging] Root: %STAGING_ABS%
 echo [staging] Audit log (detail, UTF-8^): %ASSEMBLE_LOG%
 echo [staging] Nuitka outputs are merged into app\bin by each build_nuitka_*.bat ^(merge_nuitka_stage_into_bin.bat^).
@@ -34,7 +34,7 @@ if exist "%STAGING_ABS%\config\" (
 if not exist "%STAGING_ABS%\config\" mkdir "%STAGING_ABS%\config"
 robocopy "config" "%STAGING_ABS%\config" /E /NFL /NDL /NJH /NJS /nc /ns /np
 set "RC=%ERRORLEVEL%"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] robocopy config -> staging config exit=%RC% (robocopy 0-7 ok)"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] robocopy config -> staging config exit=%RC% (robocopy 0-7 ok)"
 if %RC% GEQ 8 exit /b 1
 
 rem ------------------------------------------------------------
@@ -50,13 +50,13 @@ if exist "addin\" (
   if not exist "%STAGING_ABS%\addin\" mkdir "%STAGING_ABS%\addin"
   robocopy "addin" "%STAGING_ABS%\addin" /E /NFL /NDL /NJH /NJS /nc /ns /np
   set "RC=!ERRORLEVEL!"
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] robocopy repo addin -> staging addin exit=!RC! (robocopy 0-7 ok)"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] robocopy repo addin -> staging addin exit=!RC! (robocopy 0-7 ok)"
   if !RC! GEQ 8 exit /b 1
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0audit_addin_xlam.ps1" -LogPath "%ASSEMBLE_LOG%" -RepoAddin "%CD%\addin" -StagingAddin "%STAGING_ABS%\addin"
   if errorlevel 1 exit /b 1
 ) else (
   echo [WARN] addin\ not found at repo root; addin packaging skipped.
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[WARN] addin\ not found at repo root; addin packaging skipped (staging addin not refreshed)."
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[WARN] addin\ not found at repo root; addin packaging skipped (staging addin not refreshed)."
 )
 
 rem ------------------------------------------------------------
@@ -67,7 +67,7 @@ if exist "icon\" (
   if not exist "%STAGING_ABS%\app\bin\" mkdir "%STAGING_ABS%\app\bin"
   robocopy "icon" "%STAGING_ABS%\app\bin" *.ico /R:2 /W:2 /NFL /NDL /NJH /NJS /nc /ns /np
   set "RC=!ERRORLEVEL!"
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] robocopy icon -> staging app\bin exit=!RC! (robocopy 0-7 ok)"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] robocopy icon -> staging app\bin exit=!RC! (robocopy 0-7 ok)"
   if !RC! GEQ 8 exit /b 1
 ) else (
   echo [WARN] icon\ not found at repo root; icon packaging skipped.
@@ -85,8 +85,8 @@ if exist "%CD%\VERSION.txt" (
   echo [WARN] VERSION.txt missing at repo root; packaged update check may fail. See VERSION.txt.
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] OK: config\, addin\, xlwings.conf under %STAGING_ABS%"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" -LogPath "%ASSEMBLE_LOG%" -Line "[staging] ========== assemble_csv_tool_staging end =========="
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] OK: config\, addin\, xlwings.conf under %STAGING_ABS%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0log_assemble_line.ps1" "%ASSEMBLE_LOG%" "[staging] ========== assemble_csv_tool_staging end =========="
 copy /y "%ASSEMBLE_LOG%" "%CD%\logs\nuitka\assemble_staging_latest.log" >nul 2>&1
 echo [staging] OK: config\, addin\, xlwings.conf under %STAGING_ABS%
 echo [staging] Latest audit log: %CD%\logs\nuitka\assemble_staging_latest.log

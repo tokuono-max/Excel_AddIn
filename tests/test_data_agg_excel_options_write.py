@@ -168,3 +168,19 @@ def test_format_batch_run_summary_row_processing_time_column() -> None:
     )
     assert len(row) == len(EVENT_LOG_HEADERS)
     assert "秒" in str(row[1]) or "分" in str(row[1])
+
+
+def test_format_batch_run_summary_row_cancelled() -> None:
+    row = format_batch_run_summary_row(
+        "sid",
+        r"C:\scen.json",
+        ok=False,
+        error="cancelled",
+        files=3,
+        total_ms=500,
+    )
+    assert row[2] == "一括実行・中止"
+    import json
+
+    detail = json.loads(str(row[7]))
+    assert detail.get("結果") == "中止"

@@ -897,33 +897,26 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
         try:
             from core import core_xlc
 
-            ptr_a.api.Interactive = False
-            try:
-                for ap in area_payloads:
-                    core_xlc.write_chunk(
-                        ptr_s,
-                        int(ap["y1"]),
-                        int(ap["x1"]),
-                        ap["arr"],
-                    )
-                    _progress_write(
-                        progress_path,
-                        {
-                            "status": "RUN",
-                            "phase_i": 2,
-                            "phase_total": 2,
-                            "phase": _msg(cfg, "PHASE_WRITE"),
-                            "message": _msg(cfg, "PROGRESS_CUSTOM_WRITE"),
-                            "pct": 99,
-                            "done": total_target_cells,
-                            "total": total_target_cells,
-                        },
-                    )
-            finally:
-                try:
-                    ptr_a.api.Interactive = True
-                except Exception:
-                    pass
+            for ap in area_payloads:
+                core_xlc.write_chunk(
+                    ptr_s,
+                    int(ap["y1"]),
+                    int(ap["x1"]),
+                    ap["arr"],
+                )
+                _progress_write(
+                    progress_path,
+                    {
+                        "status": "RUN",
+                        "phase_i": 2,
+                        "phase_total": 2,
+                        "phase": _msg(cfg, "PHASE_WRITE"),
+                        "message": _msg(cfg, "PROGRESS_CUSTOM_WRITE"),
+                        "pct": 99,
+                        "done": total_target_cells,
+                        "total": total_target_cells,
+                    },
+                )
         except Exception as e:
             logger.exception("[TRM_EX] 書込失敗: %s", e)
             _status_bar_set(ptr_w, f"{_msg(cfg, 'ERROR_PREFIX')}: {e}")

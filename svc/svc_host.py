@@ -111,50 +111,88 @@ def _wait_until_running(
     logger.warning("%s spawn requested but mutex not observed yet", log_label)
 
 
+def _log_startup_ui_gate_skip(perf_prefix: str, hwnd: int, reason: str) -> None:
+    try:
+        from core.packaged_update import _append_update_log, _install_root
+
+        lr = _install_root()
+        if lr and lr.is_dir():
+            _append_update_log(
+                lr,
+                "startup: skip_duplicate_update_ui prefix={p} reason={r} hwnd={h}".format(
+                    p=perf_prefix,
+                    r=reason or "-",
+                    h=hwnd,
+                ),
+            )
+    except Exception:
+        pass
+
+
 def _excel_startup_svc_ui_bridge_register(target_hwnd: int, perf_prefix: str) -> None:
     """ensure_svc / ensure_ui / ensure_bridge / register_book と perf ログ（プレフィックスのみ異なる）。"""
     from core.excel_session import register_book as _register_book
     from core.packaged_update import maybe_apply_pending_bootstrap_update
+    from core.startup_session_gate import excel_startup_ui_gate
 
     plog = get_perf_logger(f"{__name__}.excel_startup")
     t0 = time.perf_counter()
-    plog.info("%s phase=enter cumulative_ms=0 hwnd=%s", perf_prefix, target_hwnd)
-    maybe_apply_pending_bootstrap_update(owner_hwnd=int(target_hwnd or 0), sheet_id="_")
-    plog.info(
-        "%s phase=after_apply_pending_bootstrap cumulative_ms=%d",
-        perf_prefix,
-        int((time.perf_counter() - t0) * 1000),
-    )
-    ensure_svc_server()
-    plog.info(
-        "%s phase=after_ensure_svc_server cumulative_ms=%d",
-        perf_prefix,
-        int((time.perf_counter() - t0) * 1000),
-    )
-    ensure_ui_server()
-    plog.info(
-        "%s phase=after_ensure_ui_server cumulative_ms=%d",
-        perf_prefix,
-        int((time.perf_counter() - t0) * 1000),
-    )
-    ensure_bridge()
-    plog.info(
-        "%s phase=after_ensure_bridge cumulative_ms=%d",
-        perf_prefix,
-        int((time.perf_counter() - t0) * 1000),
-    )
-    _register_book(target_hwnd=target_hwnd)
-    plog.info(
-        "%s phase=after_register_book cumulative_ms=%d",
-        perf_prefix,
-        int((time.perf_counter() - t0) * 1000),
-    )
-    try:
-        from core.packaged_update import maybe_check_updates_on_startup
+    hwnd = int(target_hwnd or 0)
+    plog.info("%s phase=enter cumulative_ms=0 hwnd=%s", perf_prefix, hwnd)
+    with excel_startup_ui_gate(hwnd, perf_prefix) as ui_gate:
+        if ui_gate.skip_update_ui:
+            plog.info(
+                "%s phase=skip_duplicate_startup_ui reason=%s hwnd=%s",
+                perf_prefix,
+                ui_gate.reason or "-",
+                hwnd,
+            )
+            _log_startup_ui_gate_skip(perf_prefix, hwnd, ui_gate.reason)
+        else:
+            maybe_apply_pending_bootstrap_update(owner_hwnd=hwnd, sheet_id="_")
+            plog.info(
+                "%s phase=after_apply_pending_bootstrap cumulative_ms=%d",
+                perf_prefix,
+                int((time.perf_counter() - t0) * 1000),
+            )
+        ensure_svc_server()
+        plog.info(
+            "%s phase=after_ensure_svc_server cumulative_ms=%d",
+            perf_prefix,
+            int((time.perf_counter() - t0) * 1000),
+        )
+        ensure_ui_server()
+        plog.info(
+            "%s phase=after_ensure_ui_server cumulative_ms=%d",
+            perf_prefix,
+            int((time.perf_counter() - t0) * 1000),
+        )
+        ensure_bridge()
+        plog.info(
+            "%s phase=after_ensure_bridge cumulative_ms=%d",
+            perf_prefix,
+            int((time.perf_counter() - t0) * 1000),
+        )
+        _register_book(target_hwnd=target_hwnd)
+        plog.info(
+            "%s phase=after_register_book cumulative_ms=%d",
+            perf_prefix,
+            int((time.perf_counter() - t0) * 1000),
+        )
+        if ui_gate.skip_update_ui:
+            plog.info(
+                "%s phase=skip_duplicate_version_check reason=%s hwnd=%s",
+                perf_prefix,
+                ui_gate.reason or "-",
+                hwnd,
+            )
+        else:
+            try:
+                from core.packaged_update import maybe_check_updates_on_startup
 
-        maybe_check_updates_on_startup(owner_hwnd=int(target_hwnd or 0), sheet_id="_")
-    except Exception as e:
-        logger.warning("%s packaged update check skipped: %s", perf_prefix, e)
+                maybe_check_updates_on_startup(owner_hwnd=hwnd, sheet_id="_")
+            except Exception as e:
+                logger.warning("%s packaged update check skipped: %s", perf_prefix, e)
 
 
 def excel_startup_workbook_open_full(target_hwnd: int) -> None:

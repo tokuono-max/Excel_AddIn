@@ -31,9 +31,7 @@ def cell_coordinate_setting_lines(
 
     rd = src.get("repeat_direction")
     if rd:
-        lines.append(
-            "%s繰り返し方向: %s" % (pfx, "縦" if rd == "vertical" else "横")
-        )
+        lines.append("%s繰り返し方向: %s" % (pfx, "縦" if rd == "vertical" else "横"))
     anc = src.get("anchor")
     if anc:
         lines.append("%s基準セル: %s" % (pfx, anc))
@@ -43,7 +41,9 @@ def cell_coordinate_setting_lines(
     fp_disp = fp if fp else "（全件）"
     ext_tags = pb.get("ext_checked") if isinstance(pb.get("ext_checked"), list) else []
     ext_s = "、".join(str(x) for x in ext_tags if str(x).strip()) or "—"
-    lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_FILE_NAME_RULE", "ファイル名判定"), fr))
+    lines.append(
+        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_FILE_NAME_RULE", "ファイル名判定"), fr)
+    )
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_FILE_NAME", "ファイル名"), fp_disp))
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_FILE_EXT", "ファイル種別"), ext_s))
 
@@ -56,8 +56,12 @@ def cell_coordinate_setting_lines(
     ro = int(src.get("row_offset") or 0)
     co = int(src.get("col_offset") or 0)
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_CELL_REF", "セル座標"), cref))
-    lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro))
-    lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co))
+    lines.append(
+        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro)
+    )
+    lines.append(
+        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co)
+    )
 
     end_items = dc.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
@@ -110,7 +114,9 @@ def cell_coordinate_setting_lines(
                 )
             )
     else:
-        lines.append("%s%s: （なし）" % (pfx, _lbl(dc, "SEC_LINK_TITLE", "4. 連携キー")))
+        lines.append(
+            "%s%s: （なし）" % (pfx, _lbl(dc, "SEC_LINK_TITLE", "4. 連携キー"))
+        )
 
     jdefs = pb.get("join_defs") if isinstance(pb.get("join_defs"), list) else []
     jfmt = str(dc.get("JOIN_GROUP_TITLE_FMT") or "結合キー定義 #%d").strip()
@@ -130,7 +136,9 @@ def cell_coordinate_setting_lines(
                 )
             )
     else:
-        lines.append("%s%s: （なし）" % (pfx, _lbl(dc, "SEC_JOIN_TITLE", "5. 結合キー")))
+        lines.append(
+            "%s%s: （なし）" % (pfx, _lbl(dc, "SEC_JOIN_TITLE", "5. 結合キー"))
+        )
 
     return lines
 
@@ -154,7 +162,9 @@ def cell_coordinate_full_detail_lines(
         "・条件:",
     ]
 
-    def _append_section(title_key: str, title_fallback: str, body_lines: list[str]) -> None:
+    def _append_section(
+        title_key: str, title_fallback: str, body_lines: list[str]
+    ) -> None:
         title = _lbl(dc, title_key, title_fallback)
         lines.append("  - %s" % title)
         if body_lines:
@@ -223,13 +233,15 @@ def cell_coordinate_full_detail_lines(
             cap = 120
             vss_disp = vss[:cap] + ("…" if len(vss) > cap else "")
         sec3.append(
-            "3.6 %s: %s"
-            % (_lbl(dc, "LABEL_VALUE_SHAPE", "整形（DSL）"), vss_disp)
+            "3.6 %s: %s" % (_lbl(dc, "LABEL_VALUE_SHAPE", "整形（DSL）"), vss_disp)
         )
         wm_i = "3.7"
     else:
         wm_i = "3.6"
-    sec3.append("%s %s: %s" % (wm_i, _lbl(dc, "LABEL_WRITE_MODE_DETAIL", "書込みモード"), wm_txt))
+    sec3.append(
+        "%s %s: %s"
+        % (wm_i, _lbl(dc, "LABEL_WRITE_MODE_DETAIL", "書込みモード"), wm_txt)
+    )
     _append_section("SEC_VALUE_TITLE", "3. 主キー", sec3)
 
     # 4. 連携キー

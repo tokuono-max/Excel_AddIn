@@ -84,6 +84,23 @@ def postprocess_cell_primary(val: Any, ui_block: dict[str, Any] | None) -> str:
     return _freeze_excel_ymd_text(s)
 
 
+def postprocess_cell_primary_batch(
+    values: list[Any], ui_block: dict[str, Any] | None
+) -> list[str]:
+    """
+    縦/横反復セルなど大量主値向け。checks・value_shape_script が無いときは
+    文字列化＋日付固定のみの軽量ループ（関数呼び出しオーバーヘッドを抑える）。
+    """
+    if not values:
+        return []
+    p = ui_block if isinstance(ui_block, dict) else {}
+    checks = p.get("cell_checks")
+    shape = p.get("value_shape_script")
+    if checks or shape:
+        return [postprocess_cell_primary(v, p) for v in values]
+    return [_freeze_excel_ymd_text(_coerce_cell_scalar_to_full_text(v)) for v in values]
+
+
 def postprocess_name_extract_primary(val: Any, ui_block: dict[str, Any] | None) -> str:
     """名前取得主値: pattern/replacement は extract_from_name 済み。チェック → value_shape_script。"""
     p = ui_block if isinstance(ui_block, dict) else {}

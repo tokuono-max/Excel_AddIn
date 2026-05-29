@@ -339,7 +339,7 @@ def test_compute_batch_empty_sources_column_not_filename(tmp_path) -> None:
     assert rows[0][ix_filled] == "PN123"
 
 
-def test_filter_file_paths_for_master_preview_applies_and_logic() -> None:
+def test_filter_file_paths_for_master_preview_single_pattern() -> None:
     files = [
         r"C:\data\A_card.xlsx",
         r"C:\data\A_main.xlsx",
@@ -354,14 +354,44 @@ def test_filter_file_paths_for_master_preview_applies_and_logic() -> None:
                 }
             ]
         },
+    ]
+    out = filter_file_paths_for_master_preview(files, items)
+    assert out == [r"C:\data\A_card.xlsx", r"C:\data\A_main.xlsx"]
+
+
+def test_filter_file_paths_for_master_preview_multi_pattern_or_union() -> None:
+    """光特性×紐づけのように file_pattern が異なるときは OR（和集合）。"""
+    files = [
+        r"C:\data\光特性履歴.xlsx",
+        r"C:\data\紐づけ履歴.xlsx",
+        r"C:\data\other.xlsx",
+    ]
+    items = [
         {
             "sources": [
                 {
                     "type": "cell",
-                    "ui_scenario_source_v1": {"file_pattern": "card", "file_name_rule": "含む"},
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "光特性",
+                        "file_name_rule": "含む",
+                    },
+                }
+            ]
+        },
+        {
+            "sources": [
+                {
+                    "type": "cell",
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "紐づけ",
+                        "file_name_rule": "含む",
+                    },
                 }
             ]
         },
     ]
     out = filter_file_paths_for_master_preview(files, items)
-    assert out == [r"C:\data\A_card.xlsx"]
+    assert out == [
+        r"C:\data\光特性履歴.xlsx",
+        r"C:\data\紐づけ履歴.xlsx",
+    ]

@@ -15,11 +15,27 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from core.update_process_cleanup import (
+    ensure_packaged_children_stopped,
+    mutex_snapshot,
+    probe_tasklist_line,
+    taskkill_other_hc_updater_processes,
+)
+from core.update_housekeeping import cleanup_update_payload_dir, post_deferred_bin_success_housekeeping
+from core.packaged_update import (
+    _resolve_install_scope,
+    display_name_for_install_scope,
+    notify_installed_apps_list_changed,
+)
+from core.update_state import load_runtime_config
 
 
 def _append_with_cap(path: Path, line: str, max_bytes: int = 1024 * 1024) -> None:
@@ -103,23 +119,218 @@ def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
     return msgs
 
 
-def _copy_merge_tree(src_root: Path, dst_root: Path) -> None:
+def _self_hc_updater_dst_paths() -> set[Path]:
+    """``hc_updater.exe`` paths that this run may replace via sidecar (frozen exe or script sibling)."""
+    out: set[Path] = set()
+    try:
+        out.add(Path(sys.executable).resolve())
+    except OSError:
+        pass
+    try:
+        here = Path(__file__).resolve()
+        if here.suffix.lower() == ".py":
+            sibling = here.parent / "hc_updater.exe"
+            if sibling.is_file():
+                out.add(sibling.resolve())
+    except OSError:
+        pass
+    return out
+
+
+def _is_hc_updater_exe_name(name: str) -> bool:
+    return name.lower() == "hc_updater.exe"
+
+
+def _cleanup_stale_renamed_updaters(bin_dir: Path, log_path: Path | None) -> None:
+    for pat in ("hc_updater.exe.was_running_*", "hc_updater.exe.old_*"):
+        for p in bin_dir.glob(pat):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                if log_path is not None:
+                    _append_with_cap(
+                        log_path,
+                        f"{_ts()} apply_bin: stale_updater_sidecar skip path={p}\n",
+                    )
+
+
+def _replace_running_hc_updater_exe(src: Path, dst: Path, log_path: Path | None) -> None:
+    """
+    Windows: 実行中の hc_updater.exe は上書きできない。同一ディレクトリで別名へ replace すると
+    元パスに新ファイルを置ける（プロセスは退避したパスのイメージのまま動作）。
+    """
+    if log_path is not None:
+        _append_with_cap(log_path, f"{_ts()} apply_bin: self_exe_replace begin dst={dst}\n")
+    side = dst.with_name(f"{dst.name}.was_running_{os.getpid()}")
+    try:
+        if side.is_file():
+            side.unlink(missing_ok=True)
+    except OSError:
+        pass
+    os.replace(dst, side)
+    try:
+        shutil.copy2(src, dst)
+    except Exception:
+        try:
+            os.replace(side, dst)
+        except OSError:
+            pass
+        raise
+    if log_path is not None:
+        _append_with_cap(
+            log_path,
+            f"{_ts()} apply_bin: self_exe_replace ok stale_sidecar={side.name}\n",
+        )
+    try:
+        side.unlink(missing_ok=True)
+    except OSError:
+        if log_path is not None:
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: self_exe_replace stale_unlink_deferred path={side}\n",
+            )
+
+
+def _copy_merge_tree(
+    src_root: Path,
+    dst_root: Path,
+    log_path: Path | None = None,
+    *,
+    ui: _ProgressUi | None = None,
+    ui_title: str = "更新中",
+    ui_message: str = "",
+    progress_lo: int = 75,
+    progress_hi: int = 95,
+) -> None:
     if not src_root.exists():
         return
-    for fp in src_root.rglob("*"):
-        if not fp.is_file():
-            continue
+    self_dsts = _self_hc_updater_dst_paths()
+    files = [p for p in src_root.rglob("*") if p.is_file()]
+    total = max(len(files), 1)
+    for idx, fp in enumerate(files, 1):
         rel = fp.relative_to(src_root)
         dst = dst_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(fp, dst)
+        did_self = False
+        if self_dsts and _is_hc_updater_exe_name(dst.name) and dst.is_file():
+            try:
+                if dst.resolve() in self_dsts:
+                    _replace_running_hc_updater_exe(fp, dst, log_path)
+                    did_self = True
+            except OSError:
+                pass
+        if did_self:
+            continue
+        for attempt in range(3):
+            try:
+                shutil.copy2(fp, dst)
+                break
+            except OSError as e:
+                wno = int(getattr(e, "winerror", 0) or 0)
+                if (
+                    wno == 32
+                    and self_dsts
+                    and _is_hc_updater_exe_name(dst.name)
+                    and dst.is_file()
+                ):
+                    try:
+                        if dst.resolve() in self_dsts:
+                            _replace_running_hc_updater_exe(fp, dst, log_path)
+                            break
+                    except OSError:
+                        pass
+                if log_path is not None and wno == 32 and attempt < 2:
+                    _append_with_cap(
+                        log_path,
+                        f"{_ts()} apply_bin: copy_merge retry_sharing attempt={attempt + 1}/3 rel={rel.as_posix()}\n",
+                    )
+                    time.sleep(1.0 if attempt == 0 else 2.0)
+                    continue
+                if log_path is not None:
+                    _append_with_cap(
+                        log_path,
+                        f"{_ts()} apply_bin: copy_merge_fail rel={rel.as_posix()} err={e!s} winerror={getattr(e, 'winerror', None)}\n",
+                    )
+                raise
+        if ui is not None and ui._ok:
+            pct = progress_lo + int((progress_hi - progress_lo) * idx / total)
+            ui.set(ui_title, ui_message, pct)
 
 
-def _mirror_tree(src_root: Path, dst_root: Path) -> None:
+def _running_from_tree_root(dst_root: Path) -> bool:
+    """True when this process executable lives under dst_root (cannot safely rmtree dst)."""
+    try:
+        exe_parent = Path(sys.executable).resolve().parent
+        return exe_parent == dst_root.resolve()
+    except OSError:
+        return False
+
+
+def _mirror_tree(
+    src_root: Path,
+    dst_root: Path,
+    log_path: Path,
+    *,
+    ui: _ProgressUi | None = None,
+    ui_title: str = "更新中",
+    ui_message: str = "",
+    progress_lo: int = 75,
+    progress_hi: int = 95,
+) -> None:
     # Equivalent intent to robocopy /MIR used by old worker.
+    if _running_from_tree_root(dst_root):
+        raise RuntimeError(
+            f"mirror refused: updater runs from dst={dst_root} (use copy_merge for app/bin)"
+        )
+    _append_with_cap(log_path, f"{_ts()} apply_bin: mirror rmtree_if_exists dst={dst_root}\n")
+    self_dsts = _self_hc_updater_dst_paths()
+    self_dst = dst_root / "hc_updater.exe"
+    if dst_root.exists() and self_dst.is_file() and self_dst.resolve() in self_dsts:
+        try:
+            side = Path(tempfile.gettempdir()) / f"csv_tool_hc_updater_mirror_stale_{os.getpid()}.exe"
+            try:
+                if side.is_file():
+                    side.unlink(missing_ok=True)
+            except OSError:
+                pass
+            os.replace(self_dst, side)
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: mirror moved_running_updater_exe to={side}\n",
+            )
+        except OSError as e:
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: mirror move_running_updater_exe failed err={e!s}\n",
+            )
     if dst_root.exists():
         shutil.rmtree(dst_root, ignore_errors=True)
-    shutil.copytree(src_root, dst_root)
+    files = [p for p in src_root.rglob("*") if p.is_file()]
+    total = max(len(files), 1)
+    try:
+        for idx, fp in enumerate(files, 1):
+            rel = fp.relative_to(src_root)
+            dst = dst_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(fp, dst)
+            if ui is not None and ui._ok:
+                pct = progress_lo + int((progress_hi - progress_lo) * idx / total)
+                ui.set(ui_title, ui_message, pct)
+    except OSError as e:
+        _append_with_cap(
+            log_path,
+            f"{_ts()} apply_bin: copytree_fail src={src_root} dst={dst_root} err={e!s} winerror={getattr(e, 'winerror', None)}\n",
+        )
+        if int(getattr(e, "winerror", 0) or 0) == 32:
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: winerror32 probe={probe_tasklist_line()}\n",
+            )
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: winerror32 mutex={mutex_snapshot()}\n",
+            )
+        raise
 
 
 def _apply_delete_list(install_root: Path, delete_list_path: Path) -> None:
@@ -143,14 +354,14 @@ def _apply_delete_list(install_root: Path, delete_list_path: Path) -> None:
             pass
 
 
-def _try_set_display_values(display_version: str, log_path: Path) -> None:
+def _try_set_display_values(display_version: str, log_path: Path, install_root: Path) -> None:
     if not display_version:
         return
     try:
         import winreg  # type: ignore
     except Exception:
         return
-    display_name = "CSV Tool"
+    scope = _resolve_install_scope(install_root)
     sub = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
     candidates = [
         (winreg.HKEY_LOCAL_MACHINE, sub),
@@ -159,14 +370,22 @@ def _try_set_display_values(display_version: str, log_path: Path) -> None:
         (winreg.HKEY_CURRENT_USER, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"),
     ]
     for root, subkey in candidates:
+        root_name = "HKLM" if root == winreg.HKEY_LOCAL_MACHINE else "HKCU"
+        display_name = display_name_for_install_scope(scope, registry_root=root_name)
         try:
             with winreg.OpenKey(root, subkey, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, display_name)
                 winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, display_version)
-            _append_with_cap(log_path, f"{_ts()} apply_bin: DisplayName/DisplayVersion updated value={display_version} key={subkey}\n")
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: DisplayName/DisplayVersion updated name={display_name} value={display_version} key={subkey}\n",
+            )
+            notify_installed_apps_list_changed()
+            _append_with_cap(log_path, f"{_ts()} apply_bin: installed_apps_list SHChangeNotify sent\n")
             return
         except OSError:
             continue
+    display_name = display_name_for_install_scope(scope, registry_root="HKCU")
     for subkey in (
         sub,
         r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1",
@@ -177,21 +396,74 @@ def _try_set_display_values(display_version: str, log_path: Path) -> None:
                 winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, display_version)
             _append_with_cap(
                 log_path,
-                f"{_ts()} apply_bin: DisplayName/DisplayVersion updated (HKCU created) value={display_version} key={subkey}\n",
+                f"{_ts()} apply_bin: DisplayName/DisplayVersion updated (HKCU created) name={display_name} value={display_version} key={subkey}\n",
             )
+            notify_installed_apps_list_changed()
+            _append_with_cap(log_path, f"{_ts()} apply_bin: installed_apps_list SHChangeNotify sent\n")
             return
         except OSError:
             continue
     _append_with_cap(log_path, f"{_ts()} apply_bin: DisplayName/DisplayVersion key not found or not writable value={display_version}\n")
 
 
+_MB_SETFOREGROUND = 0x00010000
+_MB_TOPMOST = 0x00040000
+
+
 def _message_box(text: str, title: str = "CSV Tool update", icon: int = 0x40) -> None:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x0 | icon)
-    except Exception:
-        pass
+        style = _MB_SETFOREGROUND | _MB_TOPMOST | int(icon)
+        ctypes.windll.user32.MessageBoxW(0, text, title, style)
+    except Exception as e:
+        try:
+            _append_with_cap(
+                Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log",
+                f"{_ts()} apply_bin: MessageBoxW failed type={type(e).__name__}: {e}\n",
+            )
+        except OSError:
+            pass
+
+
+def _excel_wait_timeout_sec(install_root: Path) -> int:
+    cfg = load_runtime_config(install_root)
+    try:
+        return max(60, int(cfg.get("UPDATER_EXCEL_WAIT_TIMEOUT_SEC", 600)))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _write_updater_result(
+    result_path: Path | None,
+    *,
+    ok: bool,
+    error: str = "",
+    target_bin_version: str = "",
+    display_version: str = "",
+) -> None:
+    if result_path is None:
+        return
+    try:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "ok": bool(ok),
+            "error": str(error or "").strip(),
+            "target_bin_version": str(target_bin_version or "").strip(),
+            "display_version": str(display_version or "").strip(),
+            "ts": _ts(),
+        }
+        tmp = result_path.with_suffix(result_path.suffix + ".new")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, result_path)
+    except OSError as e:
+        try:
+            _append_with_cap(
+                result_path.parent / "hc_update.log",
+                f"{_ts()} apply_bin: write ResultPath failed err={e!s}\n",
+            )
+        except OSError:
+            pass
 
 
 class _ProgressUi:
@@ -207,12 +479,13 @@ class _ProgressUi:
             from tkinter import ttk
 
             root = tk.Tk()
-            root.title(self._messages.get("UPDATER_WINDOW_TITLE", "CSV Tool update"))
+            root.title(self._messages.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"))
             root.attributes("-topmost", True)
             root.geometry("540x190")
             root.resizable(False, False)
-            self._title = tk.StringVar(value=self._messages.get("UPDATER_INITIAL_STATUS", "Status: waiting"))
-            self._msg = tk.StringVar(value=self._messages.get("UPDATER_INITIAL_MESSAGE", "Waiting for all Excel processes to exit."))
+            init_status = self._messages.get("UPDATER_INITIAL_STATUS", "Excel の終了を待っています")
+            self._title = tk.StringVar(value=f"状態: {init_status}")
+            self._msg = tk.StringVar(value=self._messages.get("UPDATER_INITIAL_MESSAGE", ""))
             ttk.Label(root, textvariable=self._title).pack(anchor="w", padx=16, pady=(16, 6))
             ttk.Label(root, textvariable=self._msg).pack(anchor="w", padx=16, pady=(0, 10))
             self._bar = ttk.Progressbar(root, orient="horizontal", mode="determinate", maximum=100, length=500)
@@ -227,20 +500,29 @@ class _ProgressUi:
     def set(self, title: str, message: str, progress: int) -> None:
         if not self._ok:
             return
+        title_var = self._title
+        msg_var = self._msg
+        bar = self._bar
+        root = self._root
+        if title_var is None or msg_var is None or bar is None or root is None:
+            return
         try:
-            self._title.set(f"Status: {title}")
-            self._msg.set(message)
-            self._bar["value"] = max(0, min(100, int(progress)))
-            self._root.update_idletasks()
-            self._root.update()
+            title_var.set(f"状態: {title}")
+            msg_var.set(message)
+            bar["value"] = max(0, min(100, int(progress)))
+            root.update_idletasks()
+            root.update()
         except Exception:
             pass
 
     def close(self) -> None:
         if not self._ok:
             return
+        root = self._root
+        if root is None:
+            return
         try:
-            self._root.destroy()
+            root.destroy()
         except Exception:
             pass
 
@@ -287,7 +569,11 @@ def _run_apply_pending_job(job_path: Path, raw: dict[str, Any]) -> int:
         )
         from bootstrap.update_bootstrap import apply_pending_update
 
-        res = apply_pending_update(install_root)
+        os.environ["CSV_TOOL_APPLY_PENDING_INLINE_BIN"] = "1"
+        try:
+            res = apply_pending_update(install_root)
+        finally:
+            os.environ.pop("CSV_TOOL_APPLY_PENDING_INLINE_BIN", None)
         out: dict[str, Any] = {"ok": False, "applied": False}
         if isinstance(res, dict):
             out.update(res)
@@ -368,6 +654,12 @@ def run(job_path: Path) -> int:
     if jt == "apply_pending":
         return _run_apply_pending_job(job_path, raw_head)
 
+    result_s = str(raw_head.get("ResultPath", "")).strip()
+    result_path = Path(result_s) if result_s else None
+    exit_code = 1
+    result_error = ""
+    job: Job | None = None
+
     bootstrap_log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
     _append_with_cap(
         bootstrap_log_path,
@@ -375,6 +667,8 @@ def run(job_path: Path) -> int:
     )
     ui_msgs = _load_update_messages_for_job(job_path)
     ui = _ProgressUi(ui_msgs)
+    apply_msg = ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。")
+    apply_title = ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "更新中")
     try:
         job = _load_job(job_path)
         _append_with_cap(
@@ -392,25 +686,30 @@ def run(job_path: Path) -> int:
             job.log_path,
             ui,
             "wait_excel_exit",
-            ui_msgs.get("UPDATER_PHASE_WAIT_TITLE", "waiting"),
-            ui_msgs.get("UPDATER_PHASE_WAIT_MESSAGE", "Waiting for all Excel processes to exit."),
+            ui_msgs.get("UPDATER_PHASE_WAIT_TITLE", "Excel の終了を待っています"),
+            ui_msgs.get("UPDATER_PHASE_WAIT_MESSAGE", ""),
             5,
         )
+        wait_title = ui_msgs.get("UPDATER_PHASE_WAIT_TITLE", "Excel の終了を待っています")
+        wait_msg = ui_msgs.get("UPDATER_PHASE_WAIT_MESSAGE", "")
+        wait_deadline = time.time() + _excel_wait_timeout_sec(job.install_root)
         while _is_excel_running():
+            if time.time() > wait_deadline:
+                timeout_tpl = ui_msgs.get(
+                    "UPDATER_EXCEL_WAIT_TIMEOUT_TEMPLATE",
+                    "Excel が終了しませんでした。\n\nすべての Excel ウィンドウを閉じてから、再度「すぐに更新」を実行してください。",
+                )
+                raise RuntimeError(timeout_tpl)
             time.sleep(2)
-            ui.set(
-                ui_msgs.get("UPDATER_PHASE_WAIT_TITLE", "waiting"),
-                ui_msgs.get("UPDATER_PHASE_WAIT_MESSAGE", "Waiting for all Excel processes to exit."),
-                5,
-            )
+            ui.set(wait_title, wait_msg, 5)
         time.sleep(1)
 
         _phase(
             job.log_path,
             ui,
             "start",
-            ui_msgs.get("UPDATER_PHASE_START_TITLE", "start"),
-            ui_msgs.get("UPDATER_PHASE_START_MESSAGE", "Starting update process."),
+            ui_msgs.get("UPDATER_PHASE_START_TITLE", "更新中"),
+            ui_msgs.get("UPDATER_PHASE_START_MESSAGE", "更新処理を開始しています。"),
             15,
         )
         dl_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_download_"))
@@ -419,8 +718,8 @@ def run(job_path: Path) -> int:
             job.log_path,
             ui,
             "download_copy",
-            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_TITLE", "downloading"),
-            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_MESSAGE", "Copying update archive."),
+            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_TITLE", "更新中"),
+            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_MESSAGE", "更新ファイルを取得しています。"),
             30,
         )
         shutil.copy2(job.zip_path, zip_local)
@@ -436,17 +735,38 @@ def run(job_path: Path) -> int:
                 job.log_path,
                 ui,
                 "extract",
-                ui_msgs.get("UPDATER_PHASE_EXTRACT_TITLE", "extracting"),
-                ui_msgs.get("UPDATER_PHASE_EXTRACT_MESSAGE", "Extracting update archive."),
+                ui_msgs.get("UPDATER_PHASE_EXTRACT_TITLE", "更新中"),
+                ui_msgs.get("UPDATER_PHASE_EXTRACT_MESSAGE", "更新ファイルを展開しています。"),
                 50,
             )
+            ui.set(
+                apply_title,
+                ui_msgs.get("UPDATER_PHASE_EXTRACT_MESSAGE", "更新ファイルを展開しています。"),
+                55,
+            )
             shutil.unpack_archive(str(zip_local), str(extract_tmp))
+            cfg = load_runtime_config(job.install_root)
+            ui.set(apply_title, "関連プロセスを終了しています…", 68)
+            ensure_packaged_children_stopped(
+                lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
+                cfg,
+                phase="updater_before_bin_apply",
+                force_taskkill=True,
+            )
+            taskkill_other_hc_updater_processes(
+                lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
+            )
+            _paths = sorted(str(p) for p in _self_hc_updater_dst_paths())
+            _append_with_cap(
+                job.log_path,
+                f"{_ts()} apply_bin: self_hc_updater_paths={_paths} executable={sys.executable!r} __file__={__file__!r}\n",
+            )
             _phase(
                 job.log_path,
                 ui,
                 "apply",
-                ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "applying"),
-                ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE", "Applying update."),
+                ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "更新中"),
+                ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。"),
                 75,
             )
 
@@ -458,11 +778,30 @@ def run(job_path: Path) -> int:
                 if patch_app.exists():
                     dst_bin = job.install_root / "app" / "bin"
                     dst_bin.mkdir(parents=True, exist_ok=True)
-                    _copy_merge_tree(patch_app, dst_bin)
+                    _cleanup_stale_renamed_updaters(dst_bin, job.log_path)
+                    _copy_merge_tree(
+                        patch_app,
+                        dst_bin,
+                        job.log_path,
+                        ui=ui,
+                        ui_title=apply_title,
+                        ui_message=apply_msg,
+                        progress_lo=75,
+                        progress_hi=88,
+                    )
                 if patch_addin.exists():
                     dst_addin = job.install_root / "addin"
                     dst_addin.mkdir(parents=True, exist_ok=True)
-                    _copy_merge_tree(patch_addin, dst_addin)
+                    _copy_merge_tree(
+                        patch_addin,
+                        dst_addin,
+                        job.log_path,
+                        ui=ui,
+                        ui_title=apply_title,
+                        ui_message=apply_msg,
+                        progress_lo=88,
+                        progress_hi=95,
+                    )
                 _apply_delete_list(job.install_root, extract_tmp / "__delete_list.txt")
                 if job.target_bin_version:
                     (job.install_root / "VERSION.txt").write_text(job.target_bin_version + "\n", encoding="utf-8")
@@ -471,60 +810,165 @@ def run(job_path: Path) -> int:
                 src_bin = extract_tmp / "app" / "bin"
                 if not src_bin.is_dir():
                     raise RuntimeError("invalid zip: missing app/bin")
-                _mirror_tree(src_bin, job.install_root / "app" / "bin")
+                dst_bin_full = job.install_root / "app" / "bin"
+                dst_bin_full.mkdir(parents=True, exist_ok=True)
+                _cleanup_stale_renamed_updaters(dst_bin_full, job.log_path)
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: full_apply_mode=merge dst={dst_bin_full}\n",
+                )
+                _copy_merge_tree(
+                    src_bin,
+                    dst_bin_full,
+                    job.log_path,
+                    ui=ui,
+                    ui_title=apply_title,
+                    ui_message=apply_msg,
+                    progress_lo=75,
+                    progress_hi=92,
+                )
+                _apply_delete_list(job.install_root, extract_tmp / "__delete_list.txt")
                 vsrc = extract_tmp / "VERSION.txt"
                 if job.target_bin_version:
                     (job.install_root / "VERSION.txt").write_text(job.target_bin_version + "\n", encoding="utf-8")
                 elif vsrc.is_file():
                     shutil.copy2(vsrc, job.install_root / "VERSION.txt")
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: full merged TargetBinVersion={job.target_bin_version or '-'}\n",
+                )
                 addin_src = extract_tmp / "addin"
                 if addin_src.is_dir():
-                    _mirror_tree(addin_src, job.install_root / "addin")
+                    _mirror_tree(
+                        addin_src,
+                        job.install_root / "addin",
+                        job.log_path,
+                        ui=ui,
+                        ui_title=apply_title,
+                        ui_message=apply_msg,
+                        progress_lo=92,
+                        progress_hi=98,
+                    )
 
-            _try_set_display_values(job.display_version, job.log_path)
+            _try_set_display_values(job.display_version, job.log_path, job.install_root)
             _write_marker(job.notify_marker_path, job.target_bin_version, job.display_version, job.log_path)
             _append_with_cap(job.log_path, f"{_ts()} apply_bin: success\n")
+            try:
+                post_deferred_bin_success_housekeeping(
+                    job.install_root,
+                    log=lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
+                )
+            except Exception as e:
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: post_success_housekeeping err={type(e).__name__}: {e}\n",
+                )
             _phase(
                 job.log_path,
                 ui,
                 "done",
-                ui_msgs.get("UPDATER_PHASE_DONE_TITLE", "done"),
-                ui_msgs.get("UPDATER_PHASE_DONE_MESSAGE", "Update completed. Please restart Excel."),
+                ui_msgs.get("UPDATER_PHASE_DONE_TITLE", "完了"),
+                ui_msgs.get("UPDATER_PHASE_DONE_MESSAGE", "更新が完了しました。"),
                 100,
             )
+            _write_updater_result(
+                result_path,
+                ok=True,
+                target_bin_version=job.target_bin_version,
+                display_version=job.display_version,
+            )
+            succ_tpl = ui_msgs.get(
+                "UPDATER_SUCCESS_MESSAGE",
+                "更新が完了しました。\n\nCSV Tool 版: {target_bin}\n"
+                "セットバージョン: {display_version}\n\n"
+                "Microsoft Excel を起動してください。",
+            )
+            try:
+                succ_msg = succ_tpl.format(
+                    target_bin=job.target_bin_version or "-",
+                    display_version=job.display_version or "-",
+                )
+            except (KeyError, ValueError):
+                succ_msg = succ_tpl
             _message_box(
-                ui_msgs.get("UPDATER_SUCCESS_MESSAGE", "bin update completed.\nPlease restart Excel."),
-                ui_msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool update"),
+                succ_msg,
+                ui_msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"),
                 0x40,
             )
-            return 0
+            exit_code = 0
+            return exit_code
         finally:
             shutil.rmtree(extract_tmp, ignore_errors=True)
             shutil.rmtree(dl_tmp, ignore_errors=True)
     except Exception as e:
+        result_error = f"{type(e).__name__}: {e}"
         # Keep same keyword "ERROR" used by existing operations.
         log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
+        if job is not None:
+            log_path = job.log_path
+        wn = getattr(e, "winerror", None) if isinstance(e, OSError) else None
+        en = getattr(e, "errno", None) if isinstance(e, OSError) else None
+        _append_with_cap(
+            log_path,
+            f"{_ts()} apply_bin: ERROR type={type(e).__name__} winerror={wn} errno={en} msg={e}\n",
+        )
         try:
-            if "job" in locals():
-                log_path = job.log_path
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: ERROR probe {probe_tasklist_line()}\n",
+            )
+            _append_with_cap(
+                log_path,
+                f"{_ts()} apply_bin: ERROR mutex {mutex_snapshot()}\n",
+            )
         except Exception:
             pass
-        _append_with_cap(log_path, f"{_ts()} apply_bin: ERROR {e}\n")
-        err_tpl = ui_msgs.get("UPDATER_ERROR_TEMPLATE", "bin update failed.\n\n{error}\n\nlog: {log_path}")
+        _append_with_cap(
+            log_path,
+            f"{_ts()} apply_bin: ERROR traceback {traceback.format_exc()[:2000]}\n",
+        )
+        if job is not None and job.install_root.is_dir():
+            try:
+                cleanup_update_payload_dir(
+                    job.install_root,
+                    log=lambda m: _append_with_cap(log_path, f"{_ts()} {m}\n"),
+                )
+            except Exception:
+                pass
+        msgs = ui_msgs if "ui_msgs" in locals() else {}
+        err_tpl = msgs.get(
+            "UPDATER_ERROR_TEMPLATE",
+            "CSV Tool の更新に失敗しました。\n\n{error}\n\n"
+            "対処: 開いている Excel をすべて閉じてから、再度「すぐに更新」を実行してください。\n"
+            "解消しない場合は再インストールを検討してください。\n\n"
+            "ログ: {log_path}",
+        )
         try:
             err_msg = err_tpl.format(error=e, log_path=log_path)
-        except Exception:
-            err_msg = f"bin update failed.\n\n{e}\n\nlog: {log_path}"
-        _message_box(err_msg, ui_msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool update"), 0x30)
-        return 1
+        except (KeyError, ValueError):
+            try:
+                err_msg = err_tpl.format(error=e)
+            except (KeyError, ValueError):
+                err_msg = f"CSV Tool の更新に失敗しました。\n\n{e}"
+        _message_box(err_msg, msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"), 0x30)
+        exit_code = 1
+        return exit_code
     finally:
-        try:
-            if "job" in locals():
+        result_kw: dict[str, Any] = {"ok": exit_code == 0, "error": result_error}
+        if exit_code == 0 and job is not None:
+            result_kw["target_bin_version"] = job.target_bin_version
+            result_kw["display_version"] = job.display_version
+        _write_updater_result(result_path, **result_kw)
+        if job is not None:
+            try:
                 _remove_path(job.cleanup_path)
+            except Exception:
+                pass
+        _remove_path(str(job_path))
+        try:
+            ui.close()
         except Exception:
             pass
-        _remove_path(str(job_path))
-        ui.close()
 
 
 def main() -> int:

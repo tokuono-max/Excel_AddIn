@@ -13,6 +13,10 @@ RUNTIME_DEFAULTS: dict[str, Any] = {
     "PATCH_RETRY_IN_RUN_MAX": 3,
     "PATCH_RETRY_WAIT_SEC_1": 2,
     "PATCH_RETRY_WAIT_SEC_2": 5,
+    "UPDATER_EXCEL_WAIT_TIMEOUT_SEC": 600,
+    "BOOTSTRAP_MUTEX_WAIT_SEC": 20,
+    "BOOTSTRAP_PRE_APPLY_GRACE_SEC": 3,
+    "BOOTSTRAP_SKIP_PROCESS_KILL": 0,
 }
 
 
@@ -50,11 +54,28 @@ def load_runtime_config(install_root: Path) -> dict[str, Any]:
     for k in cfg.keys():
         if k in raw:
             cfg[k] = raw[k]
-    for k in ("BOOTSTRAP_APPLY_TIMEOUT_SEC", "PATCH_RETRY_IN_RUN_MAX", "PATCH_RETRY_WAIT_SEC_1", "PATCH_RETRY_WAIT_SEC_2"):
+    for k in (
+        "BOOTSTRAP_APPLY_TIMEOUT_SEC",
+        "PATCH_RETRY_IN_RUN_MAX",
+        "PATCH_RETRY_WAIT_SEC_1",
+        "PATCH_RETRY_WAIT_SEC_2",
+        "UPDATER_EXCEL_WAIT_TIMEOUT_SEC",
+    ):
         try:
-            cfg[k] = max(0, int(cfg[k]))
+            if k == "UPDATER_EXCEL_WAIT_TIMEOUT_SEC":
+                cfg[k] = max(60, int(cfg[k]))
+            else:
+                cfg[k] = max(0, int(cfg[k]))
         except Exception:
             cfg[k] = int(RUNTIME_DEFAULTS[k])
+    try:
+        cfg["BOOTSTRAP_MUTEX_WAIT_SEC"] = max(5, int(cfg.get("BOOTSTRAP_MUTEX_WAIT_SEC", 20)))
+    except Exception:
+        cfg["BOOTSTRAP_MUTEX_WAIT_SEC"] = 20
+    try:
+        cfg["BOOTSTRAP_PRE_APPLY_GRACE_SEC"] = max(0.0, float(cfg.get("BOOTSTRAP_PRE_APPLY_GRACE_SEC", 3)))
+    except Exception:
+        cfg["BOOTSTRAP_PRE_APPLY_GRACE_SEC"] = 3.0
     return cfg
 
 

@@ -194,6 +194,26 @@ def data_agg_diag_file_needed() -> bool:
     )
 
 
+def data_agg_file_parallel_workers(*, n_files: int) -> int:
+    """
+    一括集約の入力ファイル並列数。0 で逐次。
+    DATA_AGG_FILE_PARALLEL_WORKERS: 0=オフ, auto/未設定= min(4, CPU, ファイル数)（2ファイル以上）, 正整数=上限。
+    """
+    if n_files < 2:
+        return 0
+    raw = os.environ.get("DATA_AGG_FILE_PARALLEL_WORKERS", "").strip().lower()
+    if raw == "0":
+        return 0
+    cpu = os.cpu_count() or 4
+    if not raw or raw == "auto":
+        return max(1, min(4, cpu, n_files))
+    try:
+        w = int(raw)
+        return max(0, min(w, n_files))
+    except ValueError:
+        return 0
+
+
 def data_agg_master_progress_prefetch_enabled() -> bool:
     """マスタ進捗の先読みキューを使う（従来 DATA_AGG_MASTER_OFF_PREFETCH=1 と同じ条件）。"""
     if truthy(os.environ.get("HC_DIAG_DATA_AGG_MASTER_PREFETCH"), empty_means_false=False):

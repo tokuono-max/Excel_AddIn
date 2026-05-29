@@ -34,6 +34,8 @@ if /i "%NUITKA_REMOVE_OUTPUT%"=="1" set "REMOVE_OUTPUT=--remove-output"
 
 echo [Nuitka] bootstrap (update_bootstrap) -^> %NUITKA_OUT%  jobs=%NUITKA_JOBS%
 echo [Nuitka] Log file: %LOGFILE%
+rem Keep --enable-plugin=tk-inter. Older bootstrap EXEs without it show a Nuitka tk-inter error dialog
+rem if tkinter is imported during update confirmation/progress handling.
 "%PY%" "%~dp0nuitka_log_wrapper.py" "%LOGFILE%" bootstrap\update_bootstrap.py ^
   --standalone ^
   --enable-plugin=tk-inter ^

@@ -3,7 +3,8 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg_debug.py
 Purpose: データ集約デバッグウィンドウ（要求定義 §3.1.3）。文言・列見出し・ツールチップは config/ui_data_agg.json の SCREENS.DEBUG（TIP_*）。
-History: 本番コードに内蔵デモデータは含めない。live_items なし時は空状態プレースホルダ。抽出は svc_data_agg_extract。マスタプレビュー（mpv）は進捗行ベースの結合表示＋列マージバッファ（svc.data_agg_master_preview / run_preview_compute）。シナリオモード: 連携／結合フェーズかつ検出ファイルが多いとき、svc_data_agg_debug_run の progress_hook で非モーダル進捗を表示。build_master_items_live / _mpv_extract_colvals はファイル単位で xlsx_workbook_scope を張り .xlsx の load_workbook を再利用。
+History: 連続実行（シナリオ／マスタ一括）正常完了時に QMessageBox（SCREENS.DEBUG の MSG_RUN_ALL_*_DONE）。
+  本番コードに内蔵デモデータは含めない。live_items なし時は空状態プレースホルダ。抽出は svc_data_agg_extract。マスタプレビュー（mpv）は進捗行ベースの結合表示＋列マージバッファ（svc.data_agg_master_preview / run_preview_compute）。シナリオモード: 連携／結合フェーズかつ検出ファイルが多いとき、svc_data_agg_debug_run の progress_hook で非モーダル進捗を表示。build_master_items_live / _mpv_extract_colvals はファイル単位で xlsx_workbook_scope を張り .xlsx の load_workbook を再利用。
   2026-04-14: デバッグ—シナリオ/マスタでウィンドウタイトル（TITLE_SCENARIO/TITLE_MASTER）と連続実行ボタン（BTN_RUN_ALL_*、TIP_RUN_ALL_*）をモード連動。
   2026-04-14: 結果一覧: 列幅プログラム変更直後の遅延 sectionResized で user_resized が誤立ちしないよう、programmatic 解除を QTimer.singleShot(0) に遅延（世代で連続フィットに対応）。bump も同じセッション内で保護。
   2026-04-14: 診断: 結果一覧列幅—_fit_value_grid_columns で復元／内容フィットの分岐・viewport・先頭列幅・代表列 lo/hi/raw/fin を DATA_AGG_DIAG に出力。
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -815,6 +817,7 @@ class DataAggDebugDialog(QDialog):
 
         self._continuous_busy: bool = False
         self._continuous_steps_left: int = 0
+        self._continuous_initial_steps: int = 0
         self._continuous_was_full_master: bool = False
         self._master_full_continuous_allowed: bool = True
         self._master_step_pass_complete: bool = False
@@ -4466,6 +4469,34 @@ class DataAggDebugDialog(QDialog):
             return
         self._log_append("（%s）実行単位終了（%s）" % (run_kind, reason))
 
+    def _show_continuous_run_done_dialog(
+        self, *, mode: int, was_full_master: bool, steps: int
+    ) -> None:
+        """連続実行の正常完了時に JSON 文言で終了メッセージを表示する。"""
+        title = self._d("DIALOG_RUN_ALL_DONE_TITLE", "データ集約 デバッグ")
+        if mode == 0:
+            tpl = self._d(
+                "MSG_RUN_ALL_SCENARIO_DONE",
+                "シナリオの連続実行が完了しました。\n実行ステップ数: {steps}",
+            )
+        elif was_full_master:
+            tpl = self._d(
+                "MSG_RUN_ALL_MASTER_ITEMS_DONE",
+                "全項目の連続実行が完了しました。\n実行ステップ数: {steps}",
+            )
+        else:
+            tpl = self._d(
+                "MSG_RUN_ALL_MASTER_DONE",
+                "項目の連続実行が完了しました。\n実行ステップ数: {steps}",
+            )
+        try:
+            body = tpl.format(steps=int(steps))
+        except Exception:
+            body = tpl
+        QMessageBox.information(
+            self, title, _normalize_message_newlines(body)
+        )
+
     def _run_progress_dialog_blocking(self) -> bool:
         pd = getattr(self, "_run_progress_dlg", None)
         if pd is None:
@@ -5093,18 +5124,22 @@ class DataAggDebugDialog(QDialog):
             return
         self._continuous_steps_left -= 1
         if self._continuous_steps_left <= 0:
+            done_mode = self._mode
+            done_was_full = getattr(self, "_continuous_was_full_master", False)
+            done_steps = int(getattr(self, "_continuous_initial_steps", 0) or 0)
             if self._mode == 1:
-                _rk = (
-                    "全項目連続実行"
-                    if getattr(self, "_continuous_was_full_master", False)
-                    else "連続実行"
-                )
+                _rk = "全項目連続実行" if done_was_full else "連続実行"
                 self._log_master_exec_unit_close(_rk, "完了")
             else:
                 self._log_append(
                     self._d("MSG_RUN_ALL_DONE", "連続実行が完了しました。")
                 )
             self._finish_continuous_run()
+            self._show_continuous_run_done_dialog(
+                mode=done_mode,
+                was_full_master=done_was_full,
+                steps=done_steps,
+            )
         else:
             QTimer.singleShot(0, self._run_continuous_next)
 
@@ -5123,6 +5158,7 @@ class DataAggDebugDialog(QDialog):
             return
         self._continuous_busy = True
         self._continuous_steps_left = n
+        self._continuous_initial_steps = n
         self._mpv_show_merged_current = False
         try:
             _data_agg_probe_log.info(
@@ -5156,6 +5192,7 @@ class DataAggDebugDialog(QDialog):
         self._begin_master_run_from_first_item()
         self._continuous_busy = True
         self._continuous_steps_left = total
+        self._continuous_initial_steps = total
         self._mpv_show_merged_current = False
         try:
             _data_agg_probe_log.info(

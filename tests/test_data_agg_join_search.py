@@ -100,8 +100,8 @@ def test_row_satisfies_join_float_matches_string_int() -> None:
 
 def test_apply_join_key_paired_min_length() -> None:
     pool = [
-        {"KeyCol": "a", "Out": None},
-        {"KeyCol": "b", "Out": None},
+        {"KeyCol": "a", "Out": None, "__iter_index": 0},
+        {"KeyCol": "b", "Out": None, "__iter_index": 1},
     ]
     item = {
         "name": "Out",

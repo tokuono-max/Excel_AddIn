@@ -6,25 +6,26 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 import traceback
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from core.patch_manifest import materialize_manifest_patch_zip
+from core.update_process_cleanup import (
+    ensure_packaged_children_stopped,
+    mutex_blocks_pending_apply,
+    mutex_snapshot,
+    probe_tasklist_line,
+    should_relax_svc_mutex_for_interactive_defer,
+)
 from core.update_state import build_paths, clear_pending, load_runtime_config, read_pending, write_pending
 
 # 起動シーケンスで apply が二重に掛からないようにする
 _APPLY_SINGLE_FLIGHT = threading.Lock()
-_SYNCHRONIZE = 0x00100000
-_MUTEX_NAME_UI = "Global\\HC_QT_UI_SERVER"
-_MUTEX_NAME_SVC = "Global\\HC_SVC_SERVER"
-_MUTEX_NAME_MAIN = "Global\\HC_MAIN_RUNNER"
-_MUTEX_NAME_MAIN_LEGACY = "Global\\HC_BRIDGE_RUNNER"
 
 
 class UpdateApplyError(RuntimeError):
@@ -37,10 +38,102 @@ def _ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return cast(dict[str, Any], value)
+    return {}
+
+
 def _append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", errors="replace") as f:
         f.write(f"{_ts()} {line}\n")
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _try_import_tk() -> tuple[Any | None, Any | None, Any | None]:
+    """Return tkinter unless HC_BOOTSTRAP_NO_TK=1.
+
+    Release builds use Nuitka --enable-plugin=tk-inter (see build_nuitka_bootstrap.bat).
+    """
+    if _env_truthy("HC_BOOTSTRAP_NO_TK"):
+        return None, None, None
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        return tk, messagebox, ttk
+    except BaseException:
+        return None, None, None
+
+
+def _win_message_box_yes_no(title: str, body: str) -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        user32: Any = ctypes.windll.user32
+        mb_yesno = 0x00000004
+        mb_iconinfo = 0x00000040
+        mb_setforeground = 0x00010000
+        mb_topmost = 0x00040000
+        id_yes = 6
+        rc = user32.MessageBoxW(None, body, title, mb_yesno | mb_iconinfo | mb_setforeground | mb_topmost)
+        return int(rc) == id_yes
+    except Exception:
+        return True
+
+
+def _win_message_box_ok(title: str, body: str, *, icon_error: bool = True) -> None:
+    if os.name != "nt":
+        return
+    try:
+        user32: Any = ctypes.windll.user32
+        flags = 0x00000000 | 0x00010000 | 0x00040000  # OK | SETFOREGROUND | TOPMOST
+        if icon_error:
+            flags |= 0x00000010  # MB_ICONERROR
+        else:
+            flags |= 0x00000040  # MB_ICONINFORMATION
+        user32.MessageBoxW(None, body, title, flags)
+    except Exception:
+        pass
+
+
+def _notify_apply_failure(install_root: Path, error: str, *, log_path: Path | None = None) -> None:
+    """apply_pending_update 失敗時に操作者へ通知（Tk 不可時は Win32 MessageBox）。"""
+    err = str(error or "").strip() or "更新に失敗しました。"
+    lp = log_path
+    if lp is None:
+        lp = install_root / "logs" / "hc_update.log"
+    try:
+        _append(lp, f"notify_apply_failure: {err}")
+    except Exception:
+        pass
+    title = _ui_update_message(install_root, "UPDATER_WINDOW_TITLE", "CSV Tool の更新")
+    tpl = _ui_update_message(
+        install_root,
+        "UPDATER_ERROR_TEMPLATE",
+        "CSV Tool の更新に失敗しました。\n\n{error}",
+    )
+    try:
+        body = tpl.format(error=err, log_path=str(lp))
+    except Exception:
+        body = f"CSV Tool の更新に失敗しました。\n\n{err}\n\nログ: {lp}"
+    _win_message_box_ok(title, body, icon_error=True)
+
+
+def _notify_apply_result_if_failed(install_root: Path, res: dict[str, Any]) -> None:
+    if res.get("deferred") or res.get("skipped"):
+        return
+    if res.get("deferred_to_updater"):
+        return
+    if res.get("ok", True):
+        return
+    err = str(res.get("error") or "").strip() or "更新に失敗しました。"
+    paths = build_paths(install_root)
+    _notify_apply_failure(install_root, err, log_path=paths.log_path)
 
 
 class _ProgressUi:
@@ -52,18 +145,21 @@ class _ProgressUi:
         self._msg = None
         self._bar = None
         try:
-            import tkinter as tk
-            from tkinter import messagebox, ttk
+            tk, messagebox, ttk = _try_import_tk()
+            if tk is None or messagebox is None or ttk is None:
+                return
 
             self._tk = tk
             self._messagebox = messagebox
             root = tk.Tk()
-            root.title("CSV Tool 更新")
+            root.title("CSV Tool の更新")
             root.geometry("560x210")
             root.resizable(False, False)
             root.attributes("-topmost", True)
-            self._title = tk.StringVar(value="状態: 待機中")
-            self._msg = tk.StringVar(value="更新準備を確認しています。")
+            self._title = tk.StringVar(value="状態: 準備中")
+            self._msg = tk.StringVar(
+                value="更新に必要なファイルを用意しています。\nしばらくお待ちください。"
+            )
             ttk.Label(root, textvariable=self._title).pack(anchor="w", padx=16, pady=(16, 6))
             ttk.Label(root, textvariable=self._msg).pack(anchor="w", padx=16, pady=(0, 8))
             self._bar = ttk.Progressbar(root, orient="horizontal", mode="determinate", maximum=100, length=520)
@@ -79,18 +175,28 @@ class _ProgressUi:
             root.update()
             self._root = root
             self._ok = True
-        except Exception:
+        except BaseException:
             self._ok = False
+
+    @property
+    def active(self) -> bool:
+        return self._ok
 
     def set(self, title: str, message: str, progress: float) -> None:
         if not self._ok:
             return
+        title_var = self._title
+        msg_var = self._msg
+        bar = self._bar
+        root = self._root
+        if title_var is None or msg_var is None or bar is None or root is None:
+            return
         try:
-            self._title.set(f"状態: {title}")
-            self._msg.set(message)
-            self._bar["value"] = max(0, min(100, int(progress)))
-            self._root.update_idletasks()
-            self._root.update()
+            title_var.set(f"状態: {title}")
+            msg_var.set(message)
+            bar["value"] = max(0, min(100, int(progress)))
+            root.update_idletasks()
+            root.update()
         except Exception:
             pass
 
@@ -101,16 +207,11 @@ class _ProgressUi:
     def close(self) -> None:
         if not self._ok:
             return
-        try:
-            self._root.destroy()
-        except Exception:
-            pass
-
-    def notify_done(self, title: str, message: str) -> None:
-        if not self._ok:
+        root = self._root
+        if root is None:
             return
         try:
-            self._messagebox.showinfo(title, message)
+            root.destroy()
         except Exception:
             pass
 
@@ -123,82 +224,186 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest().lower()
 
 
+def _safe_version_for_filename(raw: str) -> str:
+    s = re.sub(r"[^0-9A-Za-z._-]+", "_", str(raw or "").strip())
+    return s or "unknown"
+
+
+def _read_installed_bin_version(install_root: Path) -> str:
+    try:
+        vfile = install_root / "VERSION.txt"
+        if not vfile.is_file():
+            return "unknown"
+        lines = vfile.read_text(encoding="utf-8-sig").splitlines()
+        if not lines:
+            return "unknown"
+        v = lines[0].strip()
+        return v or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _backup_archive_dir(install_root: Path) -> Path:
+    return install_root / "update" / "archive" / "full"
+
+
+def _write_backup_retain_json(
+    install_root: Path,
+    *,
+    zip_path: Path,
+    previous_version: str,
+    target_version: str,
+) -> None:
+    retain = {
+        "schema_version": 1,
+        "zip_path": str(zip_path),
+        "previous_version": previous_version,
+        "target_version": target_version,
+        "created_at": _ts(),
+    }
+    retain_path = _backup_archive_dir(install_root) / "retain.json"
+    retain_path.parent.mkdir(parents=True, exist_ok=True)
+    retain_path.write_text(json.dumps(retain, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _create_full_recovery_backup(
+    install_root: Path,
+    *,
+    target_bin: str,
+    log_path: Path,
+) -> Path | None:
+    app_bin = install_root / "app" / "bin"
+    if not app_bin.is_dir():
+        _append(log_path, f"backup full skipped: app/bin not found path={app_bin}")
+        return None
+    previous_version = _read_installed_bin_version(install_root)
+    archive_dir = _backup_archive_dir(install_root)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    backup_name = f"full_prev_{_safe_version_for_filename(previous_version)}.zip"
+    final_zip = archive_dir / backup_name
+    tmp_zip = archive_dir / (backup_name + ".new")
+    if tmp_zip.exists():
+        tmp_zip.unlink(missing_ok=True)
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            vfile = install_root / "VERSION.txt"
+            if vfile.is_file():
+                zf.write(vfile, "VERSION.txt")
+            skipped_lock = 0
+            for root_name in ("app", "addin"):
+                src_root = install_root / root_name
+                if not src_root.is_dir():
+                    continue
+                skipped_other = 0
+                for fp in src_root.rglob("*"):
+                    if not fp.is_file():
+                        continue
+                    if fp.name.startswith("~$"):
+                        skipped_lock += 1
+                        continue
+                    try:
+                        zf.write(fp, fp.relative_to(install_root).as_posix())
+                    except OSError as e:
+                        skipped_other += 1
+                        _append(
+                            log_path,
+                            "backup full: skip_file path={p} err={t} errno={eno} winerror={wno} msg={m}".format(
+                                p=fp,
+                                t=type(e).__name__,
+                                eno=getattr(e, "errno", None),
+                                wno=getattr(e, "winerror", None),
+                                m=e,
+                            ),
+                        )
+                if skipped_other:
+                    _append(
+                        log_path,
+                        f"backup full: skipped {skipped_other} unreadable file(s) (best-effort archive)",
+                    )
+            if skipped_lock:
+                _append(
+                    log_path,
+                    f"backup full: skipped {skipped_lock} office lock file(s) (~$*)",
+                )
+        os.replace(tmp_zip, final_zip)
+        _write_backup_retain_json(
+            install_root,
+            zip_path=final_zip,
+            previous_version=previous_version,
+            target_version=str(target_bin or "").strip(),
+        )
+        _append(
+            log_path,
+            "backup full created: path={p} previous={pv} target={tv}".format(
+                p=final_zip,
+                pv=previous_version,
+                tv=(target_bin or "-"),
+            ),
+        )
+        return final_zip
+    except Exception as e:
+        _append(log_path, f"backup full failed: {type(e).__name__}: {e}")
+        try:
+            tmp_zip.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+
+def _cleanup_old_full_backups_after_success(install_root: Path, *, keep_zip: Path | None, log_path: Path) -> None:
+    archive_dir = _backup_archive_dir(install_root)
+    if not archive_dir.is_dir():
+        return
+    keep: set[str] = set()
+    if keep_zip is not None:
+        keep.add(str(keep_zip.resolve()).lower())
+    removed = 0
+    for fp in archive_dir.glob("full_prev_*.zip"):
+        try:
+            key = str(fp.resolve()).lower()
+        except Exception:
+            key = str(fp).lower()
+        if key in keep:
+            continue
+        try:
+            fp.unlink(missing_ok=True)
+            removed += 1
+        except Exception as e:
+            _append(log_path, f"backup cleanup failed path={fp} err={type(e).__name__}: {e}")
+    _append(log_path, f"backup cleanup done removed={removed} keep={keep_zip or '-'}")
+
+
 def _phase(log_path: Path, ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
     _append(log_path, f"bootstrap phase={title} message={msg}")
     ui.set(title, msg, progress)
 
 
-def _is_mutex_exists(name: str) -> bool:
+def _ui_pulse(ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
+    """長時間ブロック処理の前後で進捗 UI を更新（無応答に見えるのを軽減）。"""
+    if not ui.active:
+        return
     try:
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenMutexW(_SYNCHRONIZE, False, name)
-        if handle:
-            kernel32.CloseHandle(handle)
-            return True
-        return False
-    except Exception:
-        return False
-
-
-def _probe_processes() -> str:
-    if os.name != "nt":
-        return "tasklist=unsupported"
-    try:
-        cp = subprocess.run(
-            ["tasklist"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        out = (cp.stdout or "").lower()
-        flags = {
-            "hc_main": ("hc_main.exe" in out),
-            "hc_svc_server": ("hc_svc_server.exe" in out),
-            "hc_ui_server": ("hc_ui_server.exe" in out),
-            "excel": ("excel.exe" in out),
-        }
-        return "tasklist_rc={rc} running={flags}".format(rc=cp.returncode, flags=flags)
-    except Exception as e:
-        return f"tasklist_probe_failed={type(e).__name__}: {e}"
-
-
-def _write_shutdown_flags() -> None:
-    try:
-        from ui_qt import ipc_file
-
-        ipc_file.write_shutdown_flag()
+        ui.set(title, msg, progress)
     except Exception:
         pass
-    try:
-        from svc.svc_host import _write_svc_shutdown_flag
-
-        _write_svc_shutdown_flag()
-    except Exception:
-        pass
-
-
-def _mutex_snapshot() -> dict[str, bool]:
-    return {
-        "main": _is_mutex_exists(_MUTEX_NAME_MAIN),
-        "main_legacy": _is_mutex_exists(_MUTEX_NAME_MAIN_LEGACY),
-        "svc": _is_mutex_exists(_MUTEX_NAME_SVC),
-        "ui": _is_mutex_exists(_MUTEX_NAME_UI),
-    }
-
-
-def _wait_mutex_clear(timeout_sec: int = 20, poll_sec: float = 0.5) -> tuple[bool, dict[str, bool]]:
-    t0 = time.time()
-    last = _mutex_snapshot()
-    while time.time() - t0 < max(1, int(timeout_sec)):
-        last = _mutex_snapshot()
-        if not any(last.values()):
-            return True, last
-        time.sleep(max(0.05, float(poll_sec)))
-    return False, last
 
 
 def _mode_text(mode: str) -> str:
     return "差分" if str(mode or "").strip().lower() == "patch" else "フル"
+
+
+def _ui_update_message(install_root: Path, key: str, default: str) -> str:
+    try:
+        cfg_path = install_root / "config" / "ui_update_check.json"
+        raw_obj = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+        if isinstance(raw_obj, dict):
+            raw = cast(dict[str, Any], raw_obj)
+            msgs = _as_dict(raw.get("MESSAGES"))
+            if key in msgs and isinstance(msgs[key], str):
+                return msgs[key]
+    except Exception:
+        pass
+    return default
 
 
 def _progress_message(base: str, *, target_bin: str, mode: str) -> str:
@@ -272,6 +477,7 @@ def _copy_tree_progress(
     p1: float,
     *,
     progress_msg: str,
+    log_path: Path,
 ) -> None:
     files = [p for p in src_root.rglob("*") if p.is_file()]
     total = max(len(files), 1)
@@ -279,7 +485,36 @@ def _copy_tree_progress(
         rel = fp.relative_to(src_root)
         dst = dst_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(fp, dst)
+        for attempt in range(3):
+            try:
+                shutil.copy2(fp, dst)
+                break
+            except OSError as e:
+                wno = int(getattr(e, "winerror", 0) or 0)
+                if wno == 32 and attempt < 2:
+                    _append(
+                        log_path,
+                        "copy_tree: retry_sharing_violation attempt={a}/3 rel={rel} src={src} dst={dst}".format(
+                            a=attempt + 1,
+                            rel=rel.as_posix(),
+                            src=fp,
+                            dst=dst,
+                        ),
+                    )
+                    time.sleep(1.0 if attempt == 0 else 2.0)
+                    continue
+                _append(
+                    log_path,
+                    "copy_tree: copy_failed rel={rel} src={src} dst={dst} errno={eno} winerror={wno} err={msg}".format(
+                        rel=rel.as_posix(),
+                        src=fp,
+                        dst=dst,
+                        eno=getattr(e, "errno", None),
+                        wno=getattr(e, "winerror", None),
+                        msg=e,
+                    ),
+                )
+                raise
         pct = p0 + (p1 - p0) * (idx / total)
         ui.set(title, progress_msg, pct)
         if ui.cancelled:
@@ -289,7 +524,11 @@ def _copy_tree_progress(
 def _split_error(e: Exception) -> tuple[str, str]:
     if isinstance(e, UpdateApplyError):
         return e.code, str(e)
-    msg = str(e) or "更新中に不明なエラーが発生しました。"
+    base = str(e) or "更新中に不明なエラーが発生しました。"
+    hint = ""
+    if isinstance(e, OSError) and int(getattr(e, "winerror", 0) or 0) == 32:
+        hint = " ヒント: ファイルが他プロセスに使用中です。すべての Excel を終了してから再度お試しください。"
+    msg = base + hint
     return "E_UNKNOWN", msg
 
 
@@ -332,6 +571,14 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
         _phase(log_path, ui, "展開中", extract_msg, 40)
         _extract_with_progress(zip_local, ex_tmp, ui, 40, 65, progress_msg=extract_msg)
         _append(log_path, f"apply_zip: extract_done mode={mode} temp={ex_tmp}")
+        cfg_apply = load_runtime_config(install_root)
+        _ui_pulse(ui, "処理中", "関連プロセスを終了しています…", 66)
+        ensure_packaged_children_stopped(
+            lambda m: _append(log_path, m),
+            cfg_apply,
+            phase="before_bin_apply",
+            force_taskkill=True,
+        )
         _phase(log_path, ui, "適用中", apply_msg, 70)
         if mode == "patch":
             p_app = ex_tmp / "app" / "bin"
@@ -339,9 +586,27 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
             if not p_app.exists() and not p_addin.exists():
                 raise UpdateApplyError("E_PATCH_MANIFEST_INVALID", "差分更新ファイルが不正です（必要な構成が不足しています）。")
             if p_app.exists():
-                _copy_tree_progress(p_app, install_root / "app" / "bin", ui, "適用中", 70, 90, progress_msg=apply_msg)
+                _copy_tree_progress(
+                    p_app,
+                    install_root / "app" / "bin",
+                    ui,
+                    "適用中",
+                    70,
+                    90,
+                    progress_msg=apply_msg,
+                    log_path=log_path,
+                )
             if p_addin.exists():
-                _copy_tree_progress(p_addin, install_root / "addin", ui, "適用中", 70, 95, progress_msg=apply_msg)
+                _copy_tree_progress(
+                    p_addin,
+                    install_root / "addin",
+                    ui,
+                    "適用中",
+                    70,
+                    95,
+                    progress_msg=apply_msg,
+                    log_path=log_path,
+                )
             _apply_delete_list(install_root, ex_tmp / "__delete_list.txt")
             if target_bin:
                 (install_root / "VERSION.txt").write_text(target_bin + "\n", encoding="utf-8")
@@ -352,8 +617,18 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
                 raise UpdateApplyError("E_FULL_LAYOUT_INVALID", "更新ファイルの構成が不正です（app/bin がありません）。")
             d_bin = install_root / "app" / "bin"
             if d_bin.exists():
+                _append(log_path, f"apply_zip: rmtree before full bin replace path={d_bin}")
                 shutil.rmtree(d_bin, ignore_errors=True)
-            _copy_tree_progress(s_bin, d_bin, ui, "適用中", 70, 95, progress_msg=apply_msg)
+            _copy_tree_progress(
+                s_bin,
+                d_bin,
+                ui,
+                "適用中",
+                70,
+                95,
+                progress_msg=apply_msg,
+                log_path=log_path,
+            )
             vsrc = ex_tmp / "VERSION.txt"
             if target_bin:
                 (install_root / "VERSION.txt").write_text(target_bin + "\n", encoding="utf-8")
@@ -363,8 +638,18 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
             if a_src.is_dir():
                 d_add = install_root / "addin"
                 if d_add.exists():
+                    _append(log_path, f"apply_zip: rmtree before full addin replace path={d_add}")
                     shutil.rmtree(d_add, ignore_errors=True)
-                _copy_tree_progress(a_src, d_add, ui, "適用中", 70, 98, progress_msg=apply_msg)
+                _copy_tree_progress(
+                    a_src,
+                    d_add,
+                    ui,
+                    "適用中",
+                    70,
+                    98,
+                    progress_msg=apply_msg,
+                    log_path=log_path,
+                )
             _append(log_path, f"apply_zip: full_apply_done target_bin={target_bin or '-'}")
     except Exception as e:
         _append(
@@ -384,6 +669,12 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
                     fn=getattr(e, "filename", None),
                 ),
             )
+        wno = getattr(e, "winerror", None)
+        if wno == 32:
+            _append(log_path, f"apply_zip: winerror32_context probe={probe_tasklist_line()}")
+            _append(log_path, f"apply_zip: winerror32_context mutex={mutex_snapshot()}")
+        tb = traceback.format_exc().strip().replace("\r", " ").replace("\n", " | ")
+        _append(log_path, f"apply_zip: traceback={tb[:2000]}")
         raise
     finally:
         shutil.rmtree(dl_tmp, ignore_errors=True)
@@ -391,9 +682,7 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
 
 
 def _try_apply_bootstrap_swap(install_root: Path, pending: dict[str, Any], log_path: Path) -> tuple[bool, str | None]:
-    b = pending.get("bootstrap")
-    if not isinstance(b, dict):
-        return False, None
+    b = _as_dict(pending.get("bootstrap"))
     if not bool(b.get("pending_swap", False)):
         return False, None
     new_path_s = str(b.get("local_new_path") or "").strip()
@@ -453,13 +742,30 @@ def _resolve_payload(install_root: Path, payload: dict[str, Any], catalog_path: 
     return cand2 if cand2.is_file() else None, str(payload.get("sha256") or "").strip().lower()
 
 
+def _catalog_display_version_for_pending(catalog_path: str) -> str:
+    try:
+        p = Path(str(catalog_path or "").strip())
+        if not p.is_file():
+            return ""
+        from core.packaged_update import load_catalog
+
+        data = load_catalog(p)
+        if isinstance(data, dict):
+            return str(data.get("set_version") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _persist_zip_for_hc_updater(src: Path, payload_root: Path) -> Path:
+    payload_root.mkdir(parents=True, exist_ok=True)
+    dest = payload_root / "pending_hc_updater_bin.zip"
+    shutil.copy2(src, dest)
+    return dest
+
+
 def _confirm_pending_apply_before_progress(install_root: Path, pending: dict[str, Any]) -> bool:
     """予約適用の直前に操作者へ Yes/No。False=今回はスキップ（pending は残す）。"""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-    except Exception:
-        return True
     cfg_path = install_root / "config" / "ui_update_check.json"
     title = "CSV Tool 更新"
     body = (
@@ -472,16 +778,17 @@ def _confirm_pending_apply_before_progress(install_root: Path, pending: dict[str
     )
     try:
         if cfg_path.is_file():
-            raw = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-            msg = raw.get("MESSAGES") if isinstance(raw, dict) else {}
-            if isinstance(msg, dict):
+            raw_obj = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+            raw = cast(dict[str, Any], raw_obj) if isinstance(raw_obj, dict) else {}
+            msg = _as_dict(raw.get("MESSAGES"))
+            if msg:
                 title = str(msg.get("PENDING_APPLY_CONFIRM_TITLE") or title).strip() or title
                 body = str(msg.get("PENDING_APPLY_CONFIRM_TEMPLATE") or body)
     except Exception:
         pass
     mode = str(pending.get("mode") or "patch").strip().lower()
     target_bin = str(pending.get("target_bin_version") or "").strip() or "-"
-    b = pending.get("bootstrap") if isinstance(pending.get("bootstrap"), dict) else {}
+    b = _as_dict(pending.get("bootstrap"))
     has_bs = "あり" if bool(b.get("pending_swap")) else "なし"
     scope = str(pending.get("apply_scope") or "").strip() or "（従来）"
     body = (
@@ -490,6 +797,9 @@ def _confirm_pending_apply_before_progress(install_root: Path, pending: dict[str
         .replace("{has_bootstrap}", has_bs)
         .replace("{apply_scope}", scope)
     )
+    tk, messagebox, _ttk = _try_import_tk()
+    if tk is None or messagebox is None:
+        return _win_message_box_yes_no(title, body)
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
@@ -506,7 +816,9 @@ def apply_pending_update(install_root: Path) -> dict[str, Any]:
     if not _APPLY_SINGLE_FLIGHT.acquire(blocking=False):
         return {"ok": True, "applied": False, "skipped": "concurrent_apply"}
     try:
-        return _apply_pending_update_impl(install_root)
+        res = _apply_pending_update_impl(install_root)
+        _notify_apply_result_if_failed(install_root, res)
+        return res
     finally:
         _APPLY_SINGLE_FLIGHT.release()
 
@@ -514,9 +826,10 @@ def apply_pending_update(install_root: Path) -> dict[str, Any]:
 def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
     paths = build_paths(install_root)
     cfg = load_runtime_config(install_root)
-    pending = read_pending(paths)
-    if not pending:
+    pending_opt = read_pending(paths)
+    if not pending_opt:
         return {"ok": True, "applied": False}
+    pending = pending_opt
     if paths.lock_path.exists():
         return {"ok": False, "applied": False, "error": "apply lock exists"}
     _append(
@@ -528,49 +841,96 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             cat=str(pending.get("catalog_path") or "-"),
         ),
     )
+    snap_probe = mutex_snapshot()
     _append(
         paths.log_path,
         "pending_apply: lock_probe main={main} main_legacy={main_old} svc={svc} ui={ui}".format(
-            main=_is_mutex_exists(_MUTEX_NAME_MAIN),
-            main_old=_is_mutex_exists(_MUTEX_NAME_MAIN_LEGACY),
-            svc=_is_mutex_exists(_MUTEX_NAME_SVC),
-            ui=_is_mutex_exists(_MUTEX_NAME_UI),
+            main=snap_probe["main"],
+            main_old=snap_probe["main_legacy"],
+            svc=snap_probe["svc"],
+            ui=snap_probe["ui"],
         ),
     )
-    _append(paths.log_path, f"pending_apply: {_probe_processes()}")
-    snap0 = _mutex_snapshot()
-    if any(snap0.values()):
-        _append(paths.log_path, "pending_apply: request_shutdown_flags=true")
-        _write_shutdown_flags()
-        ok_clear, snap1 = _wait_mutex_clear(timeout_sec=20, poll_sec=0.5)
-        _append(paths.log_path, f"pending_apply: mutex_after_wait ok_clear={ok_clear} state={snap1}")
-        if not ok_clear:
+    _append(paths.log_path, f"pending_apply: {probe_tasklist_line()}")
+    relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
+    if relax_svc_self:
+        _append(
+            paths.log_path,
+            "pending_apply: mutex_gate relax_svc_self=True "
+            "(interactive defer from hc_svc_server; svc mutex ignored)",
+        )
+    snap0 = mutex_snapshot()
+    if mutex_blocks_pending_apply(snap0, relax_svc_self=relax_svc_self):
+        _append(paths.log_path, "pending_apply: mutex_busy graceful_shutdown")
+        ensure_packaged_children_stopped(
+            lambda m: _append(paths.log_path, m),
+            cfg,
+            phase="pending_apply_graceful",
+            force_taskkill=False,
+        )
+        snap_mid = mutex_snapshot()
+        if mutex_blocks_pending_apply(snap_mid, relax_svc_self=relax_svc_self):
+            _append(paths.log_path, "pending_apply: mutex still busy; taskkill")
+            ensure_packaged_children_stopped(
+                lambda m: _append(paths.log_path, m),
+                cfg,
+                phase="pending_apply_force",
+                force_taskkill=True,
+            )
+        snap1 = mutex_snapshot()
+        if mutex_blocks_pending_apply(snap1, relax_svc_self=relax_svc_self):
             return {
                 "ok": False,
                 "applied": False,
                 "error": f"blocked_by_running_process mutex={snap1}",
             }
-    if not _confirm_pending_apply_before_progress(install_root, pending):
+    if pending.get("skip_apply_confirm"):
+        _append(
+            paths.log_path,
+            "pending_apply: skip_apply_confirm=True (ribbon single confirm); second dialog suppressed",
+        )
+        p_skip = dict(pending)
+        p_skip.pop("skip_apply_confirm", None)
+        write_pending(paths, p_skip)
+        pending = p_skip
+    elif not _confirm_pending_apply_before_progress(install_root, pending):
         _append(paths.log_path, "pending_apply: user_decision=no deferred=true")
         return {"ok": True, "applied": False, "deferred": True}
     paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
     paths.lock_path.write_text(str(_ts()), encoding="utf-8")
     ui = _ProgressUi()
+    if not ui.active:
+        _append(
+            paths.log_path,
+            "progress_ui: tk unavailable (HC_BOOTSTRAP_NO_TK or tk init failed); progress bar disabled, log only",
+        )
+    _phase(
+        paths.log_path,
+        ui,
+        _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
+        _ui_update_message(
+            install_root,
+            "PROGRESS_PREPARE_MSG",
+            "更新に必要なファイルを用意しています。\nしばらくお待ちください。",
+        ),
+        5,
+    )
     t0 = time.time()
     try:
         timeout_sec = max(30, int(cfg.get("BOOTSTRAP_APPLY_TIMEOUT_SEC", 120)))
         retries = max(1, int(cfg.get("PATCH_RETRY_IN_RUN_MAX", 3)))
         wait1 = max(0, int(cfg.get("PATCH_RETRY_WAIT_SEC_1", 2)))
         wait2 = max(0, int(cfg.get("PATCH_RETRY_WAIT_SEC_2", 5)))
+        backup_zip_path: Path | None = None
 
         # bootstrap 自己更新は「1起動内のみ」で最大3回。起動またぎ累積はしない。
-        p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+        p_retry = _as_dict(pending.get("retry"))
         p_retry["bootstrap_retry_in_run"] = 0
         pending["retry"] = p_retry
         write_pending(paths, pending)
         b_err: str | None = None
         for bi in range(3):
-            p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+            p_retry = _as_dict(pending.get("retry"))
             p_retry["bootstrap_retry_in_run"] = bi + 1
             pending["retry"] = p_retry
             write_pending(paths, pending)
@@ -581,7 +941,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                 time.sleep(1 if bi == 0 else 2)
         if b_err:
             _append(paths.log_path, f"bootstrap_self_update: 失敗しました err={b_err}")
-            p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+            p_retry = _as_dict(pending.get("retry"))
             p_retry["last_error_code"] = "E_BOOTSTRAP_SWAP_FAILED"
             p_retry["last_error_message"] = b_err
             p_retry["last_failed_at"] = _ts()
@@ -589,7 +949,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             pending["retry"] = p_retry
             write_pending(paths, pending)
         else:
-            p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+            p_retry = _as_dict(pending.get("retry"))
             p_retry["bootstrap_retry_in_run"] = 0
             pending["retry"] = p_retry
             write_pending(paths, pending)
@@ -599,7 +959,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             if b_err:
                 _append(paths.log_path, f"bootstrap_only: swap aborted err={b_err}")
                 return {"ok": False, "applied": False, "error": b_err or "bootstrap swap failed"}
-            bt = pending.get("bootstrap") if isinstance(pending.get("bootstrap"), dict) else {}
+            bt = _as_dict(pending.get("bootstrap"))
             bt_ver = str(bt.get("target_version") or "-")
             pending["state"] = "done"
             pending["retry"] = {
@@ -616,12 +976,6 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             )
             _phase(paths.log_path, ui, "完了", done_msg, 100)
             _append(paths.log_path, f"apply_bootstrap_only: success version={bt_ver}")
-            ui.notify_done(
-                "CSV Tool 更新",
-                "bootstrap の更新が完了しました。\n\n"
-                f"適用後 bootstrap 版: {bt_ver}\n\n"
-                "Excel を再起動してください。",
-            )
             clear_pending(paths)
             try:
                 shutil.rmtree(paths.payload_root, ignore_errors=True)
@@ -632,9 +986,45 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         target_bin = str(pending.get("target_bin_version") or "").strip()
         mode = str(pending.get("mode") or "patch").strip().lower()
         cat_path = str(pending.get("catalog_path") or "").strip()
-        retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+        retry = _as_dict(pending.get("retry"))
         patch_total = int(retry.get("patch_fail_total", 0) or 0)
         full_total = int(retry.get("full_fail_total", 0) or 0)
+        if apply_scope in ("bin_only", "bin+bootstrap"):
+            _ui_pulse(
+                ui,
+                _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
+                _ui_update_message(
+                    install_root,
+                    "PROGRESS_PREPARE_MSG_BACKUP",
+                    "復旧用バックアップを作成しています。\nしばらくお待ちください。",
+                ),
+                6,
+            )
+            backup_zip_path = _create_full_recovery_backup(
+                install_root,
+                target_bin=target_bin,
+                log_path=paths.log_path,
+            )
+            if backup_zip_path is None or not backup_zip_path.is_file():
+                _append(
+                    paths.log_path,
+                    "apply_bin: aborted no_recovery_backup (bin apply requires full_prev backup zip)",
+                )
+                pending["state"] = "failed"
+                pending["retry"] = {
+                    "patch_retry_in_run": 0,
+                    "patch_fail_total": patch_total,
+                    "full_fail_total": full_total + 1,
+                    "last_error_code": "E_BACKUP_REQUIRED",
+                    "last_error_message": "復旧用バックアップを作成できませんでした。",
+                    "last_failed_at": _ts(),
+                }
+                write_pending(paths, pending)
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": "復旧用バックアップを作成できませんでした。空き容量・アクセス権・セキュリティソフトを確認してください。",
+                }
 
         if mode not in ("patch", "full"):
             mode = "patch"
@@ -647,11 +1037,22 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         )
         pending["state"] = "applying_patch" if mode == "patch" else "applying_full"
         write_pending(paths, pending)
-        payload_patch = pending.get("patch") if isinstance(pending.get("patch"), dict) else {}
-        payload_full = pending.get("full") if isinstance(pending.get("full"), dict) else {}
+        payload_patch = _as_dict(pending.get("patch"))
+        payload_full = _as_dict(pending.get("full"))
+        worker_zip: Path | None = None
+        worker_mode = "full"
+        worker_sha = ""
+        defer_bin_to_updater = os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN") != "1"
+        _append(
+            paths.log_path,
+            "apply_bin: defer_bin_to_updater={d} (inline_bin env set={e})".format(
+                d=defer_bin_to_updater,
+                e=os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN", ""),
+            ),
+        )
 
         def _update_err(msg: str) -> None:
-            p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+            p_retry = _as_dict(pending.get("retry"))
             p_retry["last_error_message"] = msg
             p_retry["last_failed_at"] = _ts()
             p_retry["last_error_code"] = str(p_retry.get("last_error_code") or "")
@@ -662,7 +1063,14 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             if patch_path is None:
                 patch_total += 1
                 _update_err("差分更新ファイルを取得できません。")
-                pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "E_PATCH_PAYLOAD_MISSING", "last_error_message": pending.get("retry", {}).get("last_error_message", ""), "last_failed_at": _ts()}
+                pending["retry"] = {
+                    "patch_retry_in_run": 0,
+                    "patch_fail_total": patch_total,
+                    "full_fail_total": full_total,
+                    "last_error_code": "E_PATCH_PAYLOAD_MISSING",
+                    "last_error_message": str(_as_dict(pending.get("retry")).get("last_error_message") or ""),
+                    "last_failed_at": _ts(),
+                }
                 pending["state"] = "applying_full"
                 mode = "full"
                 write_pending(paths, pending)
@@ -674,6 +1082,16 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     try:
                         pending["retry"] = {"patch_retry_in_run": i + 1, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "", "last_error_message": "", "last_failed_at": ""}
                         write_pending(paths, pending)
+                        _ui_pulse(
+                            ui,
+                            _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
+                            _ui_update_message(
+                                install_root,
+                                "PROGRESS_PREPARE_MSG_PATCH_BUILD",
+                                "差分パッケージを構築しています。\nしばらくお待ちください。",
+                            ),
+                            8,
+                        )
                         t_mat0 = time.perf_counter()
                         try:
                             mz, mclean, mstats, merr = materialize_manifest_patch_zip(
@@ -699,7 +1117,12 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                             )
                         apply_sha = "" if mstats is not None else patch_sha
                         try:
-                            _apply_zip(install_root, mz, apply_sha, "patch", target_bin, ui, paths.log_path)
+                            if defer_bin_to_updater:
+                                worker_zip = _persist_zip_for_hc_updater(mz, paths.payload_root)
+                                worker_mode = "patch"
+                                worker_sha = apply_sha
+                            else:
+                                _apply_zip(install_root, mz, apply_sha, "patch", target_bin, ui, paths.log_path)
                         finally:
                             if mclean and str(mclean) and Path(mclean).is_dir():
                                 shutil.rmtree(mclean, ignore_errors=True)
@@ -707,12 +1130,23 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                         break
                     except Exception as e:
                         code, msg = _split_error(e)
-                        _append(paths.log_path, f"bootstrap patch failed try={i+1}/{retries} err={msg}")
+                        _append(
+                            paths.log_path,
+                            "bootstrap patch failed try={i}/{ret} code={c} type={t} winerror={w} errno={en} err={m}".format(
+                                i=i + 1,
+                                ret=retries,
+                                c=code,
+                                t=type(e).__name__,
+                                w=getattr(e, "winerror", None) if isinstance(e, OSError) else None,
+                                en=getattr(e, "errno", None) if isinstance(e, OSError) else None,
+                                m=msg,
+                            ),
+                        )
                         if _is_immediate_full_error(code):
                             patch_total += 1
                             mode = "full"
                             pending["state"] = "applying_full"
-                            p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+                            p_retry = _as_dict(pending.get("retry"))
                             p_retry["last_error_code"] = code
                             pending["retry"] = p_retry
                             _update_err("更新ファイルの整合性検証または差分情報の解析に失敗しました。")
@@ -725,7 +1159,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     patch_total += 1
                     mode = "full"
                     pending["state"] = "applying_full"
-                    p_retry = pending.get("retry") if isinstance(pending.get("retry"), dict) else {}
+                    p_retry = _as_dict(pending.get("retry"))
                     p_retry["last_error_code"] = str(p_retry.get("last_error_code") or "E_PATCH_RETRY_EXHAUSTED")
                     pending["retry"] = p_retry
                     _update_err("差分更新の適用に失敗したためフル更新へ切り替えます。")
@@ -741,36 +1175,151 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                 write_pending(paths, pending)
                 _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
                 return {"ok": False, "applied": False, "error": "フル更新ファイルを取得できません。"}
-            full_apply_err: Exception | None = None
-            for j in range(3):
-                try:
-                    _append(paths.log_path, f"apply_full: try={j+1}/3 start")
-                    _apply_zip(install_root, full_path, full_sha, "full", target_bin, ui, paths.log_path)
-                    full_apply_err = None
-                    break
-                except PermissionError as e:
-                    full_apply_err = e
-                    if int(getattr(e, "winerror", 0) or 0) == 32 and j < 2:
-                        _append(paths.log_path, f"apply_full: retry_on_winerror32 try={j+1}/3")
-                        time.sleep(1.5 if j == 0 else 3.0)
-                        continue
-                    break
-                except Exception as e:
-                    full_apply_err = e
-                    break
-            if full_apply_err is not None:
-                code, msg = _split_error(full_apply_err)
+            if defer_bin_to_updater:
+                worker_zip = _persist_zip_for_hc_updater(full_path, paths.payload_root)
+                worker_mode = "full"
+                worker_sha = full_sha
+            else:
+                full_apply_err: Exception | None = None
+                for j in range(3):
+                    try:
+                        _append(paths.log_path, f"apply_full: try={j+1}/3 start")
+                        _apply_zip(install_root, full_path, full_sha, "full", target_bin, ui, paths.log_path)
+                        full_apply_err = None
+                        break
+                    except PermissionError as e:
+                        full_apply_err = e
+                        _append(
+                            paths.log_path,
+                            "apply_full: caught PermissionError try={t}/3 winerror={w} errno={en} msg={m}".format(
+                                t=j + 1,
+                                w=getattr(e, "winerror", None),
+                                en=getattr(e, "errno", None),
+                                m=e,
+                            ),
+                        )
+                        if int(getattr(e, "winerror", 0) or 0) == 32 and j < 2:
+                            _append(paths.log_path, f"apply_full: retry_on_winerror32 try={j+1}/3")
+                            ensure_packaged_children_stopped(
+                                lambda m: _append(paths.log_path, m),
+                                cfg,
+                                phase=f"full_apply_win32_retry_{j}",
+                                force_taskkill=True,
+                            )
+                            time.sleep(1.5 if j == 0 else 3.0)
+                            continue
+                        break
+                    except Exception as e:
+                        full_apply_err = e
+                        _append(
+                            paths.log_path,
+                            "apply_full: caught_exception try={t}/3 type={ty} winerror={w} errno={en} msg={m}".format(
+                                t=j + 1,
+                                ty=type(e).__name__,
+                                w=getattr(e, "winerror", None) if isinstance(e, OSError) else None,
+                                en=getattr(e, "errno", None) if isinstance(e, OSError) else None,
+                                m=e,
+                            ),
+                        )
+                        break
+                if full_apply_err is not None:
+                    code, msg = _split_error(full_apply_err)
+                    _append(
+                        paths.log_path,
+                        "apply_full: failed_final code={c} type={t} winerror={w} errno={en} detail={m}".format(
+                            c=code,
+                            t=type(full_apply_err).__name__,
+                            w=getattr(full_apply_err, "winerror", None)
+                            if isinstance(full_apply_err, OSError)
+                            else None,
+                            en=getattr(full_apply_err, "errno", None)
+                            if isinstance(full_apply_err, OSError)
+                            else None,
+                            m=msg,
+                        ),
+                    )
+                    pending["state"] = "failed"
+                    pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total + 1, "last_error_code": code, "last_error_message": msg, "last_failed_at": _ts()}
+                    write_pending(paths, pending)
+                    _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
+                    return {"ok": False, "applied": False, "error": msg}
+
+        if defer_bin_to_updater:
+            if worker_zip is None or not worker_zip.is_file():
+                _append(paths.log_path, "apply_bin: deferred_to_updater aborted worker_zip missing")
                 pending["state"] = "failed"
-                pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total + 1, "last_error_code": code, "last_error_message": msg, "last_failed_at": _ts()}
+                pending["retry"] = {
+                    "patch_retry_in_run": 0,
+                    "patch_fail_total": patch_total,
+                    "full_fail_total": full_total + 1,
+                    "last_error_code": "E_WORKER_ZIP_MISSING",
+                    "last_error_message": "hc_updater 用の zip を用意できませんでした。",
+                    "last_failed_at": _ts(),
+                }
                 write_pending(paths, pending)
-                _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
-                return {"ok": False, "applied": False, "error": msg}
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": "更新 zip の準備に失敗しました。ログを確認してください。",
+                }
+            display_ver = _catalog_display_version_for_pending(cat_path)
+            try:
+                from core.packaged_update import spawn_hc_updater_for_pending_bin_apply
+
+                spawn_hc_updater_for_pending_bin_apply(
+                    install_root,
+                    zip_path=worker_zip,
+                    expected_sha=worker_sha,
+                    apply_mode=worker_mode,
+                    target_bin_version=target_bin,
+                    display_version=display_ver,
+                )
+            except Exception as e:
+                _append(
+                    paths.log_path,
+                    "apply_bin: spawn_hc_updater_for_pending_bin_apply failed type={t} err={m}".format(
+                        t=type(e).__name__,
+                        m=e,
+                    ),
+                )
+                pending["state"] = "failed"
+                pending["retry"] = {
+                    "patch_retry_in_run": 0,
+                    "patch_fail_total": patch_total,
+                    "full_fail_total": full_total + 1,
+                    "last_error_code": "E_SPAWN_UPDATER_FAILED",
+                    "last_error_message": str(e),
+                    "last_failed_at": _ts(),
+                }
+                write_pending(paths, pending)
+                return {"ok": False, "applied": False, "error": str(e)}
+            clear_pending(paths)
+            done_msg = _ui_update_message(
+                install_root,
+                "PROGRESS_DEFER_DONE_TEMPLATE",
+                "準備が終わりました。\n\n開いている Excel をすべて終了してください。",
+            )
+            defer_title = _ui_update_message(install_root, "PROGRESS_DEFER_DONE_TITLE", "準備完了")
+            _phase(paths.log_path, ui, defer_title, done_msg, 100)
+            _append(
+                paths.log_path,
+                "apply_bin: apply_mode_final={m} apply_result=deferred_to_hc_updater restart_required=true target_bin={t}".format(
+                    m=worker_mode,
+                    t=target_bin or "-",
+                ),
+            )
+            return {"ok": True, "applied": False, "deferred_to_updater": True}
 
         pending["state"] = "done"
         pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "", "last_error_message": "", "last_failed_at": ""}
         write_pending(paths, pending)
-        done_msg = _progress_message("更新が完了しました。Excel を再起動してください。", target_bin=target_bin, mode=mode)
-        _phase(paths.log_path, ui, "完了", done_msg, 100)
+        done_msg = _ui_update_message(
+            install_root,
+            "PROGRESS_INLINE_DONE_MSG",
+            "更新が完了しました。",
+        )
+        inline_title = _ui_update_message(install_root, "PROGRESS_INLINE_DONE_TITLE", "完了")
+        _phase(paths.log_path, ui, inline_title, done_msg, 100)
         _append(
             paths.log_path,
             "apply_bin: apply_mode_final={m} apply_result=success restart_required=true target_bin={t}".format(
@@ -797,13 +1346,14 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                         m=e,
                     ),
                 )
-        ui.notify_done(
-            "CSV Tool 更新",
-            "更新が完了しました。\n\n適用後バージョン: {v}\n最終適用方式: {m}\n\nExcel を再起動してください。".format(
-                v=(target_bin or "-"),
-                m=_mode_text(mode),
-            ),
-        )
+        if b_err:
+            _append(paths.log_path, "backup cleanup skipped: bootstrap swap not successful")
+        else:
+            _cleanup_old_full_backups_after_success(
+                install_root,
+                keep_zip=backup_zip_path,
+                log_path=paths.log_path,
+            )
         clear_pending(paths)
         try:
             shutil.rmtree(paths.payload_root, ignore_errors=True)
@@ -813,13 +1363,20 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
     except Exception as e:
         _append(
             paths.log_path,
-            "pending_apply: fatal_exception type={t} err={m}".format(
+            "pending_apply: fatal_exception type={t} winerror={w} errno={en} err={m}".format(
                 t=type(e).__name__,
+                w=getattr(e, "winerror", None) if isinstance(e, OSError) else None,
+                en=getattr(e, "errno", None) if isinstance(e, OSError) else None,
                 m=e,
             ),
         )
+        try:
+            _append(paths.log_path, f"pending_apply: fatal_probe {probe_tasklist_line()}")
+            _append(paths.log_path, f"pending_apply: fatal_mutex {mutex_snapshot()}")
+        except Exception:
+            pass
         tb = traceback.format_exc().strip().replace("\r", " ").replace("\n", " | ")
-        _append(paths.log_path, f"pending_apply: traceback={tb[:1200]}")
+        _append(paths.log_path, f"pending_apply: traceback={tb[:2000]}")
         return {"ok": False, "applied": False, "error": f"{type(e).__name__}: {e}"}
     finally:
         try:

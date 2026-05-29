@@ -10,6 +10,7 @@ Purpose:
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.8 (2026-05-29) Phase B: 大量反復シートの事前 materialize、反復読取の行列経路、join バッチ走査の行列化。
   - 0.1.6 (2026-04-07) extract_item_values: sources 空はファイル名ではなく主値 [""]（未設定列を一括出力で空にする）。
   - 0.1.5 (2026-04-04) read_only シートを iter_rows で一度具体化し ws[ref] の都度走査を避ける（スコープ内・繰り返し抽出）。
   - 0.1.4 (2026-04-04) DATA_AGG_PER_FILE_TIMING=1 時 load_workbook 所要をスレッドローカルに集計し consume で取得。
@@ -31,7 +32,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 _path_svc = Path(__file__).resolve().parent
 _root = _path_svc.parent
@@ -42,18 +43,29 @@ from core.core_log import get_logger  # noqa: E402
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_value_post import (  # noqa: E402
     postprocess_cell_primary,
+    postprocess_cell_primary_batch,
     postprocess_link_rule_value,
     postprocess_metadata_like_primary,
     postprocess_name_extract_primary,
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.5"
+__version__ = "0.1.6"
+
+
+def _poll_cancel_check(
+    cancel_check: Optional[Callable[..., None]], *, force: bool = False
+) -> None:
+    if cancel_check is not None:
+        cancel_check(force=force)
 
 # compute_batch 等で同一 .xlsx を複数項目・複数セル参照するときの重複 load_workbook を避ける。
 _tls_wb_scope = threading.local()
 # DATA_AGG_PER_FILE_TIMING=1: load_workbook の秒をパスキー別に累積（consume で取り出し）
 _tls_wb_open_sec = threading.local()
+_SHEET_MATERIALIZE_THRESHOLD = 8
+# 縦/横反復がこの件数以上のとき、ファイル処理開始時にシートを先に materialize する。
+_SHEET_PRECACHE_REPEAT_MIN = 64
 
 
 def _per_file_workbook_timing_enabled() -> bool:
@@ -101,7 +113,7 @@ def xlsx_workbook_scope() -> Iterator[None]:
     if stack is None:
         stack = []
         _tls_wb_scope.stack = stack
-    frame: dict[str, Any] = {"wbs": {}, "sheet_mats": {}}
+    frame: dict[str, Any] = {"wbs": {}, "sheet_mats": {}, "sheet_hits": {}}
     stack.append(frame)
     try:
         yield
@@ -133,6 +145,12 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
     wb = wbs.get(key)
     if wb is not None:
         return wb
+    try:
+        from svc.data_agg_cancel import poll_active_cancel  # noqa: WPS433
+
+        poll_active_cancel(force=True)
+    except Exception:
+        pass
     try:
         import openpyxl  # noqa: E402
     except ImportError:
@@ -511,6 +529,8 @@ def extract_cells_repeat(
     repeat_direction: str = "vertical",
     repeat_until_empty: bool = True,
     repeat_max: Optional[int] = None,
+    *,
+    cancel_check: Optional[Callable[..., None]] = None,
 ) -> list[Any]:
     """
     開始セルから縦または横に繰り返しセルを取得する。
@@ -558,6 +578,7 @@ def extract_cells_repeat(
     delta_col = 1 if repeat_direction == "horizontal" else 0
     delta_row = 1 if repeat_direction == "vertical" else 0
     for _ in range(repeat_max or 9999):
+        _poll_cancel_check(cancel_check)
         cr = _col_row_to_cell_ref(col, row)
         v = extract_cell(p, sheet_name, cr)
         if repeat_until_empty and (v is None or v == ""):
@@ -732,6 +753,123 @@ def _matrix_cell_value(matrix: list[list[Any]], col: int, row: int) -> Any:
     return r[col]
 
 
+def _get_readonly_sheet_matrix(
+    wb: Any,
+    sheet_name: Optional[str],
+    path: Path,
+    *,
+    create: bool = True,
+) -> Optional[list[list[Any]]]:
+    """xlsx_workbook_scope 内の (path, シート) 行列。create=False なら未構築時は None。"""
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return None
+    ws, resolved_name = _resolve_readonly_worksheet(wb, sheet_name)
+    if ws is None:
+        return None
+    path_key = str(path.resolve())
+    mats_store: dict[Any, list[list[Any]]] = frame.setdefault("sheet_mats", {})
+    store_key = (path_key, resolved_name)
+    mat = mats_store.get(store_key)
+    if mat is not None or not create:
+        return mat
+    try:
+        mat = _materialize_readonly_sheet_matrix(ws)
+    except Exception:
+        return None
+    mats_store[store_key] = mat
+    return mat
+
+
+def _collect_xlsx_sheets_for_precache(items: list[dict[str, Any]]) -> set[Optional[str]]:
+    """
+    同一ファイル内で materialize するシート名（None は既定シート）。
+    - 縦/横反復が _SHEET_PRECACHE_REPEAT_MIN 行以上
+    - またはセル座標ソースが参照するシート（複数項目・品名などの都度読取を1回化）
+    """
+    sheets: set[Optional[str]] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        for src in it.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            if (src.get("type") or "cell").strip().lower() != "cell":
+                continue
+            sn = src.get("sheet_name")
+            sheet_key = str(sn).strip() if sn is not None and str(sn).strip() else None
+            sheets.add(sheet_key)
+            rd = (src.get("repeat_direction") or "").strip().lower()
+            if rd not in ("vertical", "horizontal"):
+                continue
+            try:
+                repeat_max = int(src.get("repeat_max")) if src.get("repeat_max") is not None else None
+            except (TypeError, ValueError):
+                repeat_max = None
+            limit = repeat_max if (repeat_max is not None and repeat_max > 0) else 9999
+            if limit >= _SHEET_PRECACHE_REPEAT_MIN:
+                sheets.add(sheet_key)
+    return sheets
+
+
+def precache_xlsx_workbook_sheets_for_items(
+    file_path: str | Path,
+    items: list[dict[str, Any]],
+) -> None:
+    """
+    xlsx_workbook_scope 内で、大量反復が見込まれるシートを先に materialize する（Phase B）。
+    スコープ外では何もしない。
+    """
+    if _xlsx_workbook_cache_top() is None:
+        return
+    p_abs = Path(file_path).resolve()
+    if p_abs.suffix.lower() != ".xlsx":
+        return
+    sheets = _collect_xlsx_sheets_for_precache(items)
+    if not sheets:
+        return
+    wb = _xlsx_workbook_from_cache(p_abs)
+    if wb is None:
+        return
+    for sheet_name in sheets:
+        _get_readonly_sheet_matrix(wb, sheet_name, p_abs, create=True)
+
+
+def _read_repeated_series_from_matrix(
+    mat: list[list[Any]],
+    *,
+    base_col: int,
+    base_row: int,
+    row_step: int,
+    col_step: int,
+    limit: int,
+    repeat_until_empty: bool,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> list[Any]:
+    """materialize 済み行列から反復系列を読む（縦/横/固定セル反復）。"""
+    vals: list[Any] = []
+    if row_step == 0 and col_step == 0:
+        v0 = _matrix_cell_value(mat, base_col, base_row)
+        if repeat_until_empty and (v0 is None or v0 == ""):
+            return []
+        return [v0] * limit
+    n = 0
+    while len(vals) < limit:
+        if n % 64 == 0:
+            _poll_cancel_check(cancel_check)
+        if row_step > 0 and col_step == 0:
+            v = _matrix_cell_value(mat, base_col, base_row + row_step * n)
+        elif row_step == 0 and col_step > 0:
+            v = _matrix_cell_value(mat, base_col + col_step * n, base_row)
+        else:
+            break
+        if repeat_until_empty and (v is None or v == ""):
+            break
+        vals.append(v)
+        n += 1
+    return vals
+
+
 def _xlsx_cell_value_open_workbook(
     wb: Any,
     sheet_name: Optional[str],
@@ -748,6 +886,31 @@ def _xlsx_cell_value_open_workbook(
     col, row = _parse_cell_ref(cell_ref)
     if col is None or row is None:
         return None
+    return _xlsx_cell_value_open_workbook_rc(
+        wb,
+        sheet_name,
+        col,
+        row,
+        path=path,
+        ephemeral_sheet_cache=ephemeral_sheet_cache,
+    )
+
+
+def _xlsx_cell_value_open_workbook_rc(
+    wb: Any,
+    sheet_name: Optional[str],
+    col: int,
+    row: int,
+    *,
+    path: Optional[Path] = None,
+    ephemeral_sheet_cache: bool = False,
+) -> Any:
+    """
+    既に開いた read_only Workbook から列/行インデックス（0 始まり）で 1 セル読み。
+    A1 文字列生成・再パースを避け、大量反復時のオーバーヘッドを抑える。
+    """
+    if col < 0 or row < 0:
+        return None
 
     frame = _xlsx_workbook_cache_top()
     use_mat = frame is not None or ephemeral_sheet_cache
@@ -756,6 +919,7 @@ def _xlsx_cell_value_open_workbook(
             ws, _ = _resolve_readonly_worksheet(wb, sheet_name)
             if ws is None:
                 return None
+            cell_ref = _col_row_to_cell_ref(col, row)
             return ws[cell_ref].value
         except Exception:
             return None
@@ -781,6 +945,23 @@ def _xlsx_cell_value_open_workbook(
         store_key = resolved_name
         mat = mats_store.get(store_key)
 
+    # xlsx_workbook_scope 内は同一シートへ多数アクセスされる前提のため、
+    # 早い段階で materialize した方が総時間が安定して短い。
+    # （read_only の ws[cell_ref] は都度走査コストが高く、ここでは逆効果になりやすい）
+    if mat is None and frame is None and ephemeral_sheet_cache:
+        hits_store = getattr(wb, "_da_sheet_hits", None)
+        if hits_store is None:
+            hits_store = {}
+            setattr(wb, "_da_sheet_hits", hits_store)
+        hits = int(hits_store.get(store_key, 0)) + 1
+        hits_store[store_key] = hits
+        if hits < _SHEET_MATERIALIZE_THRESHOLD:
+            try:
+                cell_ref = _col_row_to_cell_ref(col, row)
+                return ws[cell_ref].value
+            except Exception:
+                return None
+
     if mat is None:
         try:
             mat = _materialize_readonly_sheet_matrix(ws)
@@ -792,6 +973,165 @@ def _xlsx_cell_value_open_workbook(
     return _matrix_cell_value(mat, col, row)
 
 
+def _xlsx_read_repeated_series_open_workbook(
+    wb: Any,
+    sheet_name: Optional[str],
+    *,
+    base_col: int,
+    base_row: int,
+    row_step: int,
+    col_step: int,
+    limit: int,
+    repeat_until_empty: bool,
+    path: Optional[Path] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> Optional[list[Any]]:
+    """
+    反復セル抽出の高速経路（.xlsx/read_only）。
+    xlsx_workbook_scope 内では materialize 済み行列から読む。
+    それ以外は対象1列/1行の iter_rows で直接読み出す。
+    非対応パターンは None を返し、呼び出し側で従来経路へフォールバックする。
+    """
+    if limit <= 0 or base_col < 0 or base_row < 0:
+        return []
+    # 互換性優先: 一軸反復（縦/横）を高速化。その他は従来経路へ戻す。
+    # 例: row=1,col=0 / row=0,col=7 / row=3,col=0 / row=0,col=0(固定セル反復)
+    vertical = row_step > 0 and col_step == 0
+    horizontal = row_step == 0 and col_step > 0
+    if row_step == 0 and col_step == 0:
+        vertical = horizontal = False
+    elif not vertical and not horizontal:
+        return None
+
+    if path is not None and _xlsx_workbook_cache_top() is not None:
+        mat = _get_readonly_sheet_matrix(wb, sheet_name, path, create=True)
+        if mat is not None:
+            try:
+                return _read_repeated_series_from_matrix(
+                    mat,
+                    base_col=base_col,
+                    base_row=base_row,
+                    row_step=row_step,
+                    col_step=col_step,
+                    limit=limit,
+                    repeat_until_empty=repeat_until_empty,
+                    cancel_check=cancel_check,
+                )
+            except Exception:
+                return None
+
+    if row_step == 0 and col_step == 0:
+        try:
+            c_ref = _col_row_to_cell_ref(base_col, base_row)
+            v0 = _xlsx_cell_value_open_workbook(wb, sheet_name, c_ref, path=path)
+        except Exception:
+            return None
+        if repeat_until_empty and (v0 is None or v0 == ""):
+            return []
+        return [v0] * limit
+
+    if not vertical and not horizontal:
+        return None
+    try:
+        ws, _ = _resolve_readonly_worksheet(wb, sheet_name)
+    except Exception:
+        return None
+    if ws is None:
+        return []
+    vals: list[Any] = []
+    try:
+        if vertical:
+            min_col = base_col + 1
+            min_row = base_row + 1
+            step = row_step
+            max_row = min_row + max(0, step * (limit - 1))
+            picked = 0
+            for i, tup in enumerate(
+                ws.iter_rows(
+                    min_row=min_row,
+                    max_row=max_row,
+                    min_col=min_col,
+                    max_col=min_col,
+                    values_only=True,
+                )
+            ):
+                if i % 64 == 0:
+                    _poll_cancel_check(cancel_check)
+                if step > 1 and (i % step) != 0:
+                    continue
+                v = tup[0] if tup else None
+                if repeat_until_empty and (v is None or v == ""):
+                    break
+                vals.append(v)
+                picked += 1
+                if picked >= limit:
+                    break
+        else:
+            min_row = base_row + 1
+            min_col = base_col + 1
+            step = col_step
+            max_col = min_col + max(0, step * (limit - 1))
+            for i, tup in enumerate(
+                ws.iter_rows(
+                    min_row=min_row,
+                    max_row=min_row,
+                    min_col=min_col,
+                    max_col=max_col,
+                    values_only=True,
+                )
+            ):
+                # 1行のみだが要素数は limit 相当
+                picked = 0
+                for j, v in enumerate(tup):
+                    if j % 64 == 0:
+                        _poll_cancel_check(cancel_check)
+                    if step > 1 and (j % step) != 0:
+                        continue
+                    if repeat_until_empty and (v is None or v == ""):
+                        return vals
+                    vals.append(v)
+                    picked += 1
+                    if picked >= limit:
+                        return vals
+                break
+    except Exception:
+        return None
+    return vals
+
+
+def _append_postprocessed_cell_vals(
+    results: list[Any],
+    vals: list[Any],
+    ui_block: dict[str, Any] | None,
+    src: dict[str, Any],
+    *,
+    max_primary_rows: Optional[int] = None,
+) -> None:
+    """反復セル読取結果をフィルタし、主値後処理して results に追記する。"""
+    allow_empty = bool(src.get("allow_empty"))
+    raw: list[Any] = []
+    for v in vals:
+        if v is not None and (v != "" or allow_empty):
+            raw.append(v)
+        if (
+            max_primary_rows is not None
+            and max_primary_rows > 0
+            and len(results) + len(raw) >= max_primary_rows
+        ):
+            break
+    if max_primary_rows is not None and max_primary_rows > 0:
+        room = max_primary_rows - len(results)
+        if room <= 0:
+            return
+        raw = raw[:room]
+    if not raw:
+        return
+    if len(raw) == 1:
+        results.append(postprocess_cell_primary(raw[0], ui_block))
+        return
+    results.extend(postprocess_cell_primary_batch(raw, ui_block))
+
+
 def extract_item_values(
     file_path: str | Path,
     item_config: dict[str, Any],
@@ -800,6 +1140,7 @@ def extract_item_values(
     max_primary_rows: Optional[int] = None,
     *,
     cell_source_spans_out: Optional[dict[int, tuple[int, int]]] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
 ) -> list[Any]:
     """
     1 項目分の設定に基づき、指定ファイルから抽出した値のリストを返す。
@@ -830,6 +1171,7 @@ def extract_item_values(
         # ソース未設定列は主値を載せない（ファイル名フォールバックは一括で誤出力になるため）
         return [""]
     for si, src in enumerate(sources):
+        _poll_cancel_check(cancel_check)
         if not isinstance(src, dict):
             continue
         stype = (src.get("type") or "cell").strip().lower()
@@ -940,6 +1282,11 @@ def extract_item_values(
                 if max_primary_rows is not None and max_primary_rows > 0:
                     limit = min(limit, max_primary_rows)
                 vals: list[Any] = []
+                base_col, base_row = _parse_cell_ref(cell_ref)
+                if base_col is None or base_row is None:
+                    base_col, base_row = _parse_cell_ref("A1")
+                if base_col is None or base_row is None:
+                    base_col, base_row = 0, 0
                 p_abs = Path(file_path).resolve()
                 wb_ctx: Any = None
                 wb_owned = False
@@ -956,11 +1303,47 @@ def extract_item_values(
                                 wb_owned = True
                             except Exception:
                                 wb_ctx = None
+                    if wb_ctx is not None:
+                        vals_fast = _xlsx_read_repeated_series_open_workbook(
+                            wb_ctx,
+                            sheet_name,
+                            base_col=base_col,
+                            base_row=base_row,
+                            row_step=row_off,
+                            col_step=col_off,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            path=p_abs if not wb_owned else None,
+                            cancel_check=cancel_check,
+                        )
+                        if isinstance(vals_fast, list):
+                            vals = vals_fast
+                            if vals:
+                                n_last = len(vals) - 1
+                                cell_ref_last = _resolve_cell_with_offset(
+                                    cell_ref,
+                                    row_off * n_last,
+                                    col_off * n_last,
+                                )
+                                c0, r0 = _parse_cell_ref(cell_ref_last)
+                                if c0 is not None and r0 is not None and item_id:
+                                    positions[item_id] = (c0, r0)
+                            _append_postprocessed_cell_vals(
+                                results,
+                                vals,
+                                _blk,
+                                src,
+                                max_primary_rows=max_primary_rows,
+                            )
+                            if cell_source_spans_out is not None:
+                                cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
+                            continue
                     # 取得座標 = 基準セル + (行/列オフセット * N)（N は 0 始まり）
                     for n in range(limit):
-                        cell_ref_n = _resolve_cell_with_offset(
-                            cell_ref, row_off * n, col_off * n
-                        )
+                        _poll_cancel_check(cancel_check)
+                        col_n = base_col + (col_off * n)
+                        row_n = base_row + (row_off * n)
+                        cell_ref_n = _col_row_to_cell_ref(col_n, row_n)
                         if wb_ctx is not None:
                             v = _xlsx_cell_value_open_workbook(
                                 wb_ctx,
@@ -984,15 +1367,13 @@ def extract_item_values(
                             wb_ctx.close()
                         except Exception:
                             pass
-                for v in vals:
-                    if v is not None and (v != "" or src.get("allow_empty")):
-                        results.append(postprocess_cell_primary(v, _blk))
-                        if (
-                            max_primary_rows is not None
-                            and max_primary_rows > 0
-                            and len(results) >= max_primary_rows
-                        ):
-                            break
+                _append_postprocessed_cell_vals(
+                    results,
+                    vals,
+                    _blk,
+                    src,
+                    max_primary_rows=max_primary_rows,
+                )
                 if vals and item_id:
                     n_last = len(vals) - 1
                     cell_ref_last = _resolve_cell_with_offset(
@@ -1116,6 +1497,216 @@ def _extract_from_cell_rule_with_context(
     return postprocess_link_rule_value(v, rdict)
 
 
+def _extract_cell_rule_series_fast(
+    file_path: str | Path,
+    src: dict[str, Any],
+    rule: dict[str, Any],
+    *,
+    n_src: int,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> Optional[list[Any]]:
+    """
+    link/join ルールの反復値を高速取得する（.xlsx の典型セル座標パターン）。
+    非対応時は None を返し、呼び出し側で既存の 1セルずつ取得へフォールバックする。
+    """
+    if n_src < 1:
+        return []
+    mode = str(rule.get("mode") or "セル座標").strip()
+    if "固定" in mode or mode.lower() in ("fixed", "literal"):
+        return [postprocess_link_rule_value(rule.get("cell"), rule)] * n_src
+    p_abs = Path(file_path).resolve()
+    if p_abs.suffix.lower() != ".xlsx":
+        return None
+    base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
+    c0, r0 = _parse_cell_ref(base_cell)
+    if c0 is None or r0 is None:
+        return None
+    try:
+        row_step = int(rule.get("row") or 0)
+    except (TypeError, ValueError):
+        row_step = 0
+    try:
+        col_step = int(rule.get("col") or 0)
+    except (TypeError, ValueError):
+        col_step = 0
+    wb_ctx = _xlsx_workbook_from_cache(p_abs)
+    wb_owned = False
+    if wb_ctx is None:
+        try:
+            import openpyxl  # noqa: E402
+
+            wb_ctx = openpyxl.load_workbook(p_abs, read_only=True, data_only=True)
+            wb_owned = True
+        except Exception:
+            wb_ctx = None
+    if wb_ctx is None:
+        return None
+    try:
+        raw = _xlsx_read_repeated_series_open_workbook(
+            wb_ctx,
+            src.get("sheet_name"),
+            base_col=c0,
+            base_row=r0,
+            row_step=row_step,
+            col_step=col_step,
+            limit=n_src,
+            repeat_until_empty=False,
+            path=p_abs if not wb_owned else None,
+            cancel_check=cancel_check,
+        )
+        if not isinstance(raw, list):
+            return None
+        out = [postprocess_link_rule_value(v, rule) for v in raw]
+        if len(out) < n_src:
+            out.extend([None] * (n_src - len(out)))
+        return out[:n_src]
+    finally:
+        if wb_owned:
+            try:
+                wb_ctx.close()
+            except Exception:
+                pass
+
+
+def _extract_cell_rules_series_fast_map(
+    file_path: str | Path,
+    src: dict[str, Any],
+    rules: list[dict[str, Any]],
+    *,
+    n_src: int,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> Optional[dict[int, list[Any]]]:
+    """
+    複数 link/join ルールを 1 回の列範囲走査でまとめて取得する高速経路。
+    対応条件（厳しめ）:
+      - .xlsx
+      - 非固定値ルールはすべて row=1,col=0（縦反復）
+      - 非固定値ルールの基準行が同一
+    非対応時は None（呼び出し側で既存経路へフォールバック）。
+    """
+    if n_src < 1:
+        return {}
+    # 逆効果回避:
+    # - 反復が少ないケースは準備コストが勝ちやすい
+    # - ルール数が少ないケースは個別高速経路の方が軽い
+    if n_src < 8:
+        return None
+    p_abs = Path(file_path).resolve()
+    if p_abs.suffix.lower() != ".xlsx":
+        return None
+    if not isinstance(rules, list) or not rules:
+        return {}
+    if len(rules) < 3:
+        return None
+    non_fixed: list[tuple[int, int, int, dict[str, Any]]] = []
+    fixed: list[tuple[int, Any, dict[str, Any]]] = []
+    base_row_ref: Optional[int] = None
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            return None
+        mode = str(r.get("mode") or "セル座標").strip()
+        if "固定" in mode or mode.lower() in ("fixed", "literal"):
+            fixed.append((i, r.get("cell"), r))
+            continue
+        base_cell = str(r.get("cell") or src.get("cell_ref") or "A1").strip()
+        c0, r0 = _parse_cell_ref(base_cell)
+        if c0 is None or r0 is None:
+            return None
+        try:
+            row_step = int(r.get("row") or 0)
+            col_step = int(r.get("col") or 0)
+        except (TypeError, ValueError):
+            return None
+        # ここで全体を落とすと、混在ルール時に高速化が効かない。
+        # 対応可能な一軸反復（縦/横、固定セル含む）だけ部分適用する。
+        if not (
+            (row_step > 0 and col_step == 0)
+            or (row_step == 0 and col_step > 0)
+            or (row_step == 0 and col_step == 0)
+        ):
+            continue
+        # 現実装のバッチ走査は同一基準行の縦反復のみ対象。
+        # それ以外（横反復/固定セル）は個別高速経路へ回す。
+        if not (row_step > 0 and col_step == 0):
+            continue
+        if base_row_ref is None:
+            base_row_ref = r0
+        elif base_row_ref != r0:
+            continue
+        non_fixed.append((i, c0, r0, r))
+    out: dict[int, list[Any]] = {}
+    for i, fv, r in fixed:
+        out[i] = [postprocess_link_rule_value(fv, r)] * n_src
+    if not non_fixed:
+        return out
+    wb_ctx = _xlsx_workbook_from_cache(p_abs)
+    wb_owned = False
+    if wb_ctx is None:
+        try:
+            import openpyxl  # noqa: E402
+
+            wb_ctx = openpyxl.load_workbook(p_abs, read_only=True, data_only=True)
+            wb_owned = True
+        except Exception:
+            wb_ctx = None
+    if wb_ctx is None:
+        return None
+    try:
+        cols = [x[1] for x in non_fixed]
+        if cols and (max(cols) - min(cols)) > 128:
+            return None
+        bucket: dict[int, list[Any]] = {i: [] for i, _c, _r, _rule in non_fixed}
+        row0 = base_row_ref or 0
+        in_scope = _xlsx_workbook_cache_top() is not None and not wb_owned
+        mat = (
+            _get_readonly_sheet_matrix(wb_ctx, src.get("sheet_name"), p_abs, create=True)
+            if in_scope
+            else None
+        )
+        if mat is not None:
+            for ri in range(n_src):
+                if ri % 64 == 0:
+                    _poll_cancel_check(cancel_check)
+                for i, c, _r, rule in non_fixed:
+                    v = _matrix_cell_value(mat, c, row0 + ri)
+                    bucket[i].append(postprocess_link_rule_value(v, rule))
+        else:
+            ws, _ = _resolve_readonly_worksheet(wb_ctx, src.get("sheet_name"))
+            if ws is None:
+                return None
+            min_col = min(cols) + 1
+            max_col = max(cols) + 1
+            min_row = row0 + 1
+            max_row = min_row + max(0, n_src - 1)
+            col_pos = {c: (c + 1 - min_col) for c in cols}
+            for ri, tup in enumerate(
+                ws.iter_rows(
+                    min_row=min_row,
+                    max_row=max_row,
+                    min_col=min_col,
+                    max_col=max_col,
+                    values_only=True,
+                )
+            ):
+                if ri % 64 == 0:
+                    _poll_cancel_check(cancel_check)
+                for i, c, _r, rule in non_fixed:
+                    pos = col_pos.get(c, -1)
+                    v = tup[pos] if (0 <= pos < len(tup)) else None
+                    bucket[i].append(postprocess_link_rule_value(v, rule))
+        for i in bucket:
+            if len(bucket[i]) < n_src:
+                bucket[i].extend([None] * (n_src - len(bucket[i])))
+            out[i] = bucket[i][:n_src]
+        return out
+    finally:
+        if wb_owned:
+            try:
+                wb_ctx.close()
+            except Exception:
+                pass
+
+
 def extract_item_bundle(
     file_path: str | Path,
     item_config: dict[str, Any],
@@ -1126,6 +1717,7 @@ def extract_item_bundle(
     debug_step_scope: Optional[str] = None,
     existing_bundle: Optional[dict[str, Any]] = None,
     max_primary_rows: Optional[int] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
 ) -> dict[str, Any]:
     """
     1 項目分の抽出結果を主値・連携値・結合キー値に分けて返す。
@@ -1149,6 +1741,7 @@ def extract_item_bundle(
       }
     """
     sources = item_config.get("sources") or []
+    _poll_cancel_check(cancel_check, force=True)
 
     if debug_step_scope in ("link", "join"):
         if not existing_bundle or not isinstance(existing_bundle, dict):
@@ -1233,16 +1826,31 @@ def extract_item_bundle(
                     target = str(ld.get("item") or "").strip()
                     if not target:
                         continue
-                    for iter_ctx in iter_contexts:
-                        v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
-                        bundle["link_values"].setdefault(target, []).append(v)
-                        bundle["link_contexts"].setdefault(target, []).append(
-                            {
-                                "file_path": str(iter_ctx.get("file_path") or file_path),
-                                "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                "base_cell": iter_ctx.get("base_cell"),
-                            }
-                        )
+                    vals_fast = _extract_cell_rule_series_fast(
+                        file_path, src, ld, n_src=n_src, cancel_check=cancel_check
+                    )
+                    if isinstance(vals_fast, list):
+                        for local_i, iter_ctx in enumerate(iter_contexts):
+                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+                            bundle["link_values"].setdefault(target, []).append(v)
+                            bundle["link_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
+                    else:
+                        for iter_ctx in iter_contexts:
+                            v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
+                            bundle["link_values"].setdefault(target, []).append(v)
+                            bundle["link_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
             else:
                 for jd in ui_blk.get("join_defs") or []:
                     if not isinstance(jd, dict):
@@ -1250,16 +1858,31 @@ def extract_item_bundle(
                     target = str(jd.get("item") or "").strip()
                     if not target:
                         continue
-                    for iter_ctx in iter_contexts:
-                        v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
-                        bundle["join_values"].setdefault(target, []).append(v)
-                        bundle["join_contexts"].setdefault(target, []).append(
-                            {
-                                "file_path": str(iter_ctx.get("file_path") or file_path),
-                                "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                "base_cell": iter_ctx.get("base_cell"),
-                            }
-                        )
+                    vals_fast = _extract_cell_rule_series_fast(
+                        file_path, src, jd, n_src=n_src, cancel_check=cancel_check
+                    )
+                    if isinstance(vals_fast, list):
+                        for local_i, iter_ctx in enumerate(iter_contexts):
+                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+                            bundle["join_values"].setdefault(target, []).append(v)
+                            bundle["join_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
+                    else:
+                        for iter_ctx in iter_contexts:
+                            v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
+                            bundle["join_values"].setdefault(target, []).append(v)
+                            bundle["join_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
         return bundle
 
     cell_spans: dict[int, tuple[int, int]] = {}
@@ -1270,6 +1893,7 @@ def extract_item_bundle(
         cell_positions=cell_positions,
         max_primary_rows=max_primary_rows,
         cell_source_spans_out=cell_spans,
+        cancel_check=cancel_check,
     )
     bundle: dict[str, Any] = {
         "primary_values": prim_vals,
@@ -1298,6 +1922,7 @@ def extract_item_bundle(
     }
     run_link_join = debug_step_scope is None
     for si, src in enumerate(sources):
+        _poll_cancel_check(cancel_check)
         if not isinstance(src, dict):
             continue
         stype = (src.get("type") or "cell").strip().lower()
@@ -1347,38 +1972,84 @@ def extract_item_bundle(
                 if gi < len(b_ictx) and isinstance(b_ictx[gi], dict):
                     b_ictx[gi]["base_cell"] = ic.get("base_cell")
             if run_link_join:
-                for ld in ui_blk.get("link_defs") or []:
+                link_defs = [x for x in (ui_blk.get("link_defs") or []) if isinstance(x, dict)]
+                link_fast = _extract_cell_rules_series_fast_map(
+                    file_path, src, link_defs, n_src=n_src, cancel_check=cancel_check
+                )
+                for ldi, ld in enumerate(link_defs):
                     if not isinstance(ld, dict):
                         continue
                     target = str(ld.get("item") or "").strip()
                     if not target:
                         continue
-                    for iter_ctx in iter_contexts:
-                        v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
-                        bundle["link_values"].setdefault(target, []).append(v)
-                        bundle["link_contexts"].setdefault(target, []).append(
-                            {
-                                "file_path": str(iter_ctx.get("file_path") or file_path),
-                                "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                "base_cell": iter_ctx.get("base_cell"),
-                            }
+                    vals_fast = (
+                        link_fast.get(ldi)
+                        if isinstance(link_fast, dict)
+                        else _extract_cell_rule_series_fast(
+                            file_path, src, ld, n_src=n_src, cancel_check=cancel_check
                         )
-                for jd in ui_blk.get("join_defs") or []:
+                    )
+                    if isinstance(vals_fast, list):
+                        for local_i, iter_ctx in enumerate(iter_contexts):
+                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+                            bundle["link_values"].setdefault(target, []).append(v)
+                            bundle["link_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
+                    else:
+                        for iter_ctx in iter_contexts:
+                            v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
+                            bundle["link_values"].setdefault(target, []).append(v)
+                            bundle["link_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
+                join_defs = [x for x in (ui_blk.get("join_defs") or []) if isinstance(x, dict)]
+                join_fast = _extract_cell_rules_series_fast_map(
+                    file_path, src, join_defs, n_src=n_src, cancel_check=cancel_check
+                )
+                for jdi, jd in enumerate(join_defs):
                     if not isinstance(jd, dict):
                         continue
                     target = str(jd.get("item") or "").strip()
                     if not target:
                         continue
-                    for iter_ctx in iter_contexts:
-                        v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
-                        bundle["join_values"].setdefault(target, []).append(v)
-                        bundle["join_contexts"].setdefault(target, []).append(
-                            {
-                                "file_path": str(iter_ctx.get("file_path") or file_path),
-                                "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                "base_cell": iter_ctx.get("base_cell"),
-                            }
+                    vals_fast = (
+                        join_fast.get(jdi)
+                        if isinstance(join_fast, dict)
+                        else _extract_cell_rule_series_fast(
+                            file_path, src, jd, n_src=n_src, cancel_check=cancel_check
                         )
+                    )
+                    if isinstance(vals_fast, list):
+                        for local_i, iter_ctx in enumerate(iter_contexts):
+                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+                            bundle["join_values"].setdefault(target, []).append(v)
+                            bundle["join_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
+                    else:
+                        for iter_ctx in iter_contexts:
+                            v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
+                            bundle["join_values"].setdefault(target, []).append(v)
+                            bundle["join_contexts"].setdefault(target, []).append(
+                                {
+                                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                                    "base_cell": iter_ctx.get("base_cell"),
+                                }
+                            )
         elif stype == "name_extract":
             if not name_extract_search_matches(file_path, src):
                 continue

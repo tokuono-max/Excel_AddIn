@@ -100,8 +100,10 @@ class UpdateCheckDialog(QDialog):
         row = QHBoxLayout()
         row.addStretch(1)
         if self._is_confirm:
-            btn_yes = QPushButton(str(screen_cfg.get("BTN_YES") or "はい").strip() or "はい")
-            btn_no = QPushButton(str(screen_cfg.get("BTN_NO") or "いいえ").strip() or "いいえ")
+            ytxt = str(self._req.get("btn_yes") or screen_cfg.get("BTN_YES") or "はい").strip() or "はい"
+            ntxt = str(self._req.get("btn_no") or screen_cfg.get("BTN_NO") or "いいえ").strip() or "いいえ"
+            btn_yes = QPushButton(ytxt)
+            btn_no = QPushButton(ntxt)
             btn_yes.clicked.connect(self._on_yes)
             btn_no.clicked.connect(self._on_no)
             row.addWidget(btn_yes)

@@ -121,6 +121,7 @@ def _event_log_reason_ja(code: str) -> str:
         "PATH_TRACE_POST_NAME": "パス追跡（名前取得・実行後）",
         "BATCH_OK": "一括実行・完了",
         "BATCH_FAIL": "一括実行・失敗",
+        "BATCH_CANCEL": "一括実行・中止",
     }
     return m.get(c, c)
 
@@ -220,10 +221,20 @@ def format_batch_run_summary_row(
 ) -> list[Any]:
     """一括実行の成否サマリをイベントログ 1 行分にする（データ集約レポート）。"""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    code_en = "BATCH_OK" if ok else "BATCH_FAIL"
+    err_s = str(error or "").strip().lower()
+    is_cancel = err_s == "cancelled"
+    if ok:
+        code_en = "BATCH_OK"
+        result_ja = "成功"
+    elif is_cancel:
+        code_en = "BATCH_CANCEL"
+        result_ja = "中止"
+    else:
+        code_en = "BATCH_FAIL"
+        result_ja = "失敗"
     detail: dict[str, Any] = {
         "種別": "一括実行サマリ",
-        "結果": "成功" if ok else "失敗",
+        "結果": result_ja,
         "ファイル数": files,
         "出力行数": output_rows,
         "追加行数": append,

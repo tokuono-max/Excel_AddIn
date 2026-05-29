@@ -32,7 +32,7 @@ from core import core_env, runtime_layout
 from core.core_log import append_text_with_cap, get_logger
 from core.runtime_layout import packaged_spawn_requested
 from core.patch_manifest import materialize_manifest_patch_zip as _materialize_patch_zip_for_worker
-from core.update_state import build_paths, read_pending, write_pending
+from core.update_state import build_paths, clear_pending, read_pending, write_pending
 try:
     from core import core_cst as cst
 except Exception:
@@ -44,7 +44,8 @@ _UPDATE_CHECK_UI_LOCK = threading.Lock()
 
 # True when apply_pending_update returned deferred (No on pending-apply confirm).
 # Suppresses duplicate bin prompt in maybe_check_updates_on_startup same process launch.
-_SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
+_suppress_startup_bin_prompt_after_pending_defer = False
+_skip_startup_version_check_this_launch = False
 
 ENV_DEPLOY_ROOT = "HC_DEPLOY_ROOT"
 ENV_CATALOG_PATH = "HC_CATALOG_PATH"
@@ -54,8 +55,14 @@ ENV_USE_UPDATER_EXE = "HC_USE_UPDATER_EXE"
 ENV_ALLOW_PYTHON_ELEVATE = "HC_ALLOW_PYTHON_ELEVATE"
 
 UPDATE_LOG_REL = Path("logs") / "hc_update.log"
+UPDATER_RESULT_REL = Path("update") / "locks" / "updater_last_result.json"
 BIN_APPLY_NOTIFY_MARKER_REL = Path("logs") / "bin_apply_success_marker.json"
 ADMIN_CATALOG_REL = Path("config") / "catalog_path.txt"
+BACKUP_ARCHIVE_FULL_REL = Path("update") / "archive" / "full"
+BACKUP_RETAIN_JSON_REL = BACKUP_ARCHIVE_FULL_REL / "retain.json"
+UNINSTALL_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
+UNINSTALL_WOW_SUBKEY = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
+INSTALL_SCOPE_VALUE_NAME = "InstallScope"
 
 MB_OK = 0x0
 MB_YESNO = 0x4
@@ -231,9 +238,20 @@ function Close-PhaseUi() {
     }
 }
 
+function Get-DisplayNameForUninstallTarget([string]$TargetPath) {
+    if (-not $TargetPath) { return 'CSV Tool (User)' }
+    try {
+        $scope = (Get-ItemProperty -LiteralPath $TargetPath -Name 'InstallScope' -ErrorAction SilentlyContinue).InstallScope
+        if ($scope -eq 'all') { return 'CSV Tool (All User)' }
+        if ($scope -eq 'current') { return 'CSV Tool (User)' }
+    } catch {
+    }
+    if ($TargetPath -like 'Registry::HKEY_LOCAL_MACHINE*') { return 'CSV Tool (All User)' }
+    return 'CSV Tool (User)'
+}
+
 function Try-SetDisplayValues([string]$DisplayVersion) {
     if (-not $DisplayVersion) { return }
-    $displayName = 'CSV Tool'
     $sub = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1'
     $paths = @(
         ('Registry::HKEY_LOCAL_MACHINE\' + $sub),
@@ -252,6 +270,7 @@ function Try-SetDisplayValues([string]$DisplayVersion) {
         Write-ApplyLog ('apply_bin: DisplayName/DisplayVersion key not found or not writable value=' + $DisplayVersion)
         return
     }
+    $displayName = Get-DisplayNameForUninstallTarget $target
     try {
         Set-ItemProperty -LiteralPath $target -Name 'DisplayName' -Value $displayName -Type String
         Set-ItemProperty -LiteralPath $target -Name 'DisplayVersion' -Value $DisplayVersion -Type String
@@ -455,6 +474,61 @@ def _bin_apply_success_marker_path(install_root: Path | None) -> Path:
     return Path(temp) / "csv_tool" / "bin_apply_success_marker.json"
 
 
+def updater_result_path(install_root: Path) -> Path:
+    return install_root / UPDATER_RESULT_REL
+
+
+def maybe_show_updater_result_from_previous_run(
+    install_root: Path,
+    *,
+    owner_hwnd: int | None = None,
+    sheet_id: str = "",
+) -> None:
+    """前回 hc_updater が書いた結果 JSON を 1 回消費する。失敗時のみ通知（成功は hc_updater 完了時に表示済み）。"""
+    p = updater_result_path(install_root)
+    if not p.is_file():
+        return
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        _append_update_log(install_root, f"updater_result: read_failed err={type(e).__name__}: {e}")
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not isinstance(raw, dict):
+        return
+    if raw.get("ok"):
+        target_bin = str(raw.get("target_bin_version") or "").strip()
+        display_ver = str(raw.get("display_version") or "").strip()
+        _append_update_log(
+            install_root,
+            "updater_result: consumed_previous_success notify_skipped target_bin={t} display={d}".format(
+                t=target_bin or "-",
+                d=display_ver or "-",
+            ),
+        )
+        return
+    err = str(raw.get("error") or "").strip() or "更新に失敗しました。"
+    log_path = str(_update_log_path(install_root))
+    _append_update_log(install_root, f"updater_result: show_previous_failure err={err[:200]}")
+    _message_box(
+        _um(
+            "UPDATER_ERROR_TEMPLATE",
+            "CSV Tool の更新に失敗しました。\n\n{error}\n\n"
+            "対処: 開いている Excel をすべて閉じてから、再度「すぐに更新」を実行してください。\n"
+            "解消しない場合は再インストールを検討してください。\n\n"
+            "ログ: {log_path}",
+            error=err,
+            log_path=log_path,
+        ),
+        style=MB_OK | MB_ICONWARNING,
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
+    )
+
+
 def _append_update_log(install_root: Path | None, line: str) -> None:
     log_path = _update_log_path(install_root)
     try:
@@ -473,6 +547,90 @@ def _is_process_elevated() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _resolve_install_scope(install_root: Path | None) -> str:
+    """Resolve install scope from existing uninstall key.
+
+    Returns: "current" | "all" | "unknown"
+    """
+    if os.name != "nt":
+        return "current"
+    try:
+        import winreg
+    except Exception:
+        return "unknown"
+
+    candidates = [
+        (winreg.HKEY_LOCAL_MACHINE, UNINSTALL_SUBKEY, "all"),
+        (winreg.HKEY_LOCAL_MACHINE, UNINSTALL_WOW_SUBKEY, "all"),
+        (winreg.HKEY_CURRENT_USER, UNINSTALL_SUBKEY, "current"),
+        (winreg.HKEY_CURRENT_USER, UNINSTALL_WOW_SUBKEY, "current"),
+    ]
+    for root, subkey, inferred in candidates:
+        try:
+            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as key:
+                raw, _ = winreg.QueryValueEx(key, INSTALL_SCOPE_VALUE_NAME)
+                val = str(raw or "").strip().lower()
+                if val in {"current", "all"}:
+                    return val
+        except OSError:
+            pass
+        try:
+            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                try:
+                    winreg.SetValueEx(key, INSTALL_SCOPE_VALUE_NAME, 0, winreg.REG_SZ, inferred)
+                except OSError:
+                    pass
+                _append_update_log(
+                    install_root,
+                    "install_scope inferred={v} root={r} key={k}".format(
+                        v=inferred,
+                        r=("HKLM" if root == winreg.HKEY_LOCAL_MACHINE else "HKCU"),
+                        k=subkey,
+                    ),
+                )
+                return inferred
+        except OSError:
+            continue
+    return "unknown"
+
+
+DISPLAY_NAME_USER = "CSV Tool (User)"
+DISPLAY_NAME_ALL = "CSV Tool (All User)"
+
+
+def display_name_for_install_scope(
+    scope: str,
+    *,
+    registry_root: str | None = None,
+) -> str:
+    """Uninstall DisplayName（インストーラ GetDisplayNameForMode と同じ）。"""
+    val = str(scope or "").strip().lower()
+    if val == "all":
+        return DISPLAY_NAME_ALL
+    if val == "current":
+        return DISPLAY_NAME_USER
+    root = str(registry_root or "").strip().upper()
+    if root in {"HKLM", "HKEY_LOCAL_MACHINE"}:
+        return DISPLAY_NAME_ALL
+    return DISPLAY_NAME_USER
+
+
+SHCNE_ASSOCCHANGED = 0x08000000
+SHCNF_IDLIST = 0x0000
+
+
+def notify_installed_apps_list_changed() -> None:
+    """Uninstall レジストリ更新後、設定のアプリ一覧の再読込を促す（ベストエフォート）。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
 
 
 def _resolve_python_for_elevation(install_root: Path) -> tuple[str, list[tuple[str, bool]]]:
@@ -692,11 +850,15 @@ def _run_pending_apply_elevated(install_root: Path) -> tuple[bool, str]:
 
     _append_update_log(install_root, f"elevate: ps_command={ps}")
     try:
+        _ps_flags = 0
+        if os.name == "nt":
+            _ps_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         cp = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True,
             text=True,
             check=False,
+            creationflags=_ps_flags,
         )
         try:
             ps_out_path.write_text(cp.stdout or "", encoding="utf-8")
@@ -845,31 +1007,10 @@ def _read_and_clear_bin_apply_success_marker(install_root: Path | None) -> dict[
     return got
 
 
-def _notify_pending_bin_apply_success(*, owner_hwnd: int | None = None, sheet_id: str = "") -> None:
+def discard_bin_apply_success_marker_if_present() -> None:
+    """Clear success marker without UI (defer completion is surfaced by hc_updater)."""
     root = _install_root()
-    meta = _read_and_clear_bin_apply_success_marker(root)
-    if not isinstance(meta, dict):
-        return
-    target_bin = str(meta.get("target_bin_version") or "").strip()
-    display_version = str(meta.get("display_version") or "").strip()
-    log_path = str(meta.get("log_path") or _update_log_path(root)).strip()
-    target_hint = ""
-    if target_bin:
-        target_hint = f"\n\n適用後 bin 版: {target_bin}"
-    elif display_version:
-        target_hint = f"\n\n表示版: {display_version}"
-    _message_box(
-        _um(
-            "BIN_APPLY_SUCCESS_NOTIFY_TEMPLATE",
-            "前回予約した bin 更新が完了しています。{target_hint}\n\n"
-            "Excel を再起動して利用してください。\n\nログ: {log_path}",
-            target_hint=target_hint,
-            log_path=log_path,
-        ),
-        title=_update_check_title(),
-        owner_hwnd=owner_hwnd,
-        sheet_id=sheet_id,
-    )
+    _read_and_clear_bin_apply_success_marker(root)
 
 
 def _wait_ui_dispatch_result(result_path: Path, timeout_sec: float = 120.0) -> dict[str, Any] | None:
@@ -942,6 +1083,8 @@ def _message_box(
     style: int = MB_OK | MB_ICONINFORMATION,
     owner_hwnd: int | None = None,
     sheet_id: str = "",
+    confirm_btn_yes: str | None = None,
+    confirm_btn_no: str | None = None,
 ) -> int:
     if os.name != "nt":
         logger.info("packaged_update msg (no GUI): %s", text.replace("\n", " "))
@@ -955,12 +1098,18 @@ def _message_box(
         is_confirm = bool(int(style) & MB_YESNO)
         is_warning = bool(int(style) & MB_ICONWARNING)
         req_action = "update_check_confirm" if is_confirm else ("update_check_warning" if is_warning else "update_check_done")
+        req_ui: dict[str, Any] = {
+            "action": req_action,
+            "title": eff_title,
+            "message": str(text or ""),
+        }
+        if is_confirm:
+            if confirm_btn_yes:
+                req_ui["btn_yes"] = str(confirm_btn_yes).strip()
+            if confirm_btn_no:
+                req_ui["btn_no"] = str(confirm_btn_no).strip()
         got = _show_update_dialog_via_ui_server(
-            req_dict={
-                "action": req_action,
-                "title": eff_title,
-                "message": str(text or ""),
-            },
+            req_dict=req_ui,
             owner_hwnd=hwnd,
             sheet_id=sheet_id,
         )
@@ -1020,6 +1169,99 @@ def _read_version_file(path: Path) -> str | None:
         return v or None
     except OSError:
         return None
+
+
+def _load_backup_retain(install_root: Path) -> dict[str, Any] | None:
+    path = install_root / BACKUP_RETAIN_JSON_REL
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        return raw if isinstance(raw, dict) else None
+    except Exception:
+        return None
+
+
+def _resolve_latest_backup_zip(install_root: Path) -> tuple[Path | None, str]:
+    meta = _load_backup_retain(install_root)
+    if isinstance(meta, dict):
+        p = Path(str(meta.get("zip_path") or "").strip())
+        if p.is_file():
+            prev = str(meta.get("previous_version") or "").strip()
+            return p, prev
+    archive_dir = install_root / BACKUP_ARCHIVE_FULL_REL
+    if not archive_dir.is_dir():
+        return None, ""
+    cands = sorted(archive_dir.glob("full_prev_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not cands:
+        return None, ""
+    return cands[0], ""
+
+
+def _queue_pending_recovery_from_backup(install_root: Path, *, require_admin: bool) -> tuple[bool, str]:
+    backup_zip, prev_version = _resolve_latest_backup_zip(install_root)
+    if backup_zip is None:
+        return False, "backup zip not found"
+    paths = build_paths(install_root)
+    paths.update_root.mkdir(parents=True, exist_ok=True)
+    paths.payload_root.mkdir(parents=True, exist_ok=True)
+    placeholder_patch = paths.payload_root / "patch.zip"
+    try:
+        if not placeholder_patch.is_file():
+            placeholder_patch.write_bytes(b"")
+    except OSError:
+        pass
+    full_local = paths.payload_root / "full_recovery.zip"
+    try:
+        shutil.copy2(backup_zip, full_local)
+    except OSError as e:
+        return False, f"backup copy failed: {e}"
+    scope = _resolve_install_scope(install_root)
+    require_admin_final = bool(require_admin)
+    if scope == "all":
+        require_admin_final = True
+    elif scope == "current":
+        require_admin_final = False
+    pending: dict[str, Any] = {
+        "schema_version": 2,
+        "apply_scope": "bin_only",
+        "require_admin": require_admin_final,
+        "state": "downloaded",
+        "target_bin_version": prev_version or "",
+        "mode": "full",
+        "catalog_path": "",
+        "catalog_checked_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        "patch": {
+            "relative_path": "",
+            "sha256": "",
+            "local_path": str(placeholder_patch),
+        },
+        "full": {
+            "relative_path": str(backup_zip),
+            "sha256": "",
+            "local_path": str(full_local),
+            "downloaded": True,
+        },
+        "bootstrap": {
+            "target_version": "",
+            "local_new_path": "",
+            "pending_swap": False,
+        },
+        "retry": {
+            "patch_retry_in_run": 0,
+            "bootstrap_retry_in_run": 0,
+            "patch_fail_total": 0,
+            "full_fail_total": 0,
+            "last_error_code": "",
+            "last_error_message": "",
+            "last_failed_at": "",
+        },
+        "timestamps": {
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        },
+        "source": "auto_recovery",
+    }
+    write_pending(paths, pending)
+    return True, str(paths.pending_path)
 
 
 def read_installed_bin_version(install_root: Path) -> str | None:
@@ -1238,19 +1480,24 @@ def _try_sync_display_version(display_version: str | None, install_root: Path | 
         "hkcu_not_found": 0,
         "hkcu_other_oserror": 0,
     }
+    scope = _resolve_install_scope(install_root)
     for root, subkey in candidates:
         root_name = "HKLM" if root == winreg.HKEY_LOCAL_MACHINE else "HKCU"
+        display_name = display_name_for_install_scope(scope, registry_root=root_name)
         if install_root is not None:
             _append_update_log(
                 install_root,
-                f"display_version_sync=try root={root_name} key={subkey} value={val}",
+                f"display_version_sync=try root={root_name} key={subkey} value={val} display_name={display_name}",
             )
         try:
             with winreg.OpenKey(root, subkey, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "CSV Tool")
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, display_name)
                 winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, val)
             if install_root is not None:
                 _append_update_log(install_root, f"display_version_sync=ok value={val} root={root_name} key={subkey}")
+            notify_installed_apps_list_changed()
+            if install_root is not None:
+                _append_update_log(install_root, "installed_apps_list: SHChangeNotify sent")
             return True
         except OSError as e:
             winerr = int(getattr(e, "winerror", 0) or 0)
@@ -1283,14 +1530,18 @@ def _try_sync_display_version(display_version: str | None, install_root: Path | 
         r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1",
     ):
         try:
+            display_name = display_name_for_install_scope(scope, registry_root="HKCU")
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "CSV Tool")
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, display_name)
                 winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, val)
             if install_root is not None:
                 _append_update_log(
                     install_root,
-                    f"display_version_sync=ok value={val} root=HKCU_created key={subkey}",
+                    f"display_version_sync=ok value={val} display_name={display_name} root=HKCU_created key={subkey}",
                 )
+            notify_installed_apps_list_changed()
+            if install_root is not None:
+                _append_update_log(install_root, "installed_apps_list: SHChangeNotify sent")
             return True
         except OSError as e:
             if install_root is not None:
@@ -1373,7 +1624,13 @@ def _copy_payload_to_local(local_path: Path, source_path: Path) -> None:
     os.replace(tmp, local_path)
 
 
-def _queue_pending_bin_update(st: dict[str, Any], *, source: str, require_admin: bool = False) -> tuple[bool, str]:
+def _queue_pending_bin_update(
+    st: dict[str, Any],
+    *,
+    source: str,
+    require_admin: bool = False,
+    skip_apply_confirm: bool = False,
+) -> tuple[bool, str]:
     root = _install_root()
     if root is None:
         return False, "HC_INSTALL_ROOT not set or not a directory"
@@ -1392,12 +1649,20 @@ def _queue_pending_bin_update(st: dict[str, Any], *, source: str, require_admin:
     patch_src = Path(patch_zip)
     if not patch_src.is_file():
         return False, f"payload not found: {patch_src}"
+    scope = _resolve_install_scope(root)
     require_admin_final = bool(require_admin)
+    if scope == "all":
+        require_admin_final = True
+        _append_update_log(root, f"apply_bin: require_admin_forced reason=install_scope_all source={source}")
+    elif scope == "current":
+        require_admin_final = False
+        _append_update_log(root, f"apply_bin: require_admin_forced reason=install_scope_current source={source}")
     root_text = str(root).lower()
     if (
         os.name == "nt"
         and ("\\program files\\" in root_text or root_text.endswith("\\program files"))
         and not require_admin_final
+        and scope != "current"
     ):
         require_admin_final = True
         _append_update_log(
@@ -1502,6 +1767,8 @@ def _queue_pending_bin_update(st: dict[str, Any], *, source: str, require_admin:
         },
         "source": source,
     }
+    if skip_apply_confirm:
+        pending["skip_apply_confirm"] = True
     write_pending(paths, pending)
     return True, str(paths.pending_path)
 
@@ -1805,6 +2072,12 @@ def _spawn_bin_apply_worker(
     cleanup_path: str | None = None,
 ) -> None:
     log_path = _update_log_path(install_root)
+    result_path = updater_result_path(install_root)
+    try:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
     params = {
         "InstallRoot": str(install_root.resolve()),
         "ZipPath": str(zip_path.resolve()),
@@ -1815,6 +2088,7 @@ def _spawn_bin_apply_worker(
         "TargetBinVersion": (target_bin_version or "").strip(),
         "CleanupPath": (cleanup_path or "").strip(),
         "NotifyMarkerPath": str(_bin_apply_success_marker_path(install_root).resolve()),
+        "ResultPath": str(result_path.resolve()),
     }
     tmpdir = Path(tempfile.gettempdir())
     uid = uuid.uuid4().hex[:12]
@@ -1848,7 +2122,7 @@ def _spawn_bin_apply_worker(
         if use_updater:
             raise OSError(
                 "hc_updater launcher not found. "
-                "Expected {root}\\app\\bin\\hc_updater.exe or core/hc_updater.py. "
+                f"Expected {install_root}\\app\\bin\\hc_updater.exe or core/hc_updater.py. "
                 "Set HC_USE_UPDATER_EXE=0 only for controlled legacy fallback."
             )
         # Legacy fallback for environments where updater.exe is not built yet.
@@ -1884,6 +2158,30 @@ def _spawn_bin_apply_worker(
     )
     proc = subprocess.Popen(cmd, close_fds=True, creationflags=creationflags)
     _append_update_log(install_root, f"apply_bin: worker launched pid={proc.pid}")
+
+
+def spawn_hc_updater_for_pending_bin_apply(
+    install_root: Path,
+    *,
+    zip_path: Path,
+    expected_sha: str,
+    apply_mode: str,
+    target_bin_version: str,
+    display_version: str = "",
+) -> None:
+    """pending 由来の bin 適用を hc_updater に任せる（Excel 終了後にコピー）。インプロセスで app\\bin を置換しない。"""
+    if not zip_path.is_file():
+        raise OSError(f"updater zip missing: {zip_path}")
+    sha = (expected_sha or "").strip().lower()
+    _spawn_bin_apply_worker(
+        install_root,
+        zip_path,
+        sha or None,
+        (display_version or "").strip() or None,
+        apply_mode=(apply_mode or "full").strip().lower(),
+        target_bin_version=(target_bin_version or "").strip() or None,
+        cleanup_path=None,
+    )
 
 
 def check_for_updates(
@@ -2102,8 +2400,235 @@ def check_for_updates(
     return out
 
 
+def _resolve_require_admin_for_bin_prompt(
+    install_root: Path,
+    scope: str,
+    *,
+    interactive_apply_now: bool,
+    owner_hwnd: int | None = None,
+    sheet_id: str = "",
+) -> bool | None:
+    """
+  Return require_admin, or None if user declined (non-interactive scope=all only).
+  Interactive path: no app-level admin dialog (UAC is a separate OS step on startup apply).
+    """
+    if interactive_apply_now:
+        if scope == "all":
+            _append_update_log(
+                install_root,
+                "apply_bin: scope=all require_admin=true admin_app_prompt=skip "
+                "interactive=true (UAC separate on startup pending)",
+            )
+            return True
+        if scope == "current":
+            _append_update_log(install_root, "apply_bin: scope=current admin_prompt=skip interactive=true")
+            return False
+        _append_update_log(
+            install_root,
+            f"apply_bin: scope={scope or '-'} require_admin=false interactive=true",
+        )
+        return False
+
+    require_admin = False
+    if scope == "all":
+        rc_admin = _message_box(
+            _um(
+                "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
+                "管理者権限で更新を適用しますか？\n\n"
+                "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
+                "「いいえ」: 今回は適用せず、次回起動で再確認します。",
+            ),
+            style=MB_YESNO | MB_ICONINFORMATION,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        if rc_admin != IDYES:
+            _append_update_log(install_root, "apply_bin: scope=all user_declined_admin defer=true")
+            return None
+        return True
+    if scope == "current":
+        _append_update_log(install_root, "apply_bin: scope=current admin_prompt=skip")
+        return False
+    rc_admin = _message_box(
+        _um(
+            "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
+            "管理者権限で更新を適用しますか？\n\n"
+            "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
+            "「いいえ」: 通常権限で更新します（Windows の表示版同期に失敗する場合があります）。",
+        ),
+        style=MB_YESNO | MB_ICONINFORMATION,
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
+    )
+    return rc_admin == IDYES
+
+
+_INTERACTIVE_APPLY_RETRY_MAX = 6
+_INTERACTIVE_APPLY_RETRY_WAIT_SEC = 0.75
+
+
+def _apply_succeeded_for_interactive(res: dict[str, Any]) -> bool:
+    """即時更新の完走: bin 適用完了または hc_updater 委譲まで進んだ場合のみ True。"""
+    if res.get("deferred_to_updater") or res.get("applied"):
+        return True
+    return False
+
+
+def _should_retry_interactive_apply(res: dict[str, Any]) -> bool:
+    return str(res.get("skipped") or "").strip() == "concurrent_apply"
+
+
+def _interactive_apply_failure_message(res: dict[str, Any] | None) -> str:
+    if not isinstance(res, dict):
+        return "更新を開始できませんでした。もう一度「すぐに更新」を実行してください。"
+    if res.get("deferred"):
+        return (
+            "更新の適用がキャンセルされました。"
+            "もう一度「すぐに更新」を実行してください。"
+        )
+    skipped = str(res.get("skipped") or "").strip()
+    if skipped == "concurrent_apply":
+        return (
+            "別の更新処理が実行中のため、今回は適用を開始できませんでした。"
+            "しばらく待ってから再度「すぐに更新」を実行してください。"
+        )
+    err = str(res.get("error") or "").strip()
+    if err:
+        return err
+    return "更新を開始できませんでした。もう一度「すぐに更新」を実行してください。"
+
+
+def _apply_pending_update_with_retry(
+    install_root: Path,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    from bootstrap.update_bootstrap import apply_pending_update
+
+    last: dict[str, Any] = {"ok": False, "applied": False, "error": "apply not attempted"}
+    for attempt in range(_INTERACTIVE_APPLY_RETRY_MAX):
+        if attempt > 0:
+            _append_update_log(
+                install_root,
+                "interactive_apply: retry attempt={n}/{max} source={s} wait_sec={w}".format(
+                    n=attempt + 1,
+                    max=_INTERACTIVE_APPLY_RETRY_MAX,
+                    s=source,
+                    w=_INTERACTIVE_APPLY_RETRY_WAIT_SEC,
+                ),
+            )
+            time.sleep(_INTERACTIVE_APPLY_RETRY_WAIT_SEC)
+        raw = apply_pending_update(install_root)
+        last = raw if isinstance(raw, dict) else {"ok": False, "applied": False, "error": "invalid apply result"}
+        _append_update_log(
+            install_root,
+            "interactive_apply: apply_pending_update attempt={n} result={r!r} source={s}".format(
+                n=attempt + 1,
+                r=last,
+                s=source,
+            ),
+        )
+        if _apply_succeeded_for_interactive(last):
+            return last
+        if not _should_retry_interactive_apply(last):
+            return last
+    return last
+
+
+def run_interactive_bin_apply_now(
+    install_root: Path,
+    *,
+    owner_hwnd: int | None = None,
+    sheet_id: str = "",
+    source: str = "ribbon",
+) -> bool:
+    """
+    pending 予約済みの bin 更新を即時適用（起動時「すぐに更新」と同じ apply_pending_update シーケンス）。
+    成功時は applied または deferred_to_updater。表示版 sync / SHChangeNotify は bootstrap / hc_updater 側。
+    """
+    src = str(source or "ribbon").strip() or "ribbon"
+    try:
+        apply_res = _apply_pending_update_with_retry(install_root, source=src)
+    except Exception as e:
+        _append_update_log(
+            install_root,
+            f"interactive_apply: exception source={src} err={type(e).__name__}: {e}",
+        )
+        try:
+            clear_pending(build_paths(install_root))
+            _append_update_log(install_root, "interactive_apply: cleared_pending_on_exception=true")
+        except Exception as ce:
+            _append_update_log(
+                install_root,
+                f"interactive_apply: clear_pending_on_exception_failed type={type(ce).__name__}: {ce}",
+            )
+        _message_box(
+            _um(
+                "UPDATER_ERROR_TEMPLATE",
+                "CSV Tool の更新に失敗しました。\n\n{error}\n\n"
+                "対処: 開いている Excel をすべて閉じてから、再度「すぐに更新」を実行してください。\n"
+                "解消しない場合は再インストールを検討してください。\n\n"
+                "ログ: {log_path}",
+                error=f"{type(e).__name__}: {e}",
+                log_path=str(_update_log_path(install_root)),
+            ),
+            style=MB_OK | MB_ICONWARNING,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        return False
+
+    if _apply_succeeded_for_interactive(apply_res):
+        if apply_res.get("deferred_to_updater"):
+            _append_update_log(
+                install_root,
+                "interactive_apply: deferred_to_updater (hc_updater continues after Excel exit) "
+                f"source={src}",
+            )
+        elif apply_res.get("applied"):
+            _append_update_log(
+                install_root,
+                f"interactive_apply: applied=true source={src} "
+                "(display_version sync via bootstrap when applicable)",
+            )
+        return True
+
+    err_msg = _interactive_apply_failure_message(apply_res)
+    _append_update_log(
+        install_root,
+        f"interactive_apply: failed source={src} err={err_msg} result={apply_res!r}",
+    )
+    try:
+        clear_pending(build_paths(install_root))
+        _append_update_log(install_root, "interactive_apply: cleared_pending_on_failure=true")
+    except Exception as e:
+        _append_update_log(
+            install_root,
+            f"interactive_apply: clear_pending_failed type={type(e).__name__}: {e}",
+        )
+    _message_box(
+        _um(
+            "UPDATER_ERROR_TEMPLATE",
+            "CSV Tool の更新に失敗しました。\n\n{error}\n\n"
+            "対処: 開いている Excel をすべて閉じてから、再度「すぐに更新」を実行してください。\n"
+            "解消しない場合は再インストールを検討してください。\n\n"
+            "ログ: {log_path}",
+            error=str(err_msg),
+            log_path=str(_update_log_path(install_root)),
+        ),
+        style=MB_OK | MB_ICONWARNING,
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
+    )
+    return False
+
+
 def _show_bin_update_prompt(
-    st: dict[str, Any], *, owner_hwnd: int | None = None, sheet_id: str = ""
+    st: dict[str, Any],
+    *,
+    owner_hwnd: int | None = None,
+    sheet_id: str = "",
+    interactive_apply_now: bool = False,
 ) -> None:
     prep_err = st.get("bin_update_prepare_error")
     if prep_err:
@@ -2134,37 +2659,57 @@ def _show_bin_update_prompt(
         return
 
     apply_hint = ""
-    if (st.get("bin_apply_mode") or "").lower() == "patch":
-        apply_hint = _um("BIN_UPDATE_APPLY_HINT_PATCH", "（差分 zip で更新します）\n")
-    elif (st.get("bin_apply_mode") or "").lower() == "full":
-        apply_hint = _um("BIN_UPDATE_APPLY_HINT_FULL", "")
-    msg = _um(
-        "BIN_UPDATE_CONFIRM_TEMPLATE",
-        "bin の新しい版があります。\n\n"
-        "現在 (bin): {installed_bin}\n"
-        "現在 (config): {installed_config}\n"
-        "現在 (bootstrap): {installed_bootstrap}\n"
-        "配布 (bin): {latest_bin}\n"
-        "配布 (config): {latest_config}\n"
-        "配布 (bootstrap): {latest_bootstrap}\n"
-        "表示版: {display_version}\n\n"
-        "{apply_hint}"
-        "「はい」を選ぶと、すべての Excel を終了したあとに bin（実行ファイル一式）を自動更新します。\n"
-        "「いいえ」は後で更新できます。",
-        installed_bin=str(st.get("installed_bin") or "-"),
-        installed_config=str(st.get("installed_config") or "-"),
-        installed_bootstrap=str(st.get("installed_bootstrap_version") or "-"),
-        latest_bin=str(st.get("latest_bin_version") or "-"),
-        latest_config=str(st.get("latest_config_version") or "-"),
-        latest_bootstrap=str(st.get("latest_bootstrap_version") or "-"),
-        display_version=str(st.get("display_version") or "-"),
-        apply_hint=apply_hint,
-    )
+    if not interactive_apply_now:
+        if (st.get("bin_apply_mode") or "").lower() == "patch":
+            apply_hint = _um("BIN_UPDATE_APPLY_HINT_PATCH", "（差分 zip で更新します）\n")
+        elif (st.get("bin_apply_mode") or "").lower() == "full":
+            apply_hint = _um("BIN_UPDATE_APPLY_HINT_FULL", "")
+    if interactive_apply_now:
+        msg = _um(
+            "BIN_UPDATE_SINGLE_CONFIRM_TEMPLATE",
+            "新しいバージョンがあります。\n\n"
+            "お使いの版: {installed_bin}\n"
+            "新しい版: {latest_bin}",
+            installed_bin=str(st.get("installed_bin") or "-"),
+            latest_bin=str(st.get("latest_bin_version") or "-"),
+        )
+        dlg_title = _um("BIN_UPDATE_SINGLE_CONFIRM_TITLE", "CSV Tool の更新")
+        btn_yes = _um("BIN_UPDATE_SINGLE_BTN_APPLY_NOW", "すぐに更新")
+        btn_no = _um("BIN_UPDATE_SINGLE_BTN_LATER", "後で")
+    else:
+        msg = _um(
+            "BIN_UPDATE_CONFIRM_TEMPLATE",
+            "bin の新しい版があります。\n\n"
+            "現在 (bin): {installed_bin}\n"
+            "現在 (config): {installed_config}\n"
+            "現在 (bootstrap): {installed_bootstrap}\n"
+            "配布 (bin): {latest_bin}\n"
+            "配布 (config): {latest_config}\n"
+            "配布 (bootstrap): {latest_bootstrap}\n"
+            "表示版: {display_version}\n\n"
+            "{apply_hint}"
+            "「はい」を選ぶと、すべての Microsoft Excel を終了したあとに bin（実行ファイル一式）を自動更新します。\n"
+            "「いいえ」は後で更新できます。",
+            installed_bin=str(st.get("installed_bin") or "-"),
+            installed_config=str(st.get("installed_config") or "-"),
+            installed_bootstrap=str(st.get("installed_bootstrap_version") or "-"),
+            latest_bin=str(st.get("latest_bin_version") or "-"),
+            latest_config=str(st.get("latest_config_version") or "-"),
+            latest_bootstrap=str(st.get("latest_bootstrap_version") or "-"),
+            display_version=str(st.get("display_version") or "-"),
+            apply_hint=apply_hint,
+        )
+        dlg_title = _update_check_title()
+        btn_yes = None
+        btn_no = None
     rc = _message_box(
         msg,
         style=MB_YESNO | MB_ICONINFORMATION,
         owner_hwnd=owner_hwnd,
         sheet_id=sheet_id,
+        title=dlg_title if interactive_apply_now else None,
+        confirm_btn_yes=btn_yes,
+        confirm_btn_no=btn_no,
     )
     root = _install_root()
     if rc != IDYES:
@@ -2194,21 +2739,25 @@ def _show_bin_update_prompt(
             t=str(st.get("latest_bin_version") or "-"),
         ),
     )
-    rc_admin = _message_box(
-        _um(
-            "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
-            "管理者権限で更新を適用しますか？\n\n"
-            "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
-            "「いいえ」: 通常権限で更新します（Windows の表示版同期に失敗する場合があります）。",
-        ),
-        style=MB_YESNO | MB_ICONINFORMATION,
+    scope = _resolve_install_scope(root)
+    require_admin_sel = _resolve_require_admin_for_bin_prompt(
+        root,
+        scope,
+        interactive_apply_now=interactive_apply_now,
         owner_hwnd=owner_hwnd,
         sheet_id=sheet_id,
     )
-    require_admin = rc_admin == IDYES
-    _append_update_log(root, f"apply_bin: require_admin_selected={require_admin}")
+    if require_admin_sel is None:
+        return
+    require_admin = bool(require_admin_sel)
+    _append_update_log(root, f"apply_bin: require_admin_selected={require_admin} scope={scope}")
 
-    ok, msg = _queue_pending_bin_update(st, source="interactive_confirm", require_admin=require_admin)
+    ok, msg = _queue_pending_bin_update(
+        st,
+        source="interactive_confirm",
+        require_admin=require_admin,
+        skip_apply_confirm=bool(interactive_apply_now),
+    )
     if not ok:
         _append_update_log(root, f"apply_bin: queue pending failed err={msg}")
         _message_box(
@@ -2223,6 +2772,14 @@ def _show_bin_update_prompt(
         )
         return
     _append_update_log(root, f"apply_bin: queued pending path={msg}")
+    if interactive_apply_now:
+        run_interactive_bin_apply_now(
+            root,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+            source="interactive_confirm",
+        )
+        return
     _message_box(
         _um(
             "BIN_SCHEDULED_BACKGROUND_TEMPLATE",
@@ -2272,19 +2829,41 @@ def _show_bootstrap_update_prompt(
         )
         return
     _append_update_log(root, "apply_bootstrap: user_decision=start_yes")
-    rc_admin = _message_box(
-        _um(
-            "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
-            "管理者権限で更新を適用しますか？\n\n"
-            "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
-            "「いいえ」: 通常権限で更新します（Windows の表示版同期に失敗する場合があります）。",
-        ),
-        style=MB_YESNO | MB_ICONINFORMATION,
-        owner_hwnd=owner_hwnd,
-        sheet_id=sheet_id,
-    )
-    require_admin = rc_admin == IDYES
-    _append_update_log(root, f"apply_bootstrap: require_admin_selected={require_admin}")
+    scope = _resolve_install_scope(root)
+    require_admin = False
+    if scope == "all":
+        rc_admin = _message_box(
+            _um(
+                "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
+                "管理者権限で更新を適用しますか？\n\n"
+                "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
+                "「いいえ」: 今回は適用せず、次回起動で再確認します。",
+            ),
+            style=MB_YESNO | MB_ICONINFORMATION,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        if rc_admin != IDYES:
+            _append_update_log(root, "apply_bootstrap: scope=all user_declined_admin defer=true")
+            return
+        require_admin = True
+    elif scope == "current":
+        require_admin = False
+        _append_update_log(root, "apply_bootstrap: scope=current admin_prompt=skip")
+    else:
+        rc_admin = _message_box(
+            _um(
+                "UPDATE_RUN_AS_ADMIN_CONFIRM_TEMPLATE",
+                "管理者権限で更新を適用しますか？\n\n"
+                "「はい」: 次回起動時に UAC 確認後、管理者権限で更新を適用します。\n"
+                "「いいえ」: 通常権限で更新します（Windows の表示版同期に失敗する場合があります）。",
+            ),
+            style=MB_YESNO | MB_ICONINFORMATION,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        require_admin = rc_admin == IDYES
+    _append_update_log(root, f"apply_bootstrap: require_admin_selected={require_admin} scope={scope}")
     ok, qmsg = _queue_pending_bootstrap_only(st, source="interactive_bootstrap", require_admin=require_admin)
     if not ok:
         _append_update_log(root, f"apply_bootstrap: queue pending failed err={qmsg}")
@@ -2316,7 +2895,7 @@ def _show_bootstrap_update_prompt(
 def check_for_updates_interactive(
     source: str, *, owner_hwnd: int | None = None, sheet_id: str = ""
 ) -> None:
-    _notify_pending_bin_apply_success(owner_hwnd=owner_hwnd, sheet_id=sheet_id)
+    discard_bin_apply_success_marker_if_present()
     notify_offline = True
     try:
         st = check_for_updates(
@@ -2430,7 +3009,7 @@ def check_for_updates_interactive(
                     sheet_id=sheet_id,
                 )
                 return
-            _show_bin_update_prompt(st, owner_hwnd=owner_hwnd, sheet_id=sheet_id)
+            _show_bin_update_prompt(st, owner_hwnd=owner_hwnd, sheet_id=sheet_id, interactive_apply_now=True)
             return
 
         if st.get("needs_bootstrap_update") and not st.get("needs_bin_update"):
@@ -2497,12 +3076,24 @@ def check_for_updates_interactive(
 
 
 def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet_id: str = "_") -> None:
-    global _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER
+    global _suppress_startup_bin_prompt_after_pending_defer, _skip_startup_version_check_this_launch
     _ = owner_hwnd, sheet_id
     root = _install_root()
     if root is None or not root.is_dir():
         return
     pending = read_pending(build_paths(root))
+    if not pending:
+        try:
+            from core.update_housekeeping import sweep_full_prev_to_single_generation
+
+            sweep_full_prev_to_single_generation(
+                root,
+                log=lambda m: _append_update_log(root, f"startup_housekeeping: {m}"),
+            )
+        except Exception as e:
+            _append_update_log(root, f"startup_housekeeping: sweep err={type(e).__name__}: {e}")
+    if pending:
+        _skip_startup_version_check_this_launch = True
     require_admin = bool((pending or {}).get("require_admin", False))
     _append_update_log(
         root,
@@ -2527,7 +3118,7 @@ def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet
             ok_elev, detail = _run_pending_apply_elevated(root)
             _append_update_log(root, f"bootstrap_apply elevated_attempt ok={ok_elev} detail={detail}")
             if ok_elev:
-                _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
+                _suppress_startup_bin_prompt_after_pending_defer = False
                 return
             _message_box(
                 _um(
@@ -2541,29 +3132,86 @@ def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet
                 sheet_id=sheet_id,
             )
         else:
-            _append_update_log(root, "bootstrap_apply: user_declined_elevation continue_non_admin=true")
+            _append_update_log(root, "bootstrap_apply: user_declined_elevation defer_apply=true")
+            return
     try:
-        from bootstrap.update_bootstrap import apply_pending_update
+        res = _apply_pending_update_with_retry(root, source="startup_pending")
     except Exception as e:
-        _append_update_log(root, f"bootstrap_apply skipped import_failed err={type(e).__name__}: {e}")
+        _append_update_log(root, f"bootstrap_apply failed err={type(e).__name__}: {e}")
         return
     try:
-        res = apply_pending_update(root)
         if isinstance(res, dict):
             if res.get("deferred"):
-                _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = True
+                _suppress_startup_bin_prompt_after_pending_defer = True
                 _append_update_log(
                     root,
                     "startup: pending_apply deferred; skip duplicate bin prompt on same launch",
                 )
             else:
-                _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
-            if res.get("applied"):
-                _append_update_log(root, "bootstrap_apply applied=true")
-            elif not res.get("ok", True):
-                _append_update_log(root, f"bootstrap_apply applied=false err={res.get('error')}")
+                _suppress_startup_bin_prompt_after_pending_defer = False
+            if _apply_succeeded_for_interactive(res):
+                if res.get("applied"):
+                    _append_update_log(root, "bootstrap_apply applied=true")
+                elif res.get("deferred_to_updater"):
+                    _append_update_log(
+                        root,
+                        "bootstrap_apply deferred_to_updater=true (close all Excel to finish bin apply)",
+                    )
+            elif not res.get("ok", True) or not _apply_succeeded_for_interactive(res):
+                err_detail = _interactive_apply_failure_message(res)
+                _append_update_log(
+                    root,
+                    f"bootstrap_apply applied=false err={err_detail} result={res!r}",
+                )
+                if str((pending or {}).get("apply_scope") or "").strip() != "bootstrap_only":
+                    rc_recover = _message_box(
+                        _um(
+                            "PENDING_APPLY_RECOVERY_CONFIRM_TEMPLATE",
+                            "更新の適用に失敗しました。\n\n"
+                            "{error}\n\n"
+                            "復旧用バックアップ（full zip）から戻しますか？",
+                            error=str(err_detail),
+                        ),
+                        style=MB_YESNO | MB_ICONWARNING,
+                        owner_hwnd=0,
+                        sheet_id=sheet_id,
+                    )
+                    if rc_recover == IDYES:
+                        ok_q, qmsg = _queue_pending_recovery_from_backup(root, require_admin=require_admin)
+                        _append_update_log(root, f"recovery queue result ok={ok_q} detail={qmsg}")
+                        if ok_q:
+                            _message_box(
+                                _um(
+                                    "PENDING_APPLY_RECOVERY_QUEUED_TEMPLATE",
+                                    "復旧を開始します。進捗ウィンドウが表示されます。",
+                                ),
+                                style=MB_OK | MB_ICONINFORMATION,
+                                owner_hwnd=0,
+                                sheet_id=sheet_id,
+                            )
+                            try:
+                                res_recover = _apply_pending_update_with_retry(
+                                    root, source="startup_recovery"
+                                )
+                                _append_update_log(root, f"recovery apply result={res_recover}")
+                            except Exception as e:
+                                _append_update_log(root, f"recovery apply failed err={type(e).__name__}: {e}")
+                        else:
+                            _message_box(
+                                _um(
+                                    "PENDING_APPLY_RECOVERY_PREP_FAILED_TEMPLATE",
+                                    "復旧用のバックアップ zip が見つかりません。\n\n"
+                                    "詳細: {detail}\n\n"
+                                    "update\\archive\\full\\ に full_prev_*.zip があるか、"
+                                    "または管理者に連絡のうえ再インストールを検討してください。",
+                                    detail=qmsg,
+                                ),
+                                style=MB_OK | MB_ICONWARNING,
+                                owner_hwnd=0,
+                                sheet_id=sheet_id,
+                            )
     except Exception as e:
-        _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
+        _suppress_startup_bin_prompt_after_pending_defer = False
         _append_update_log(root, f"bootstrap_apply failed err={type(e).__name__}: {e}")
 
 
@@ -2573,19 +3221,31 @@ def maybe_check_updates_on_startup(*, owner_hwnd: int | None = None, sheet_id: s
     Pending bootstrap apply runs earlier in svc_host (before bridge/UI); do not
     call maybe_apply_pending_bootstrap_update here to avoid a second confirm dialog.
     """
-    global _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER
+    global _suppress_startup_bin_prompt_after_pending_defer, _skip_startup_version_check_this_launch
     if not packaged_spawn_requested():
         return
+    lr_startup = _install_root()
+    if lr_startup and lr_startup.is_dir():
+        maybe_show_updater_result_from_previous_run(
+            lr_startup,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+    if _skip_startup_version_check_this_launch:
+        lr = _install_root()
+        if lr and lr.is_dir():
+            _append_update_log(lr, "startup: version_check skipped because pending flow ran in this launch")
+        return
     with _UPDATE_CHECK_UI_LOCK:
-        _notify_pending_bin_apply_success(owner_hwnd=owner_hwnd, sheet_id=sheet_id)
+        discard_bin_apply_success_marker_if_present()
     v = os.environ.get(ENV_UPDATE_CHECK_AT_STARTUP)
     if v is not None and not core_env.truthy(v, empty_means_false=True):
-        _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
+        _suppress_startup_bin_prompt_after_pending_defer = False
         return
 
     st = check_for_updates(
         source="startup",
-        notify_offline=False,
+        notify_offline=True,
         owner_hwnd=owner_hwnd,
         sheet_id=sheet_id,
     )
@@ -2604,8 +3264,8 @@ def maybe_check_updates_on_startup(*, owner_hwnd: int | None = None, sheet_id: s
             )
 
         if st.get("needs_bin_update"):
-            if _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER:
-                _SUPPRESS_STARTUP_BIN_PROMPT_AFTER_PENDING_DEFER = False
+            if _suppress_startup_bin_prompt_after_pending_defer:
+                _suppress_startup_bin_prompt_after_pending_defer = False
                 lr = _install_root()
                 if lr and lr.is_dir():
                     _append_update_log(
@@ -2613,4 +3273,9 @@ def maybe_check_updates_on_startup(*, owner_hwnd: int | None = None, sheet_id: s
                         "startup: bin update prompt skipped (pending_apply was deferred this launch)",
                     )
             else:
-                _show_bin_update_prompt(st, owner_hwnd=owner_hwnd, sheet_id=sheet_id)
+                _show_bin_update_prompt(
+                    st,
+                    owner_hwnd=owner_hwnd,
+                    sheet_id=sheet_id,
+                    interactive_apply_now=True,
+                )

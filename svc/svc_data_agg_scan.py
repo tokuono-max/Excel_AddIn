@@ -17,7 +17,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 _path_svc = Path(__file__).resolve().parent
 _root = _path_svc.parent
@@ -87,6 +87,7 @@ def scan_folder(
     extensions: Optional[tuple[str, ...]] = None,
     keyword: Optional[str] = None,
     exclude_temp: bool = True,
+    cancel_check: Optional[Callable[..., None]] = None,
 ) -> list[Path]:
     """
     指定フォルダを走査し、条件に合うファイルのパス一覧を返す。
@@ -115,10 +116,17 @@ def scan_folder(
     kw = (keyword or "").strip()
     collected: list[Path] = []
 
+    def _poll_cancel(*, force: bool = False) -> None:
+        if cancel_check is not None:
+            cancel_check(force=force)
+
+    _poll_cancel(force=True)
+
     if recursive:
         for root, _dirs, files in os.walk(base):
             r = Path(root)
             for f in files:
+                _poll_cancel()
                 p = r / f
                 if exclude_temp and _is_temp_file(p):
                     continue
@@ -131,6 +139,7 @@ def scan_folder(
     else:
         try:
             for p in base.iterdir():
+                _poll_cancel()
                 if not p.is_file():
                     continue
                 if exclude_temp and _is_temp_file(p):

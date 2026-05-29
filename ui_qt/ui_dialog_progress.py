@@ -526,6 +526,27 @@ class ProgressDialog(QDialog):
                 QTimer.singleShot(_close_ms, self._close_after_done)
                 return
 
+            if status_u == "RUN" and _log is not None:
+                try:
+                    import time as _t
+                    _now = _t.time()
+                    _last_t = float(getattr(self, "_run_info_last_t", 0.0) or 0.0)
+                    _last_seq = int(getattr(self, "_run_info_last_seq", -1) or -1)
+                    if seq != _last_seq and (_now - _last_t) >= 1.0:
+                        self._run_info_last_t = _now
+                        self._run_info_last_seq = seq
+                        _log.info(
+                            "[CSV_MG] ProgressDialog RUN seq=%s pct=%s phase=%s detail=%s done=%s total=%s",
+                            seq,
+                            d.get("pct"),
+                            d.get("phase"),
+                            d.get("detail"),
+                            d.get("done"),
+                            d.get("total"),
+                        )
+                except Exception:
+                    pass
+
             # 判定: 行数超過時は Excel 操作を有効化し、警告メッセージ表示。OK で閉じたあと return_merge を投入し結合画面を再表示
             if status == "OVER_LIMIT":
                 self._timer.stop()

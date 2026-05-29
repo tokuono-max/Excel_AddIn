@@ -1,6 +1,6 @@
 Attribute VB_Name = "xlwings"
 #Const App = "Microsoft Excel" 'Adjust when using outside of Excel
-'Version: 0.33.16
+'Version: 0.35.16  2026/05/08
 
 'xlwings is distributed under a BSD 3-clause license.
 '
@@ -69,19 +69,19 @@ Public Const PROJECT_NAME As String = "xlwings"
 Public Function RunPython(pythonCommand As String)
     ' Public API: Runs the Python command, e.g.: to run the function foo() in module bar, call the function like this:
     ' RunPython "import bar; bar.foo()"
-    
+
     Dim i As Integer
     Dim SourcePythonCommand As String, interpreter As String, PYTHONPATH As String, licenseKey, ActiveFullName As String, ThisFullName As String, AddExcelDir As String
     Dim OPTIMIZED_CONNECTION As Boolean, uses_embedded_code As Boolean
     Dim Wb As Workbook
     Dim sht As Worksheet
-    
-    ' svpython ƒèomFpbZ[W{bNX
+
+    ' svpython ?omFpbZ[W{bNX
     ' Call MsgBox(pythonCommand, vbInformation, "xlwings.RunPython")
 
 '    'MsgBox "merge clicked"
     SourcePythonCommand = pythonCommand
-    
+
     #If Mac Then
         interpreter = GetConfig("INTERPRETER_MAC", "")
     #Else
@@ -152,7 +152,7 @@ Public Function RunPython(pythonCommand As String)
         ActiveFullName = ThisWorkbook.FullName
         ThisFullName = ThisWorkbook.FullName
     #End If
-    
+
     #If Mac Then
         PYTHONPATH = AddExcelDir & ";" & ActiveFullName & ";" & ThisFullName & ";" & GetConfig("ONEDRIVE_CONSUMER_MAC") & ";" & GetConfig("ONEDRIVE_COMMERCIAL_MAC") & ";" & GetConfig("SHAREPOINT_MAC") & ";" & GetConfig("PYTHONPATH")
     #Else
@@ -177,19 +177,19 @@ Public Function RunPython(pythonCommand As String)
         Application.StatusBar = "Running..."  ' Non-blocking way of giving feedback that something is happening
         ExecuteMac pythonCommand, interpreter, PYTHONPATH
     #Else
-    
+
     Dim v As Variant
     v = GetConfig("USE UDF SERVER", False)
     Call HC_Log.Diag("xlwings", "USE UDF SERVER raw=" & CStr(v) & " vartype=" & CStr(VarType(v)))
     Call HC_Log.Diag("xlwings", "OPTIMIZED_CONNECTION = " & CStr(OPTIMIZED_CONNECTION))
 
-    
+
         If OPTIMIZED_CONNECTION = True Then
-            
+
             XLPy.SetAttr XLPy.Module("xlwings._xlwindows"), "BOOK_CALLER", ThisWorkbook
-            
+
             On Error GoTo err_handling
-            
+
             XLPy.Exec "" & pythonCommand & ""
             GoTo end_err_handling
 err_handling:
@@ -198,10 +198,50 @@ err_handling:
             On Error GoTo 0
 end_err_handling:
         Else
-            RunPython = ExecuteWindows(False, pythonCommand, interpreter, PYTHONPATH)
+            If HcTruthyPackagedRunPython() Then
+                If Len(Trim$(Environ$("HC_INSTALL_ROOT"))) = 0 Then
+                    MsgBox "HC_INSTALL_ROOT is not set. Packaged RunPython requires install root.", vbCritical, "xlwings"
+                    RunPython = -1
+                ElseIf Not FileExists(interpreter) Then
+                    MsgBox "Interpreter not found: " & interpreter, vbCritical, "xlwings"
+                    RunPython = -1
+                Else
+                    Dim scriptPath As String
+                    Dim fullPy As String
+                    Dim frozenArgs As String
+                    fullPy = "import os, sys" & vbLf
+                    fullPy = fullPy & "install = (os.environ.get('HC_INSTALL_ROOT') or '').strip()" & vbLf
+                    fullPy = fullPy & "if install:" & vbLf
+                    fullPy = fullPy & "    if install not in sys.path:" & vbLf
+                    fullPy = fullPy & "        sys.path.insert(0, install)" & vbLf
+                    fullPy = fullPy & "    try:" & vbLf
+                    fullPy = fullPy & "        os.chdir(install)" & vbLf
+                    fullPy = fullPy & "    except OSError:" & vbLf
+                    fullPy = fullPy & "        pass" & vbLf
+                    fullPy = fullPy & "else:" & vbLf
+                    fullPy = fullPy & "    root = r'" & Replace(ThisWorkbook.Path, "'", "''") & "'" & vbLf
+                    fullPy = fullPy & "    cand = os.path.dirname(root)" & vbLf
+                    fullPy = fullPy & "    hc = os.path.join(root, 'hc_main.py')" & vbLf
+                    fullPy = fullPy & "    hc2 = os.path.join(cand, 'hc_main.py')" & vbLf
+                    fullPy = fullPy & "    if (not os.path.exists(hc)) and os.path.exists(hc2):" & vbLf
+                    fullPy = fullPy & "        root = cand" & vbLf
+                    fullPy = fullPy & "    if root and root not in sys.path:" & vbLf
+                    fullPy = fullPy & "        sys.path.insert(0, root)" & vbLf
+                    fullPy = fullPy & pythonCommand
+                    scriptPath = GetConfig("TEMP DIR", Environ("Temp")) & "\xlwings-snippet-" & CreateGUID() & ".py"
+                    Call HcWriteUtf8File(scriptPath, fullPy)
+                    frozenArgs = "--script-file=" & Chr(34) & scriptPath & Chr(34)
+                    RunPython = ExecuteWindows(True, interpreter, ParentFolder(interpreter), PYTHONPATH, frozenArgs)
+                    On Error Resume Next
+                    Kill scriptPath
+                    On Error GoTo 0
+                End If
+            Else
+                RunPython = ExecuteWindows(False, pythonCommand, interpreter, PYTHONPATH)
+            End If
         End If
     #End If
-    
+
 End Function
 
 
@@ -261,6 +301,33 @@ AppleScriptErrorHandler:
     #End If
 End Sub
 
+
+
+Private Function HcTruthyPackagedRunPython() As Boolean
+    Dim s As String
+    Dim e As String
+    s = LCase$(Trim$(CStr(GetConfig("USE_PACKAGED_RUNPYTHON", "False"))))
+    HcTruthyPackagedRunPython = (s = "true" Or s = "1" Or s = "yes")
+    e = LCase$(Trim$(Environ$("HC_PACKAGED_DEPLOYMENT")))
+    If (e = "1" Or e = "true" Or e = "yes") Then
+        HcTruthyPackagedRunPython = True
+    End If
+End Function
+
+Private Sub HcWriteUtf8File(ByVal filePath As String, ByVal content As String)
+    Const AD_TYPE_TEXT As Long = 2
+    Const AD_SAVE_OVERWRITE As Long = 2
+    Const AD_WRITE_CHAR As Long = 0
+    Dim stm As Object
+    Set stm = CreateObject("ADODB.Stream")
+    stm.Type = AD_TYPE_TEXT
+    stm.Charset = "utf-8"
+    stm.Open
+    stm.WriteText content, AD_WRITE_CHAR
+    stm.SaveToFile filePath, AD_SAVE_OVERWRITE
+    stm.Close
+    Set stm = Nothing
+End Sub
 Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN As String, _
                         Optional PYTHONPATH As String, Optional FrozenArgs As String) As Integer
     ' Call a command window and change to the directory of the Python installation or frozen executable
@@ -268,10 +335,10 @@ Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN
     ' This seems to be a general issue with pywin32, see http://stackoverflow.com/q/7238403/918626
     Dim ShowConsole As Integer
     Dim TempDir As String
-    
+
     ' fBobNp 2026/0215
     Call HC_Log.Diag("xlwings", "Root ExecuteWindows")
-    
+
     If GetConfig("SHOW CONSOLE", False) = True Then
         ShowConsole = 1
     Else
@@ -284,9 +351,9 @@ Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN
     Dim PythonInterpreter As String, PythonDir As String, CondaCmd As String, CondaPath As String, CondaEnv As String
     Dim ExitCode As Long
     Dim LOG_FILE As String
-    
+
     TempDir = GetConfig("TEMP DIR", Environ("Temp")) 'undocumented setting
-    
+
     LOG_FILE = TempDir & "\xlwings-" & CreateGUID() & ".log"
 
     If Not IsFrozen And (PYTHON_WIN <> "python" And PYTHON_WIN <> "pythonw") Then
@@ -315,16 +382,16 @@ Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN
     If PYTHON_WIN <> "python" And PYTHON_WIN <> "pythonw" Then
         PythonInterpreter = Chr(34) & PYTHON_WIN & Chr(34)
     Else
-        ' --- œçX ---
+        ' --- ?X ---
         MsgBox "ExecuteWindows received bare python/pythonw." & vbCrLf & _
                "This may start system Python via PATH." & vbCrLf & _
                "Please set INTERPRETER_WIN to your venv python.exe in xlwings.conf.", _
                vbCritical, "xlwings interpreter error"
-    
+
         ExecuteWindows = -1
         Exit Function
     End If
-    
+
     Call HC_Log.Diag("xlwings", "ExecuteWindows PYTHON_WIN=" & PYTHON_WIN)
     Call HC_Log.Diag("xlwings", "ExecuteWindows PythonInterpreter=" & PythonInterpreter)
     Call HC_Log.Diag("xlwings", "ExecuteWindows pythonCommand=" & pythonCommand)
@@ -332,14 +399,14 @@ Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN
 
     CondaPath = GetConfig("CONDA PATH")
     CondaEnv = GetConfig("CONDA ENV")
-    
+
     ' Handle spaces in path (for UDFs, this is handled via nested quotes instead, see XLPyCommand)
     CondaPath = Replace(CondaPath, " ", "^ ")
-    
+
     ' Handle ampersands and backslashes in file paths
     PYTHONPATH = Replace(PYTHONPATH, "&", "^&")
     PYTHONPATH = Replace(PYTHONPATH, "\", "\\")
-    
+
     If CondaPath <> "" And CondaEnv <> "" Then
         If CheckConda(CondaPath) = False Then
             Exit Function
@@ -352,20 +419,20 @@ Function ExecuteWindows(IsFrozen As Boolean, pythonCommand As String, PYTHON_WIN
     If IsFrozen = False Then
         Dim projRoot As String
         Dim pyBootstrap As String
-        ' Bootstrap: locate project root by hc_main.py next to xlam (see docs/bridge plan, phase C/D).
-        
+        ' Bootstrap: project root = folder with hc_main.py (bridge); short-lived invoke via core.excel_session (core.ribbon_invoke).
+
         projRoot = ThisWorkbook.Path
         pyBootstrap = "import os,sys;"
         pyBootstrap = pyBootstrap & "root=r'" & Replace(projRoot, "'", "''") & "';"
         pyBootstrap = pyBootstrap & "cand=os.path.dirname(root);hc=os.path.join(root,'hc_main.py');hc2=os.path.join(cand,'hc_main.py');"
         pyBootstrap = pyBootstrap & "(not os.path.exists(hc) and os.path.exists(hc2)) and (root:=cand);"
         pyBootstrap = pyBootstrap & "(root and root not in sys.path) and sys.path.insert(0, root);"
-        
+
         RunCommand = CondaCmd & PythonInterpreter & " -B -c """ & pyBootstrap & " " & pythonCommand & """ "
     ElseIf IsFrozen = True Then
         RunCommand = Chr(34) & pythonCommand & Chr(34) & " " & FrozenArgs & " "
     End If
-    
+
     ExitCode = WScript.Run("cmd.exe /C " & DriveCommand & _
                        RunCommand & _
                        " --wb=" & """" & ThisWorkbook.Name & """ --from_xl=1" & " --app=" & Chr(34) & _
@@ -412,7 +479,7 @@ Function GetUdfModules(Optional Wb As Variant) As String
     If Right$(GetUdfModules, 1) = ";" Then
         GetUdfModules = Left$(GetUdfModules, Len(GetUdfModules) - 1)
     End If
-    
+
     ' Automatically add embedded code sheets
     For Each sht In Wb.Worksheets
         If Right$(sht.Name, 3) = ".py" Then
@@ -428,7 +495,7 @@ Function GetUdfModules(Optional Wb As Variant) As String
     If GetUdfModules = "" Then
         GetUdfModules = Left$(Wb.Name, Len(Wb.Name) - 5) ' assume that it ends in .xls*
     End If
-    
+
 End Function
 
 Private Sub CleanUp()
@@ -492,7 +559,7 @@ Function XLPyCommand()
     PYTHONPATH = Replace(PYTHONPATH, "\", "\\")
     PYTHONPATH = Replace(PYTHONPATH, "'", "\'")
     PYTHONPATH = Replace(PYTHONPATH, "&", "^&")
-    
+
     PYTHON_WIN = GetConfig("INTERPRETER_WIN", "")
     If PYTHON_WIN = "" Then
         ' Legacy
@@ -673,13 +740,13 @@ End Function
 
 Function GetDirectoryConfigFilePath() As String
     Dim pathSeparator As String
-    
+
     #If Mac Then ' Application.PathSeparator doesn't seem to exist in Access...
         pathSeparator = "/"
     #Else
         pathSeparator = "\"
     #End If
-    
+
     GetDirectoryConfigFilePath = GetDirectoryPath(ThisWorkbook) & pathSeparator & PROJECT_NAME & ".conf"
 End Function
 
@@ -711,28 +778,27 @@ End Function
 #End If
 
 Function GetConfig(configKey As String, Optional default As String = "", Optional source As String = "") As Variant
-    ' ≈?: 2.2.0 (exezzŒ?: UDFT[o[›?ftHgL)
-    
+    ' ???l: addin ?z??????D??A??????? install root ?z????t?H?[???o?b?N
+
     Dim configValue As String
     Dim myConfPath As String
+    Dim myRootConfPath As String
     Dim myExePath As String
-    
-    ' --- 1. xlwings.conf (›?t@C) Ã?D«?›? ---
+
+    ' --- 1. xlwings.conf (addin) ---
     myConfPath = ThisWorkbook.Path & "\xlwings.conf"
-    
+
     If FileExists(myConfPath) = True Then
         If GetConfigFromFile(myConfPath, configKey, configValue) Then
             GetConfig = configValue
-            
-            ' Œ?pX (.\) Ã?WbN
+
             If Left(GetConfig, 2) = ".\" Then
                 GetConfig = ThisWorkbook.Path & Mid(GetConfig, 2)
             End If
-            
-            ' st@C›?`FbN (fobOp)
+
             If configKey = "INTERPRETER" Then
                 If FileExists(GetConfig) = False Then
-                    MsgBox "›?t@C≈?wË?≥Í?Ωst@C¬?‹?F" & vbCrLf & GetConfig, vbCritical, "HeaderTool Error"
+                    MsgBox "???t?@?C????w?????C???^?[?v???^?????????????:" & vbCrLf & GetConfig, vbCritical, "HeaderTool Error"
                 End If
             End If
 
@@ -741,39 +807,50 @@ Function GetConfig(configKey As String, Optional default As String = "", Optiona
         End If
     End If
 
-    '  «? 1: UDFT[o[[h›? (exes…?K{)
-    ' ›?t@C≈?wË?™»?Íç?AftHg True (L) …?
+    ' --- 1.5 xlwings.conf (install root fallback) ---
+    myRootConfPath = ParentFolder(ThisWorkbook.Path) & "\xlwings.conf"
+    If FileExists(myRootConfPath) = True Then
+        If GetConfigFromFile(myRootConfPath, configKey, configValue) Then
+            GetConfig = configValue
+
+            If Left(GetConfig, 2) = ".\" Then
+                GetConfig = ParentFolder(ThisWorkbook.Path) & Mid(GetConfig, 2)
+            End If
+
+            If configKey = "INTERPRETER" Then
+                If FileExists(GetConfig) = False Then
+                    MsgBox "???t?@?C????w?????C???^?[?v???^?????????????:" & vbCrLf & GetConfig, vbCritical, "HeaderTool Error"
+                End If
+            End If
+
+            GetConfig = ExpandEnvironmentStrings(GetConfig)
+            Exit Function
+        End If
+    End If
+
+    ' ????: UDF server
     If configKey = "USE UDF SERVER" And default = "" Then
-        'GetConfig = "True"
-        ' fBtHg›? False
         GetConfig = "False"
         Exit Function
     End If
-    
-    '  «? 2: W[›?
-    ' exeÍç?≈?APythont@C(gq»?)wË?µƒ?∆?Ë?∑
+
+    ' ????: UDF modules
     If configKey = "UDF MODULES" And default = "" Then
         GetConfig = "header_converter"
         Exit Function
     End If
 
-
-    ' --- 2. TWbN (INTERPRETER) ---
-    ' ›?t@C»?Íç?AtH_ header_converter.exe ≈?g
+    ' --- 2. ?????s?t?@?C?? (INTERPRETER) ---
     If configKey = "INTERPRETER" And default = "" Then
         myExePath = ThisWorkbook.Path & "\header_converter.exe"
         If FileExists(myExePath) Then
             GetConfig = myExePath
             Exit Function
-        Else
-            ' T≈?¬?»?Íç?
-            ' (exezzO»?Ã?≈ÅA¬?»?Œ?G[o)
-            ' MsgBox "st@C(header_converter.exe)¬?‹?B", vbCritical, "HeaderTool Error"
         End If
     End If
 
-    ' --- 3. WÃ?tH[obNWbN ---
-    
+    ' --- 3. ??????t?H?[???o?b?N ---
+
     ' Sheet
     #If App = "Microsoft Excel" Then
     If source = "" Or source = "sheet" Then
@@ -828,8 +905,8 @@ Function SaveConfigToFile(sFileName As String, sName As String, Optional sValue 
 
   Dim iFileNumA As Long, iFileNumB As Long, lErrLast As Long
   Dim sFile As String, sXFile As String, sVarName As String, sVarValue As String
-      
-    
+
+
   #If Mac Then
     If Not FileOrFolderExistsOnMac(ParentFolder(sFileName)) Then
   #Else
@@ -880,7 +957,8 @@ Function GetConfigFromFile(sFile As String, sName As String, Optional sValue As 
 
   Dim iFileNum As Long, lErrLast As Long
   Dim sVarName As String, sVarValue As String
-
+  Dim sLine As String, sRawValue As String
+  Dim p As Long
 
   ' assume false unless variable is found
   GetConfigFromFile = False
@@ -890,11 +968,41 @@ Function GetConfigFromFile(sFile As String, sName As String, Optional sValue As 
     iFileNum = FreeFile
     Open sFile For Input As iFileNum
       Do While Not EOF(iFileNum)
-        Input #iFileNum, sVarName, sVarValue
-        If LCase(sVarName) = LCase(sName) Then
-          sValue = sVarValue
-          GetConfigFromFile = True
-          Exit Do
+        Line Input #iFileNum, sLine
+        sLine = Trim$(sLine)
+        sVarName = ""
+        sVarValue = ""
+
+        If sLine <> "" Then
+          If Left$(sLine, 1) <> "#" And Left$(sLine, 1) <> ";" Then
+            If Left$(sLine, 1) = Chr$(34) Then
+              p = InStr(2, sLine, Chr$(34) & "," & Chr$(34), vbBinaryCompare)
+              If p > 0 And Right$(sLine, 1) = Chr$(34) Then
+                sVarName = Mid$(sLine, 2, p - 2)
+                sVarValue = Mid$(sLine, p + 3, Len(sLine) - p - 3)
+              End If
+            Else
+              p = InStr(1, sLine, "=", vbBinaryCompare)
+              If p > 0 Then
+                sVarName = Trim$(Left$(sLine, p - 1))
+                sRawValue = Trim$(Mid$(sLine, p + 1))
+                If Len(sRawValue) >= 2 Then
+                  If Left$(sRawValue, 1) = Chr$(34) And Right$(sRawValue, 1) = Chr$(34) Then
+                    sRawValue = Mid$(sRawValue, 2, Len(sRawValue) - 2)
+                  End If
+                End If
+                sVarValue = sRawValue
+              End If
+            End If
+          End If
+        End If
+
+        If sVarName <> "" Then
+          If LCase$(Trim$(sVarName)) = LCase$(Trim$(sName)) Then
+            sValue = sVarValue
+            GetConfigFromFile = True
+            Exit Do
+          End If
         End If
       Loop
     Close #iFileNum
@@ -966,7 +1074,7 @@ Function FileOrFolderExistsOnMac(FileOrFolderstr As String) As Boolean
 'limit is max 32 characters including the extension in 2011.
     Dim ScriptToCheckFileFolder As String
     Dim TestStr As String
-    
+
     #If Mac Then
     If val(Application.VERSION) < 15 Then
         ScriptToCheckFileFolder = "tell application " & Chr(34) & "System Events" & Chr(34) & _
@@ -1004,7 +1112,7 @@ Function KillFileOnMac(Filestr As String)
     'Uses AppleScript to avoid the problem with long file names (on 2011 only)
 
     Dim ScriptToKillFile As String
-    
+
     #If Mac Then
     ScriptToKillFile = "tell application " & Chr(34) & "Finder" & Chr(34) & Chr(13)
     ScriptToKillFile = ScriptToKillFile & "do shell script ""rm "" & quoted form of posix path of " & Chr(34) & Filestr & Chr(34) & Chr(13)
@@ -1056,7 +1164,7 @@ Function ToPosixPath(ByVal MacPath As String) As String
 
     Dim s As String
     Dim LeadingSlash As Boolean
-    
+
     #If Mac Then
     If MacPath = "" Then
         ToPosixPath = ""
@@ -1075,13 +1183,13 @@ Sub ShowError(FileName As String, Optional Message As String = "")
 
     Const OK_BUTTON_ERROR = 16
     Const AUTO_DISMISS = 0
-    
+
     If Message = "" Then
         Content = ReadFile(FileName)
     Else
         Content = Message
     End If
-    
+
 
     If GetConfig("SHOW_ERROR_POPUPS", "True") = "False" Then
         If SheetExists(ThisWorkbook, "Error") = False Then
@@ -1097,7 +1205,7 @@ Sub ShowError(FileName As String, Optional Message As String = "")
         #Else
             Content = Content & vbCrLf
             Content = Content & "Press Ctrl+C to copy this message to the clipboard."
-    
+
             WScript.Popup Content, AUTO_DISMISS, "Error", OK_BUTTON_ERROR
         #End If
     End If
@@ -1233,12 +1341,12 @@ Function GetFullName(Wb As Workbook) As String
     ' this doesn't work. This function will attempt to find the LOCAL path.
     ' This uses code from Daniel Guetta and
     ' https://stackoverflow.com/questions/33734706/excels-fullname-property-with-onedrive
-    
+
     If InStr(Wb.FullName, "://") = 0 Or Wb.Path = "" Then
         GetFullName = Wb.FullName
         Exit Function
     End If
-        
+
     ' According to the link above, there are three possible environment variables
     ' the user's OneDrive folder could be located in
     '      "OneDriveCommercial", "OneDriveConsumer", "OneDrive"
@@ -1258,7 +1366,7 @@ Function GetFullName(Wb As Workbook) As String
     ' covered above, then this function will identify File B's location as the location of this workbook,
     ' which would be wrong
     total_found = 0
-    
+
     For i_parsing = 1 To 2
         If i_parsing = 1 Then
             ' Parse using method 1 above; find /Documents and take everything after, INCLUDING the
@@ -1272,29 +1380,29 @@ Function GetFullName(Wb As Workbook) As String
             ' Parse using method 2; find everything after the fourth slash, including that fourth
             ' slash
             Dim i_pos As Integer
-            
+
             ' Start at the last slash in https://
             i_pos = 8
 
             For slash_number = 1 To 2
                 i_pos = InStr(i_pos + 1, Wb.FullName, "/")
             Next slash_number
-            
+
             full_path_name = Mid(Wb.FullName, i_pos)
         End If
-        
+
         ' Replace forward slahes with backslashes on Windows
         full_path_name = Replace(full_path_name, "/", Application.pathSeparator)
-        
-        
+
+
         If full_path_name <> "" Then
             #If Not Mac Then
             For i_env_var = 1 To 3
                     one_drive_path = Environ(Choose(i_env_var, "OneDriveCommercial", "OneDriveConsumer", "OneDrive"))
-                
+
                     If (one_drive_path <> "") And FileExists(one_drive_path & full_path_name) Then
                         this_found_path = one_drive_path & full_path_name
-                        
+
                         If this_found_path <> found_path Then
                             total_found = total_found + 1
                             found_path = this_found_path
@@ -1304,7 +1412,7 @@ Function GetFullName(Wb As Workbook) As String
             #End If
         End If
     Next i_parsing
-        
+
     If total_found = 1 Then
         GetFullName = found_path
         Exit Function

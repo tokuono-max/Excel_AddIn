@@ -7,10 +7,10 @@
   "_separator": "-------------------",
   "MAIN": {},
   "MESSAGES": {
-    "PHASE_SCAN": "各行を精密走査中...",
-    "PHASE_DELETE": "空白行を物理抹消中 ({count} 行)...",
-    "STATUS_DONE": "空白行の物理抹消完了\n抹消: {count:,} 行\n位置(行): {positions}",
-    "STATUS_NONE": "空白行は物理的に検出されませんでした。",
+    "PHASE_SCAN": "各行を走査中...",
+    "PHASE_DELETE": "空白行を抹消中 ({count} 行)...",
+    "STATUS_DONE": "空白行の抹消完了\n抹消: {count:,} 行\n位置(行): {positions}",
+    "STATUS_NONE": "空白行は検出されませんでした。",
     "ERROR_PREFIX": "ERROR: 行抹消失敗",
     "PROGRESS_CUSTOM_SCAN": "走査中",
     "PROGRESS_CUSTOM_DELETE": "書込中"
@@ -40,7 +40,7 @@
       "LIST_MIN_HEIGHT": 150,
       "LIST_TOOLTIP": "削除対象となる空欄行の行番号一覧です。",
       "BTN_DELETE": "削除",
-      "BTN_DELETE_TOOLTIP": "一覧の行をまとめて物理削除します（Undo 可能な場合は元に戻せます）。",
+      "BTN_DELETE_TOOLTIP": "一覧の行をまとめて削除します（Undo 可能な場合は元に戻せます）。",
       "BTN_CANCEL": "キャンセル",
       "BTN_CANCEL_TOOLTIP": "削除せずに終了します。",
       "BTN_OK_NONE": "OK",

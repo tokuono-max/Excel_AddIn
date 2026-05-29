@@ -24,7 +24,13 @@
 - 更新は**初回インストールモードを継承**する。
 - 更新処理中にモード変更はしない。
 - モード変更が必要な場合は**再インストール**で対応する。
-- Program Files 配下は、更新適用時に管理者権限（UAC）を使う現行方針を維持する。
+- モード識別は **Uninstall キー（`{AppId}_is1`）配下の独自値 `InstallScope`** を参照する（新規キーは増やさない）。
+- `InstallScope` の **書き込みは通常側のみ**（`Software\Microsoft\Windows\CurrentVersion\Uninstall\{AppId}_is1`）。**`Software\WOW6432Node\...` には書かない**。参照側 `core/packaged_update.py` の `_resolve_install_scope` は通常側を優先で読むため、通常側だけで必要十分。
+- 書き込みタイミングはインストーラ `[Code]` の `ssPostInstall` 後（`WriteInstallScopeToUninstallKey`）。`[Registry]` セクションでは書かない（Inno の Uninstall キー再生成で値が消えるため）。
+- インストーラ `[Code]` の `ssInstall` で反対モード残骸（`_is1` キー / `HC_*` 環境変数）を `CleanupCrossModeRemnants` が掃除する。Current user 起動時の HKLM 残骸は権限不足のため警告ログのみ。
+- DisplayName はモード別: Current user → `CSV Tool (User)`、All users → `CSV Tool (All User)`。
+- `InstallScope=current` のときは更新時に管理者確認ダイアログ/UAC を出さない。
+- `InstallScope=all` のときは更新時に管理者確認ダイアログを表示し、承認時のみ UAC 経路に進む。
 
 ### 2.2 操作者の操作量
 
@@ -37,6 +43,12 @@
 
 - 優先順は現行維持:  
   `HC_CATALOG_PATH` → `config/catalog_path.txt` → `HC_DEPLOY_ROOT\catalog.json`
+
+### 2.4 起動時チェックの排他
+
+- 起動時に `pending` が存在する場合は、**予約適用フローのみ実行**する。
+- 同一起動内で通常のバージョンチェック（`catalog` 比較）は実行しない。
+- `pending` が defer された場合も、同一起動内では通常チェックを再開しない（次回起動で再評価）。
 
 ---
 
@@ -133,7 +145,7 @@
 
 ### 7.1 受け入れテスト（最小）
 
-標準セットは **standard-6-cases** を採用する:
+標準セットは **uac-strict-7** を採用する:
 
 1. Current user インストールで更新成功
 2. All users インストールで更新成功
@@ -141,6 +153,7 @@
 4. bin 適用失敗時に半自動復旧ダイアログを即時表示
 5. Program Files 配下で UAC 経路を確認
 6. patch 失敗時に full フォールバック
+7. 起動時排他（pending 優先）と defer 時の通常チェック抑止を確認
 
 ---
 

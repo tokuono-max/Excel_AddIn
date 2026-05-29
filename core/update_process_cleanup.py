@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import csv
 import ctypes
+import io
 import os
 import subprocess
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 _SYNCHRONIZE = 0x00100000
@@ -46,6 +49,36 @@ def mutex_snapshot() -> dict[str, bool]:
     }
 
 
+def is_hc_svc_server_process() -> bool:
+    """True when this process is the packaged svc_server executable."""
+    if os.name != "nt":
+        return False
+    return _current_process_image_name_nt() == "hc_svc_server.exe"
+
+
+def mutex_blocks_pending_apply(snap: dict[str, bool], *, relax_svc_self: bool = False) -> bool:
+    """
+    Return True if apply_pending_update must wait or abort for HC mutexes.
+
+    When relax_svc_self is True (ribbon「すぐに更新」from hc_svc_server + defer to hc_updater),
+    the svc mutex held by this process is ignored so preparation / spawn can proceed.
+    """
+    if snap.get("main") or snap.get("main_legacy") or snap.get("ui"):
+        return True
+    if snap.get("svc") and not relax_svc_self:
+        return True
+    return False
+
+
+def should_relax_svc_mutex_for_interactive_defer(pending: dict[str, Any]) -> bool:
+    """Interactive single-confirm bin apply from svc_server: defer via hc_updater, not inline bin."""
+    if not bool(pending.get("skip_apply_confirm")):
+        return False
+    if os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN") == "1":
+        return False
+    return is_hc_svc_server_process()
+
+
 def wait_mutex_clear(timeout_sec: int, poll_sec: float = 0.5) -> tuple[bool, dict[str, bool]]:
     t0 = time.time()
     last = mutex_snapshot()
@@ -70,6 +103,52 @@ def request_packaged_shutdown_flags() -> None:
         _write_svc_shutdown_flag()
     except Exception:
         pass
+
+
+def taskkill_other_hc_updater_processes(log_append: Callable[[str], None]) -> None:
+    """End other ``hc_updater.exe`` processes (not the current PID). Needed when the worker
+    runs ``hc_updater.py`` via Python while a stale ``hc_updater.exe`` still holds the binary."""
+    if os.name != "nt":
+        return
+    cf = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    my_pid = os.getpid()
+    try:
+        cp = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq hc_updater.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=cf,
+        )
+    except OSError as e:
+        log_append(f"pre_apply_kill: hc_updater_tasklist err={e!s}")
+        return
+    pids: list[int] = []
+    for row in csv.reader(io.StringIO(cp.stdout or "")):
+        if len(row) < 2:
+            continue
+        name = row[0].strip().strip('"').lower()
+        if name != "hc_updater.exe":
+            continue
+        try:
+            pids.append(int(row[1].strip('"')))
+        except ValueError:
+            continue
+    killed_any = False
+    for pid in pids:
+        if pid == my_pid:
+            continue
+        log_append(f"pre_apply_kill: taskkill /F /PID {pid} (hc_updater.exe)")
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=cf,
+        )
+        killed_any = True
+    if killed_any:
+        time.sleep(0.5)
 
 
 def probe_tasklist_line() -> str:
@@ -98,6 +177,7 @@ def probe_tasklist_line() -> str:
 
 
 def _cfg_skip_kill(cfg: dict[str, Any]) -> bool:
+    # Emergency opt-out: skips all taskkill in ensure_packaged_children_stopped (may leave file locks).
     v = cfg.get("BOOTSTRAP_SKIP_PROCESS_KILL", 0)
     if isinstance(v, bool):
         return v
@@ -118,11 +198,29 @@ def _cfg_mutex_wait(cfg: dict[str, Any]) -> int:
         return 20
 
 
+def _current_process_image_name_nt() -> str:
+    """Lowercase basename of this process executable (GetModuleFileNameW)."""
+    if os.name != "nt":
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetModuleFileNameW(None, buf, len(buf))  # type: ignore[attr-defined]
+        if not n:
+            return ""
+        return Path(buf.value).name.lower()
+    except Exception:
+        return ""
+
+
 def _taskkill_hc_children(log_append: Callable[[str], None]) -> None:
     if os.name != "nt":
         return
     cf = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    self_im = _current_process_image_name_nt()
     for im in _HC_TASKKILL_ORDER:
+        if self_im and im.lower() == self_im:
+            log_append(f"pre_apply_kill: skip_taskkill self pid={os.getpid()} image={im}")
+            continue
         log_append(f"pre_apply_kill: taskkill /F /T /IM {im}")
         cp = subprocess.run(
             ["taskkill", "/F", "/T", "/IM", im],

@@ -1,0 +1,26 @@
+{
+  "include": [
+    "svc",
+    "core",
+    "ui_qt",
+    "tests",
+    "bootstrap",
+    "hc_updater.py"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.git",
+    "VBA",
+    "tools/nuitka",
+    "dist",
+    "build"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportMissingModuleSource": false,
+  "reportOptionalCall": "error",
+  "reportOptionalMemberAccess": "error",
+  "reportPrivateUsage": "none",
+  "reportMissingTypeStubs": false
+}
