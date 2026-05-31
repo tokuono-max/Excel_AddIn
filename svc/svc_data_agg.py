@@ -3561,6 +3561,19 @@ def run_data_agg(
         logger.warning("[DATA_AGG] 設定読込スキップ: %s", e)
 
     action = (payload or {}).get("action", "main")
+    if action == "batch_write":
+        logger.info("[DATA_AGG] 一括 Excel 書込み 開始 spill=%s", (payload or {}).get("spill_dir"))
+        try:
+            _agg_diag.info(
+                "[DATA_AGG_DIAG] batch_write dispatch hwnd=%s sheet_id=%s spill=%s",
+                hwnd,
+                sheet_id,
+                (payload or {}).get("spill_dir"),
+            )
+        except Exception:
+            pass
+        _run_batch_write(hwnd, sheet_id, payload or {})
+        return
     if action == "batch_run":
         sp = (payload or {}).get("scenario_path")
         logger.info("[DATA_AGG] 一括実行 開始 シナリオ=%s", sp)
@@ -4476,6 +4489,462 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     _activate_output_sheet()
     _prog_done()
     _finish(msg, ok=True, elapsed_ms=dt_total_ms)
+
+
+def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None:
+    """
+    一括実行の Excel 書込みフェーズ（svc_server のみ COM）。compute ワーカーが spill した表を読む。
+    """
+    from svc.data_agg_batch_spill import cleanup_batch_spill, read_batch_spill  # noqa: WPS433
+    from svc import svc_data_agg_scenario as scenario_mod  # noqa: WPS433
+    from svc import svc_data_agg_write as write_mod  # noqa: WPS433
+
+    notify_parent = bool(payload.get("notify_parent_dialog", False))
+    batch_run_id = str(payload.get("batch_run_id") or "").strip()
+    spill_dir_s = str(payload.get("spill_dir") or "").strip()
+    prog_path_s = str(payload.get("prog_path") or "").strip()
+    cancel_path_s = str(payload.get("cancel_request_path") or "").strip()
+
+    ipc_root_opt: Path | None = None
+    try:
+        ipc_root_opt = _require_ipc_root()
+    except Exception:
+        ipc_root_opt = None
+
+    def _dlog(msg: str, *args: Any) -> None:
+        try:
+            _agg_diag.info("[DATA_AGG_DIAG] batch_write " + msg, *args)
+        except Exception:
+            pass
+
+    def _finish_write(
+        msg: str,
+        *,
+        ok: bool,
+        title: str = "データ集約",
+        elapsed_ms: int | None = None,
+        spill_path: Path | None = None,
+    ) -> None:
+        if elapsed_ms is not None:
+            try:
+                from svc import svc_data_agg_write as _w_time  # noqa: WPS433
+
+                msg = "%s\n処理時間: %s" % (
+                    msg,
+                    _w_time.format_elapsed_ms_ja(int(elapsed_ms)),
+                )
+            except Exception:
+                pass
+        if spill_path is not None:
+            try:
+                cleanup_batch_spill(spill_path)
+            except Exception:
+                pass
+        try:
+            if ipc_root_opt is not None and batch_run_id:
+                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
+        except Exception:
+            pass
+        _batch_done_notify(
+            parent_hwnd, sheet_id, title, msg, ok=ok, use_parent_dialog=notify_parent
+        )
+
+    if not spill_dir_s:
+        _dlog("abort reason=no_spill_dir")
+        _finish_write("一括書込みデータがありません。", ok=False)
+        return
+
+    spill_dir = Path(spill_dir_s)
+    try:
+        headers, table_rows, meta = read_batch_spill(spill_dir)
+    except Exception as e:
+        logger.warning("[DATA_AGG] batch spill read failed: %s", e)
+        _finish_write("一括書込みデータの読込に失敗しました。", ok=False, spill_path=spill_dir)
+        return
+
+    # 中止 spill（meta.abort）の batch_write はイベントログ追記が目的。
+    # UI キャンセルが先に tombstone を書いてもスキップしない（レポート未記載デグレ防止）。
+    if ipc_root_opt is not None and batch_run_id and not bool(meta.get("abort")):
+        try:
+            from svc.data_agg_cancel import batch_cancel_tombstone_blocks  # noqa: WPS433
+
+            if batch_cancel_tombstone_blocks(sheet_id, ipc_root_opt, batch_run_id):
+                _dlog("stale_skip run_id=%s reason=cancel_tombstone", batch_run_id)
+                cleanup_batch_spill(spill_dir)
+                return
+        except Exception:
+            pass
+
+    batch_start_ts_ms = int(meta.get("batch_start_ts_ms") or 0)
+    t_write_local = time.perf_counter()
+
+    def _wall_total_ms() -> int:
+        if batch_start_ts_ms > 0:
+            return max(0, int(time.time() * 1000) - batch_start_ts_ms)
+        return int((time.perf_counter() - t_write_local) * 1000)
+
+    scenario_id = str(meta.get("scenario_id") or "")
+    scenario_path_log = str(meta.get("scenario_path_log") or "")
+    files_n = int(meta.get("files_n") or 0)
+    join_events_total = int(meta.get("join_events_total") or 0)
+    dt_compute_ms = meta.get("compute_ms")
+    dt_compute_ms_i = int(dt_compute_ms) if dt_compute_ms is not None else None
+    event_log_rows = meta.get("event_log_rows")
+    if not isinstance(event_log_rows, list):
+        event_log_rows = []
+    excel_write_summary = str(meta.get("excel_write_summary") or "")
+
+    from core.core_xlc import get_excel_context_from_hwnd  # noqa: E402
+
+    ctx = get_excel_context_from_hwnd(parent_hwnd, sheet_id)
+    _book: Any = None
+
+    def _append_batch_event(
+        *,
+        scenario_id_arg: str,
+        ok: bool,
+        files_n: int = 0,
+        output_rows: int = 0,
+        append_n: int = 0,
+        update_n: int = 0,
+        join_ev: int = 0,
+        compute_ms: int | None = None,
+        write_ms: int | None = None,
+        total_ms: int | None = None,
+        error: str | None = None,
+        extra_rows: list[list[Any]] | None = None,
+        excel_write_summary: str = "",
+        output_sheet_name: str = "",
+    ) -> None:
+        if _book is None:
+            return
+        row = write_mod.format_batch_run_summary_row(
+            scenario_id_arg,
+            scenario_path_log,
+            ok=ok,
+            files=files_n,
+            output_rows=output_rows,
+            append=append_n,
+            update=update_n,
+            join_events=join_ev,
+            compute_ms=compute_ms,
+            write_ms=write_ms,
+            total_ms=total_ms,
+            error=error,
+            excel_write_summary=excel_write_summary,
+            output_sheet_name=output_sheet_name,
+        )
+        write_mod.append_event_log_rows(_book, [row] + list(extra_rows or []))
+
+    def _prog_write(**kw: Any) -> None:
+        if not prog_path_s or write_pickle is None:
+            return
+        try:
+            from ui_qt.ipc_file import read_pickle  # noqa: WPS433
+
+            cur: dict[str, Any] = {}
+            try:
+                raw = read_pickle(Path(prog_path_s))
+                if isinstance(raw, dict):
+                    cur = raw
+            except Exception:
+                pass
+            seq = int(cur.get("seq") or 0) + 1
+            d = dict(cur)
+            d.update(
+                {
+                    "status": str(kw.get("status", cur.get("status", "RUN"))),
+                    "seq": seq,
+                    "pct": int(kw.get("pct", cur.get("pct", 93) or 93)),
+                    "phase": str(kw.get("phase", cur.get("phase", ""))),
+                    "phase_i": int(kw.get("phase_i", cur.get("phase_i", 4) or 4)),
+                    "phase_total": 4,
+                    "msg": str(kw.get("phase", cur.get("msg", ""))),
+                    "show_done_dialog": False,
+                }
+            )
+            write_pickle(Path(prog_path_s), d)
+        except Exception:
+            pass
+
+    def _prog_done() -> None:
+        _prog_write(status="DONE", pct=100, phase="完了", phase_i=4)
+
+    def _prog_cancel() -> None:
+        _prog_write(status="CANCEL", pct=95, phase="中止", phase_i=4)
+
+    if bool(meta.get("abort")):
+        if not ctx:
+            _dlog("abort spill no_excel_context")
+            _prog_cancel()
+            _finish_write(
+                str(meta.get("user_msg") or "一括実行を中止しました。"),
+                ok=False,
+                spill_path=spill_dir,
+            )
+            return
+        _app, _book, sheet, _hwnd = ctx
+        _tms = _wall_total_ms()
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=files_n,
+            compute_ms=dt_compute_ms_i,
+            total_ms=_tms,
+            error=str(meta.get("error") or "cancelled"),
+            extra_rows=event_log_rows,
+            excel_write_summary=excel_write_summary or _excel_options_log_summary(meta.get("excel_opts")),
+        )
+        try:
+            sheet.activate()
+        except Exception:
+            pass
+        _prog_cancel()
+        _finish_write(
+            str(meta.get("user_msg") or "一括実行を中止しました。"),
+            ok=False,
+            elapsed_ms=_tms,
+            spill_path=spill_dir,
+        )
+        return
+
+    if not ctx:
+        _dlog("abort reason=no_excel_context")
+        _finish_write(
+            "Excel に接続できません。アクティブシートへ出力するため、Excel を起動してください。",
+            ok=False,
+            spill_path=spill_dir,
+        )
+        return
+    _app, _book, sheet, _hwnd = ctx
+    sheet_out: Any = sheet
+
+    def _activate_output_sheet() -> None:
+        try:
+            sheet_out.activate()
+        except Exception:
+            pass
+
+    excel_opts_raw = meta.get("excel_opts")
+    excel_opts = (
+        scenario_mod.normalize_excel_options(excel_opts_raw)
+        if isinstance(excel_opts_raw, dict)
+        else scenario_mod.normalize_excel_options({})
+    )
+    column_modes_raw = meta.get("column_modes")
+    column_modes: list[str] = (
+        [str(x) for x in column_modes_raw] if isinstance(column_modes_raw, list) else []
+    )
+    match_cols_raw = meta.get("match_cols")
+    match_cols: list[str] = (
+        [str(x) for x in match_cols_raw] if isinstance(match_cols_raw, list) else []
+    )
+    items_n = int(meta.get("items_n") or len(column_modes) or 0)
+
+    def _abort_before_excel_write(*, err_code: str, user_msg: str, detail_err: str) -> None:
+        _tms = _wall_total_ms()
+        logger.error("[DATA_AGG] %s: %s", err_code, detail_err)
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=files_n,
+            output_rows=len(table_rows),
+            join_ev=join_events_total,
+            compute_ms=dt_compute_ms_i,
+            total_ms=_tms,
+            error="%s: %s" % (err_code, detail_err),
+            extra_rows=event_log_rows,
+            excel_write_summary=_excel_options_log_summary(excel_opts),
+            output_sheet_name=_sheet_name_for_event_log(sheet_out),
+        )
+        _prog_done()
+        _activate_output_sheet()
+        _finish_write(user_msg, ok=False, elapsed_ms=_tms, spill_path=spill_dir)
+
+    batch_sheet_pending_delete: list[Any] = []
+    new_sheet_created = False
+    if excel_opts.get("output_target") == "new_sheet":
+        try:
+            sheet_out = write_mod.add_data_agg_output_sheet(
+                _book,
+                str(excel_opts.get("new_sheet_name_rule") or "scenario_name_seq"),
+                scenario_id,
+                custom_sheet_name=str(excel_opts.get("new_sheet_custom_name") or ""),
+            )
+            new_sheet_created = True
+            batch_sheet_pending_delete[:] = [sheet_out]
+        except Exception as e:
+            _abort_before_excel_write(
+                err_code="new_sheet_create_failed",
+                user_msg=(
+                    "新規シートの作成に失敗したため処理を中断しました。"
+                    "シート名規則または同名シートの有無を確認してください。"
+                ),
+                detail_err=str(e),
+            )
+            return
+
+    tr, tc = 1, 1
+    wm_ex = str(excel_opts.get("write_mode") or "append")
+    if wm_ex == "anchor_cell":
+        parsed = write_mod.parse_a1_to_row_col_1based(str(excel_opts.get("anchor_cell") or ""))
+        if parsed:
+            tr, tc = parsed
+        else:
+            _abort_before_excel_write(
+                err_code="anchor_cell_invalid",
+                user_msg=(
+                    "指定セルの形式が不正なため処理を中断しました。"
+                    "A1形式（例: B3）で指定してください。"
+                ),
+                detail_err="anchor_cell=%r" % str(excel_opts.get("anchor_cell") or ""),
+            )
+            return
+
+    jump_reg = bool(excel_opts.get("jump_register_name"))
+    key_indices = [headers.index(c) for c in match_cols if c in headers]
+    write_mode = write_mod.MODE_APPEND
+    write_key_indices = key_indices if key_indices else None
+    if wm_ex == "overwrite":
+        write_mode = write_mod.MODE_OVERWRITE
+    elif wm_ex == "append":
+        write_mode = write_mod.MODE_APPEND
+        write_key_indices = None
+    replace_full_block = wm_ex in ("overwrite", "anchor_cell")
+    if replace_full_block:
+        write_key_indices = None
+        if wm_ex == "anchor_cell":
+            write_mode = write_mod.MODE_OVERWRITE
+
+    if cancel_path_s and ipc_root_opt is not None:
+        try:
+            from svc.data_agg_cancel import cancel_requested  # noqa: WPS433
+
+            if cancel_requested(Path(cancel_path_s)):
+                if batch_sheet_pending_delete:
+                    from svc.data_agg_cancel import delete_output_sheet_if_any  # noqa: WPS433
+
+                    delete_output_sheet_if_any(batch_sheet_pending_delete[0])
+                _tms = _wall_total_ms()
+                _append_batch_event(
+                    scenario_id_arg=scenario_id,
+                    ok=False,
+                    files_n=files_n,
+                    output_rows=len(table_rows),
+                    compute_ms=dt_compute_ms_i,
+                    total_ms=_tms,
+                    error="cancelled",
+                    extra_rows=event_log_rows,
+                    excel_write_summary=_excel_options_log_summary(excel_opts),
+                    output_sheet_name=_sheet_name_for_event_log(sheet_out),
+                )
+                _prog_cancel()
+                _activate_output_sheet()
+                cfg_msgs = (_get_config().get("MESSAGES") or {})
+                msg = str(cfg_msgs.get("STATUS_CANCEL") or "一括実行を中止しました。").strip()
+                _finish_write(msg, ok=False, elapsed_ms=_tms, spill_path=spill_dir)
+                return
+        except Exception:
+            pass
+
+    _prog_write(pct=93, phase="マスターへ書き込み", phase_i=4)
+    t_write = time.perf_counter()
+    try:
+        from core import core_xlc  # noqa: E402
+
+        ex_clear = wm_ex == "clear_write"
+        if ex_clear:
+            tr, tc = 1, 1
+            try:
+                core_xlc.clear_sheet_used_range(sheet_out)
+            except Exception as e:
+                _abort_before_excel_write(
+                    err_code="clear_write_clear_failed",
+                    user_msg=(
+                        "シートのクリアに失敗したため処理を中断しました。"
+                        "シート保護状態や編集権限を確認してください。"
+                    ),
+                    detail_err=str(e),
+                )
+                return
+        force_empty_existing = ex_clear or new_sheet_created
+        append_count, update_count = write_mod.write_master_to_sheet(
+            sheet_out,
+            headers,
+            table_rows,
+            mode=write_mode,
+            match_key_indices=write_key_indices,
+            column_modes=column_modes if len(column_modes) == len(headers) else None,
+            top_left_row=tr,
+            top_left_col=tc,
+            jump_register=jump_reg,
+            jump_name_base="",
+            book_for_jump=_book,
+            existing_headers=[] if force_empty_existing else None,
+            existing_rows=[] if force_empty_existing else None,
+            append_chunk_no_header=(wm_ex == "append"),
+            replace_full_block=replace_full_block,
+        )
+    except Exception as e:
+        logger.exception("[DATA_AGG] write_master_to_sheet failed: %s", e)
+        dt_write_ms = int((time.perf_counter() - t_write) * 1000)
+        _tms = _wall_total_ms()
+        _append_batch_event(
+            scenario_id_arg=scenario_id,
+            ok=False,
+            files_n=files_n,
+            output_rows=len(table_rows),
+            join_ev=join_events_total,
+            compute_ms=dt_compute_ms_i,
+            write_ms=dt_write_ms,
+            total_ms=_tms,
+            error=str(e),
+            extra_rows=event_log_rows,
+            excel_write_summary=_excel_options_log_summary(excel_opts),
+            output_sheet_name=_sheet_name_for_event_log(sheet_out),
+        )
+        _prog_done()
+        _activate_output_sheet()
+        _finish_write(
+            "マスターへの書き込み中にエラーが発生しました: %s" % e,
+            ok=False,
+            elapsed_ms=_tms,
+            spill_path=spill_dir,
+        )
+        return
+
+    dt_write_ms = int((time.perf_counter() - t_write) * 1000)
+    dt_total_ms = _wall_total_ms()
+    cfg = _get_config()
+    msg = (cfg.get("MESSAGES") or {}).get("STATUS_DONE") or "一括実行が完了しました。"
+    try:
+        msg = msg.format(
+            count=items_n,
+            append=append_count,
+            update=update_count,
+            join_errors=join_events_total,
+        )
+    except Exception:
+        pass
+    _append_batch_event(
+        scenario_id_arg=scenario_id,
+        ok=True,
+        files_n=files_n,
+        output_rows=len(table_rows),
+        append_n=append_count,
+        update_n=update_count,
+        join_ev=join_events_total,
+        compute_ms=dt_compute_ms_i,
+        write_ms=dt_write_ms,
+        total_ms=dt_total_ms,
+        extra_rows=event_log_rows,
+        excel_write_summary=_excel_options_log_summary(excel_opts),
+        output_sheet_name=_sheet_name_for_event_log(sheet_out),
+    )
+    batch_sheet_pending_delete.clear()
+    _activate_output_sheet()
+    _prog_done()
+    _finish_write(msg, ok=True, elapsed_ms=dt_total_ms, spill_path=spill_dir)
 
 
 def _run_step(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None:

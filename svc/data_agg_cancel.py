@@ -308,7 +308,8 @@ def _svc_req_is_data_agg_batch_for_sheet(req_path: Path, sheet_id: str) -> bool:
         payload = kwargs.get("payload")
         if not isinstance(payload, dict):
             return False
-        return str(payload.get("action") or "").strip() == "batch_run"
+        act = str(payload.get("action") or "").strip()
+        return act in ("batch_run", "batch_write")
     except Exception:
         return False
 
@@ -659,6 +660,18 @@ def force_data_agg_batch_cancel_from_ui(
             from svc.svc_host import ensure_svc_server  # noqa: WPS433
 
             ensure_svc_server()
+        except Exception:
+            pass
+    elif exited_cooperatively:
+        # 協調キャンセル: batch_write（abort spill）が tombstone/purge で届かない場合の補完。
+        # batch_write が先に追記済みなら _has_recent_cancel_summary で重複しない。
+        try:
+            append_cancel_event_log_from_ui(
+                parent_hwnd=int(parent_hwnd or 0),
+                sheet_id=sid,
+                scenario_id=str(scenario_id or ""),
+                scenario_path=str(scenario_path or ""),
+            )
         except Exception:
             pass
     active_run_id = ""

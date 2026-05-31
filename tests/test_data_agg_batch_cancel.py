@@ -257,8 +257,20 @@ def test_purge_pending_data_agg_batch_svc_requests(tmp_path: Path) -> None:
             },
         },
     )
-    assert purge_pending_data_agg_batch_svc_requests(tmp_path, sid) == 1
+    drop2 = req_dir / "svc_req_batch_write.pkl"
+    write_pickle(
+        drop2,
+        {
+            "action": "data_agg",
+            "kwargs": {
+                "sheet_id": sid,
+                "payload": {"action": "batch_write", "spill_dir": "x"},
+            },
+        },
+    )
+    assert purge_pending_data_agg_batch_svc_requests(tmp_path, sid) == 2
     assert not drop.exists()
+    assert not drop2.exists()
     assert keep.exists()
 
 

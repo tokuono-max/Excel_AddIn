@@ -3518,7 +3518,7 @@ class _DataAggMainWindow(QDialog):
             finally:
                 os.close(fd_snap)
             payload = {
-                "action": action,
+                "action": "batch_compute",
                 "scenario_path": scenario_path_persistent,
                 "scenario_snapshot_path": snapshot_path,
                 "notify_parent_dialog": notify_parent_dialog,
@@ -3542,8 +3542,8 @@ class _DataAggMainWindow(QDialog):
                 "p = json.loads(pp.read_text(encoding='utf-8'))\n"
                 "pp.unlink(missing_ok=True)\n"
                 "sys.path.insert(0, %r)\n"
-                "from core.excel_session import invoke_action\n"
-                "invoke_action('run_data_agg', target_hwnd=%s, sheet_id=%r, payload=p)\n"
+                "from svc.data_agg_batch_compute import run_batch_compute\n"
+                "run_batch_compute(parent_hwnd=%s, sheet_id=%r, payload=p)\n"
             ) % (
                 str(Path(payload_path)),
                 str(proj_root),
