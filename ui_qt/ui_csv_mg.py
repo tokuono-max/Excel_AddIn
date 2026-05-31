@@ -1310,8 +1310,9 @@ class CsvMergeDialog(QDialog):
                 msg = "結合するファイルが選択されていません。"
             msg = _normalize_message_newlines(msg)
             try:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(self, "", msg)
+                from ui_qt.ui_common import show_info_notice
+
+                show_info_notice(self, "", msg)
             except Exception:
                 pass
             return

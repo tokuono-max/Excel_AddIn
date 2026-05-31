@@ -64,6 +64,7 @@ UNINSTALL_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4
 UNINSTALL_WOW_SUBKEY = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
 INSTALL_SCOPE_VALUE_NAME = "InstallScope"
 
+MB_ICONHAND = 0x10
 MB_OK = 0x0
 MB_YESNO = 0x4
 MB_ICONINFORMATION = 0x40
@@ -1076,6 +1077,24 @@ def _show_update_dialog_via_ui_server(
             pass
 
 
+def _play_message_box_notification_sound(style: int) -> None:
+    """Win32 MessageBox フォールバック表示前の通知音（Yes/No 確認は鳴らさない）。"""
+    if int(style) & MB_YESNO:
+        return
+    try:
+        from ui_qt.ui_notification_sound import play_notification_sound
+
+        s = int(style)
+        if s & MB_ICONHAND:
+            play_notification_sound("error")
+        elif s & MB_ICONWARNING:
+            play_notification_sound("info")
+        else:
+            play_notification_sound("info")
+    except Exception:
+        pass
+
+
 def _message_box(
     text: str,
     *,
@@ -1152,6 +1171,7 @@ def _message_box(
             except Exception:
                 pass
         msg_style = int(style) | MB_SETFOREGROUND
+        _play_message_box_notification_sound(int(style))
         return int(ctypes.windll.user32.MessageBoxW(hwnd, text, eff_title, msg_style))
     except Exception:
         logger.warning("packaged_update MessageBox failed; text=%s", text[:200])
@@ -3077,24 +3097,27 @@ def check_for_updates_interactive(
 
 def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet_id: str = "_") -> None:
     global _suppress_startup_bin_prompt_after_pending_defer, _skip_startup_version_check_this_launch
-    _ = owner_hwnd, sheet_id
+    _ = sheet_id
     root = _install_root()
     if root is None or not root.is_dir():
         return
     pending = read_pending(build_paths(root))
     if not pending:
         try:
-            from core.update_housekeeping import sweep_full_prev_to_single_generation
+            from core.update_housekeeping import run_startup_housekeeping
 
-            sweep_full_prev_to_single_generation(
+            run_startup_housekeeping(
                 root,
                 log=lambda m: _append_update_log(root, f"startup_housekeeping: {m}"),
+                keep_gate_hwnd=owner_hwnd,
             )
         except Exception as e:
             _append_update_log(root, f"startup_housekeeping: sweep err={type(e).__name__}: {e}")
-    if pending:
-        _skip_startup_version_check_this_launch = True
-    require_admin = bool((pending or {}).get("require_admin", False))
+        _append_update_log(root, "bootstrap_apply: no_pending skip_apply")
+        return
+
+    _skip_startup_version_check_this_launch = True
+    require_admin = bool(pending.get("require_admin", False))
     _append_update_log(
         root,
         "bootstrap_apply: pending_detected require_admin={ra} elevated_now={el}".format(
@@ -3163,7 +3186,7 @@ def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet
                     root,
                     f"bootstrap_apply applied=false err={err_detail} result={res!r}",
                 )
-                if str((pending or {}).get("apply_scope") or "").strip() != "bootstrap_only":
+                if str(pending.get("apply_scope") or "").strip() != "bootstrap_only":
                     rc_recover = _message_box(
                         _um(
                             "PENDING_APPLY_RECOVERY_CONFIRM_TEMPLATE",

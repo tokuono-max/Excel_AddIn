@@ -4919,9 +4919,9 @@ class DataAggDebugDialog(QDialog):
             body = tpl.format(steps=int(steps))
         except Exception:
             body = tpl
-        QMessageBox.information(
-            self, title, _normalize_message_newlines(body)
-        )
+        from ui_qt.ui_common import show_done_notice
+
+        show_done_notice(self, title, _normalize_message_newlines(body))
 
     def _run_progress_dialog_blocking(self) -> bool:
         pd = getattr(self, "_run_progress_dlg", None)

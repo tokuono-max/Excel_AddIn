@@ -2311,6 +2311,12 @@ class _DupliDoneDialog(QDialog):
     def showEvent(self, event) -> None:
         """表示時に Excel 中央に配置し、Excel ウィンドウを無効化する。"""
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
         if self._parent_hwnd:
             try:
                 from ui_qt.ui_common import center_on_excel, enable_excel_window, excel_rect_tuple_from_req

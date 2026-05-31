@@ -166,6 +166,16 @@ class UpdateCheckDialog(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_sound
+
+            action = str(self._req.get("action") or "").strip().lower()
+            if action == "update_check_warning":
+                play_notification_sound("info")
+            elif action == "update_check_done":
+                play_notification_sound("done")
+        except Exception:
+            pass
         ph = int(self._parent_hwnd or 0)
         if not ph:
             return

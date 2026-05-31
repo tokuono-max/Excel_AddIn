@@ -185,6 +185,12 @@ class _UndoDoneDialog(QDialog):
         """
         super().showEvent(event)
         try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
+        try:
             from ui_qt.ui_common import done_dialog_show_event_on_excel
 
             done_dialog_show_event_on_excel(self, self._parent_hwnd, self._req, self._screen_cfg)
@@ -278,6 +284,7 @@ def create_dialog(
         req_local = dict(req)
         req_local["detail_text"] = merged
         dlg = _UndoDoneDialog(req_local, ph, str(sheet_id or ""), failed_cfg)
+        dlg._hc_notification_sound_kind = "error"
         try:
             prepare_dialog_excel_center_before_show(
                 dlg, ph, excel_rect_tuple_from_req(req_local), failed_cfg.get("WINDOW") or {}

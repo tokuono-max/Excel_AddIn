@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 _CANCEL_POLL_INTERVAL_SEC = 0.05
+_COOP_WAIT_INITIAL_MS = 400
+_COOP_WAIT_EXTENDED_MS = 3000
 _active_cancel: contextvars.ContextVar[Callable[..., None] | None] = contextvars.ContextVar(
     "data_agg_batch_cancel_check", default=None
 )
@@ -104,8 +106,73 @@ def poll_active_cancel_every(index: int, *, stride: int = 16, force: bool = Fals
     poll_active_cancel(force=force)
 
 
-def log_cancel_detected(*, sheet_id: str, phase: str, files_n: int = 0) -> None:
+def batch_coop_cancel_detected_path(sheet_id: str, ipc_root: Path) -> Path:
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    sid = str(sheet_id or "").strip() or "default"
+    return d / ("data_agg_batch_coop_cancel_%s.pkl" % sid)
+
+
+def write_batch_coop_cancel_detected(
+    sheet_id: str,
+    ipc_root: Path,
+    *,
+    phase: str = "",
+    files_n: int = 0,
+) -> None:
+    """UI 側が協調キャンセル完了を待てるよう、ワーカー検知時刻を IPC に記録する。"""
+    try:
+        from ui_qt.ipc_file import write_pickle  # noqa: WPS433
+
+        write_pickle(
+            batch_coop_cancel_detected_path(sheet_id, ipc_root),
+            {
+                "sheet_id": str(sheet_id or "").strip(),
+                "phase": str(phase or "").strip(),
+                "files_n": int(files_n or 0),
+                "ts_ms": int(time.time() * 1000),
+            },
+        )
+    except Exception:
+        pass
+
+
+def clear_batch_coop_cancel_detected(sheet_id: str, ipc_root: Path) -> None:
+    try:
+        batch_coop_cancel_detected_path(sheet_id, ipc_root).unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            p = batch_coop_cancel_detected_path(sheet_id, ipc_root)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def coop_cancel_detected(sheet_id: str, ipc_root: Path) -> bool:
+    try:
+        return batch_coop_cancel_detected_path(sheet_id, ipc_root).is_file()
+    except Exception:
+        return False
+
+
+def log_cancel_detected(
+    *,
+    sheet_id: str,
+    phase: str,
+    files_n: int = 0,
+    ipc_root: Path | None = None,
+) -> None:
     """ワーカーが中止フラグを検知したとき（hc_csv.log / hc_csv_diag.log）。"""
+    if ipc_root is not None:
+        write_batch_coop_cancel_detected(
+            sheet_id,
+            ipc_root,
+            phase=phase,
+            files_n=files_n,
+        )
     try:
         from core.core_log import get_data_agg_diag_logger, get_logger  # noqa: WPS433
 
@@ -298,6 +365,7 @@ def clear_batch_worker_pid(sheet_id: str, ipc_root: Path) -> None:
             pass
     except Exception:
         pass
+    clear_batch_coop_cancel_detected(sheet_id, ipc_root)
 
 
 def sheet_id_from_cancel_path(cancel_path: Path | str) -> str:
@@ -369,6 +437,35 @@ def wait_batch_worker_exit(sheet_id: str, ipc_root: Path, *, timeout_ms: int) ->
             return True
         if (time.monotonic() - t0) * 1000 >= to_ms:
             return False
+        time.sleep(0.05)
+
+
+def wait_batch_worker_exit_adaptive(
+    sheet_id: str,
+    ipc_root: Path,
+    *,
+    initial_ms: int = _COOP_WAIT_INITIAL_MS,
+    extended_ms: int = _COOP_WAIT_EXTENDED_MS,
+) -> tuple[bool, bool]:
+    """
+    ワーカー PID 消失を待つ。協調キャンセル検知マーカーがあれば extended_ms まで延長する。
+
+    Returns:
+        (exited, coop_detected_during_wait)
+    """
+    init_ms = max(0, int(initial_ms))
+    ext_ms = max(init_ms, int(extended_ms))
+    t0 = time.monotonic()
+    coop_seen = False
+    while True:
+        if read_batch_worker_pid(sheet_id, ipc_root) is None:
+            return True, coop_seen
+        if coop_cancel_detected(sheet_id, ipc_root):
+            coop_seen = True
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        limit_ms = ext_ms if coop_seen else init_ms
+        if elapsed_ms >= limit_ms:
+            return False, coop_seen
         time.sleep(0.05)
 
 
@@ -497,10 +594,12 @@ def force_data_agg_batch_cancel_from_ui(
     parent_hwnd: int = 0,
     scenario_id: str = "",
     scenario_path: str = "",
-    cooperative_wait_ms: int = 900,
+    cooperative_wait_ms: int = _COOP_WAIT_INITIAL_MS,
+    cooperative_wait_extended_ms: int = _COOP_WAIT_EXTENDED_MS,
 ) -> bool:
     """
     進捗のキャンセル押下: 協調フラグに加え compute ワーカーを強制終了する。
+    ワーカーが協調キャンセルを検知した場合は extended まで自然終了を待ち、kill を避ける。
     openpyxl 等の長時間ブロック中でも UI から即座に止める。
     """
     sid = sheet_id_from_cancel_path(cancel_path)
@@ -520,17 +619,32 @@ def force_data_agg_batch_cancel_from_ui(
             pass
         if root is None:
             root = Path(cancel_path).parent.parent
-    exited_cooperatively = wait_batch_worker_exit(
-        sid, root, timeout_ms=int(cooperative_wait_ms or 0)
-    )
-    terminated = False
-    if not exited_cooperatively:
-        terminated = terminate_batch_worker(sid, root)
     if progress_path:
         try:
             write_progress_cancel_status(Path(progress_path))
         except Exception:
             pass
+    try:
+        from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
+
+        restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
+    except Exception:
+        pass
+    exited_cooperatively, coop_detected = wait_batch_worker_exit_adaptive(
+        sid,
+        root,
+        initial_ms=int(cooperative_wait_ms or _COOP_WAIT_INITIAL_MS),
+        extended_ms=int(cooperative_wait_extended_ms or _COOP_WAIT_EXTENDED_MS),
+    )
+    terminated = False
+    if not exited_cooperatively:
+        try:
+            from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
+
+            restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
+        except Exception:
+            pass
+        terminated = terminate_batch_worker(sid, root)
     if terminated:
         try:
             append_cancel_event_log_from_ui(
@@ -539,6 +653,12 @@ def force_data_agg_batch_cancel_from_ui(
                 scenario_id=str(scenario_id or ""),
                 scenario_path=str(scenario_path or ""),
             )
+        except Exception:
+            pass
+        try:
+            from svc.svc_host import ensure_svc_server  # noqa: WPS433
+
+            ensure_svc_server()
         except Exception:
             pass
     active_run_id = ""
@@ -570,16 +690,26 @@ def force_data_agg_batch_cancel_from_ui(
             write_batch_done_notify(sid, "データ集約", msg, ok=False)
         except Exception:
             pass
+    clear_batch_coop_cancel_detected(sid, root)
+    try:
+        from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
+
+        restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
+    except Exception:
+        pass
     try:
         from core.core_log import get_logger  # noqa: WPS433
 
         get_logger(__name__).info(
             "[DATA_AGG] batch force terminate from UI sheet_id=%s terminated=%s "
-            "cooperative_done=%s wait_ms=%s progress=%s purged_svc_req=%s run_id=%s",
+            "cooperative_done=%s coop_detected=%s wait_ms=%s wait_ext_ms=%s "
+            "progress=%s purged_svc_req=%s run_id=%s",
             sid,
             terminated,
             exited_cooperatively,
-            int(cooperative_wait_ms or 0),
+            coop_detected,
+            int(cooperative_wait_ms or _COOP_WAIT_INITIAL_MS),
+            int(cooperative_wait_extended_ms or _COOP_WAIT_EXTENDED_MS),
             bool(progress_path),
             purged,
             active_run_id or "-",

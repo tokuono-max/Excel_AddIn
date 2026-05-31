@@ -3977,7 +3977,12 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         extra_rows: list[list[Any]] | None = None,
         compute_ms: int | None = None,
     ) -> None:
-        log_cancel_detected(sheet_id=sheet_id, phase=phase, files_n=files_n)
+        log_cancel_detected(
+            sheet_id=sheet_id,
+            phase=phase,
+            files_n=files_n,
+            ipc_root=ipc_root,
+        )
         _dlog(
             "cancel detected phase=%s files_n=%s compute_ms=%s",
             phase,

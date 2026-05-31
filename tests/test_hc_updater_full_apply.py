@@ -38,6 +38,23 @@ def test_copy_merge_tree_updates_without_removing_dst_root(tmp_path: Path) -> No
     assert (dst / "new_file.dll").read_text(encoding="utf-8") == "dll"
 
 
+def test_copy_merge_tree_proactive_sidecar_for_runtime_dll(tmp_path: Path) -> None:
+    dst = tmp_path / "app" / "bin"
+    dst.mkdir(parents=True)
+    exe = dst / "python.exe"
+    exe.write_bytes(b"MZ")
+    (dst / "libcrypto-3.dll").write_bytes(b"old")
+
+    src = tmp_path / "src_bin"
+    src.mkdir()
+    (src / "libcrypto-3.dll").write_bytes(b"new")
+
+    log = tmp_path / "hc_update.log"
+    with patch.object(sys, "executable", str(exe)):
+        _copy_merge_tree(src, dst, log)
+    assert (dst / "libcrypto-3.dll").read_bytes() == b"new"
+
+
 def test_apply_delete_list_removes_paths_under_install_root(tmp_path: Path) -> None:
     install = tmp_path / "inst"
     obsolete = install / "app" / "bin" / "obsolete.dll"

@@ -2331,6 +2331,38 @@ def create_progress_dialog(
     return _impl(req_dict, int(parent_hwnd or 0), parent_widget, progress_cfg)
 
 
+def show_info_notice(parent: QWidget | None, title: str, text: str) -> int:
+    """お知らせ通知（Information）。"""
+    from ui_qt.ui_notification_sound import play_notification_sound
+
+    play_notification_sound("info")
+    return QMessageBox.information(parent, title, text)
+
+
+def show_done_notice(parent: QWidget | None, title: str, text: str) -> int:
+    """終了通知（完了・Information 表示）。"""
+    from ui_qt.ui_notification_sound import play_notification_sound
+
+    play_notification_sound("done")
+    return QMessageBox.information(parent, title, text)
+
+
+def show_warning_notice(parent: QWidget | None, title: str, text: str) -> int:
+    """お知らせ通知（Warning アイコン・お知らせ音）。"""
+    from ui_qt.ui_notification_sound import play_notification_sound
+
+    play_notification_sound("info")
+    return QMessageBox.warning(parent, title, text)
+
+
+def show_error_notice(parent: QWidget | None, title: str, text: str) -> int:
+    """エラー通知。"""
+    from ui_qt.ui_notification_sound import play_notification_sound
+
+    play_notification_sound("error")
+    return QMessageBox.critical(parent, title, text)
+
+
 # 恒久的なインポート診断（ベストエフォート）
 try:
     ipc_file.log_module_loaded(__name__, str(Path(__file__).resolve()), __version__)

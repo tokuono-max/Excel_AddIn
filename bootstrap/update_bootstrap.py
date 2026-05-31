@@ -23,6 +23,12 @@ from core.update_process_cleanup import (
     should_relax_svc_mutex_for_interactive_defer,
 )
 from core.update_state import build_paths, clear_pending, load_runtime_config, read_pending, write_pending
+from core.win_running_file_replace import (
+    collect_self_sidecar_dst_paths,
+    copy_file_with_sharing_fallback,
+    process_bin_dir,
+    replace_via_sidecar,
+)
 
 # 起動シーケンスで apply が二重に掛からないようにする
 _APPLY_SINGLE_FLIGHT = threading.Lock()
@@ -481,40 +487,42 @@ def _copy_tree_progress(
 ) -> None:
     files = [p for p in src_root.rglob("*") if p.is_file()]
     total = max(len(files), 1)
+    proactive: set[Path] = set()
+    try:
+        pbin = process_bin_dir()
+        if pbin is not None and dst_root.resolve() == pbin.resolve():
+            proactive = collect_self_sidecar_dst_paths()
+    except OSError:
+        proactive = set()
+
+    def _log(msg: str) -> None:
+        _append(log_path, msg)
+
     for idx, fp in enumerate(files, start=1):
         rel = fp.relative_to(src_root)
         dst = dst_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(3):
-            try:
-                shutil.copy2(fp, dst)
-                break
-            except OSError as e:
-                wno = int(getattr(e, "winerror", 0) or 0)
-                if wno == 32 and attempt < 2:
-                    _append(
-                        log_path,
-                        "copy_tree: retry_sharing_violation attempt={a}/3 rel={rel} src={src} dst={dst}".format(
-                            a=attempt + 1,
-                            rel=rel.as_posix(),
-                            src=fp,
-                            dst=dst,
-                        ),
-                    )
-                    time.sleep(1.0 if attempt == 0 else 2.0)
-                    continue
-                _append(
-                    log_path,
-                    "copy_tree: copy_failed rel={rel} src={src} dst={dst} errno={eno} winerror={wno} err={msg}".format(
-                        rel=rel.as_posix(),
-                        src=fp,
-                        dst=dst,
-                        eno=getattr(e, "errno", None),
-                        wno=getattr(e, "winerror", None),
-                        msg=e,
-                    ),
-                )
-                raise
+        try:
+            copy_file_with_sharing_fallback(
+                fp,
+                dst,
+                proactive_sidecar=proactive,
+                log=_log,
+                rel_label=rel.as_posix(),
+            )
+        except OSError as e:
+            _append(
+                log_path,
+                "copy_tree: copy_failed rel={rel} src={src} dst={dst} errno={eno} winerror={wno} err={msg}".format(
+                    rel=rel.as_posix(),
+                    src=fp,
+                    dst=dst,
+                    eno=getattr(e, "errno", None),
+                    wno=getattr(e, "winerror", None),
+                    msg=e,
+                ),
+            )
+            raise
         pct = p0 + (p1 - p0) * (idx / total)
         ui.set(title, progress_msg, pct)
         if ui.cancelled:
@@ -700,8 +708,42 @@ def _try_apply_bootstrap_swap(install_root: Path, pending: dict[str, Any], log_p
                 bak.unlink(missing_ok=True)
             except Exception:
                 pass
-            os.replace(dst, bak)
-        os.replace(new_path, dst)
+            try:
+                os.replace(dst, bak)
+            except OSError as e:
+                if int(getattr(e, "winerror", 0) or 0) == 32:
+                    replace_via_sidecar(
+                        new_path,
+                        dst,
+                        log=lambda m: _append(log_path, f"bootstrap_self_update: {m}"),
+                        label="bootstrap_exe_sidecar",
+                    )
+                    b["pending_swap"] = False
+                    b["local_new_path"] = ""
+                    target_version = _normalize_bootstrap_version(b.get("target_version"))
+                    if target_version:
+                        (install_root / "bootstrap" / "VERSION.txt").write_text(
+                            target_version + "\n", encoding="utf-8"
+                        )
+                    pending["bootstrap"] = b
+                    try:
+                        bak.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    try:
+                        new_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    _append(log_path, "bootstrap_self_update: 成功しました（sidecar）。")
+                    return True, None
+                raise
+            os.replace(new_path, dst)
+        else:
+            os.replace(new_path, dst)
+        try:
+            new_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         b["pending_swap"] = False
         b["local_new_path"] = ""
         target_version = _normalize_bootstrap_version(b.get("target_version"))

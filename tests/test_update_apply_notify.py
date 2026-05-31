@@ -125,6 +125,24 @@ def test_updater_result_path_under_install_root(tmp_path: Path) -> None:
     assert "update" in pu.updater_result_path(root).parts
 
 
+def test_maybe_apply_pending_bootstrap_update_skips_when_no_pending(tmp_path: Path) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    pu._skip_startup_version_check_this_launch = False
+    with patch.object(pu, "_install_root", return_value=root):
+        with patch.object(pu, "_apply_pending_update_with_retry") as mock_apply:
+            with patch.object(pu, "_message_box") as mock_mb:
+                with patch(
+                    "core.update_housekeeping.run_startup_housekeeping",
+                ) as mock_sweep:
+                    pu.maybe_apply_pending_bootstrap_update(owner_hwnd=1001)
+                mock_sweep.assert_called_once()
+                assert mock_sweep.call_args.kwargs.get("keep_gate_hwnd") == 1001
+                mock_apply.assert_not_called()
+                mock_mb.assert_not_called()
+    assert pu._skip_startup_version_check_this_launch is False
+
+
 def test_notify_installed_apps_list_changed_calls_shchangenotify_on_nt() -> None:
     with patch.object(pu.os, "name", "nt"):
         with patch("ctypes.windll") as mock_windll:
@@ -240,6 +258,7 @@ if __name__ == "__main__":
         test_maybe_show_updater_result_success_skips_notify,
         test_write_updater_result,
         test_updater_result_path_under_install_root,
+        test_maybe_apply_pending_bootstrap_update_skips_when_no_pending,
         test_notify_installed_apps_list_changed_calls_shchangenotify_on_nt,
         test_notify_installed_apps_list_changed_skips_non_nt,
     ]

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ui_qt.ui_common import _normalize_message_newlines
+from ui_qt.ui_common import _normalize_message_newlines, show_warning_notice
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel
@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -1199,7 +1198,7 @@ def build_scenario_detail_cell_scroll(
     def append_link_group() -> None:
         max_link = int(_dc(cfg, "MAX_LINK_DEFS", 50))
         if len(link_defs) >= max_link:
-            QMessageBox.warning(
+            show_warning_notice(
                 None,
                 msg_title_link,
                 _dcp(cfg, "MSG_LINK_KEY_MAX", "連携キー定義は最大50件までです。"),
@@ -1380,7 +1379,7 @@ def build_scenario_detail_cell_scroll(
     def append_join_group() -> None:
         max_join = int(_dc(cfg, "MAX_JOIN_DEFS", 50))
         if len(join_defs) >= max_join:
-            QMessageBox.warning(
+            show_warning_notice(
                 None,
                 msg_title_join,
                 _dcp(cfg, "MSG_JOIN_KEY_MAX", "結合キー定義は最大50件までです。"),

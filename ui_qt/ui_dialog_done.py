@@ -384,6 +384,12 @@ class DoneDialog(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
         # 表示中は Excel 操作を無効化（共通仕様）
         if self._parent_hwnd:
             try:

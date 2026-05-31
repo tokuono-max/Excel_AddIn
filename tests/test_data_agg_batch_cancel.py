@@ -11,13 +11,16 @@ from svc.data_agg_cancel import (
     DataAggCancelled,
     batch_cancel_tombstone_blocks,
     batch_cancel_tombstone_path,
+    batch_coop_cancel_detected_path,
     batch_worker_pid_path,
     cancel_request_path_data_agg_batch,
     cancel_requested,
     clear_batch_active_run,
     clear_batch_cancel_tombstone,
     clear_batch_worker_pid,
+    coop_cancel_detected,
     force_data_agg_batch_cancel_from_ui,
+    log_cancel_detected,
     make_cancel_check,
     purge_pending_data_agg_batch_svc_requests,
     read_batch_worker_pid,
@@ -26,6 +29,7 @@ from svc.data_agg_cancel import (
     sheet_id_from_cancel_path,
     terminate_pid_tree,
     wait_batch_worker_exit,
+    wait_batch_worker_exit_adaptive,
     write_batch_cancel_tombstone,
 )
 from svc.svc_data_agg_scan import scan_folder
@@ -122,11 +126,11 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     cancel_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path = tmp_path / "progress" / "data_agg_batch_test.pkl"
     write_pickle(progress_path, {"status": "RUN", "seq": 1, "pct": 15})
-    called = {"append": 0}
+    called = {"append": 0, "ensure_svc": 0, "restore": 0}
 
     monkeypatch.setattr(
-        "svc.data_agg_cancel.wait_batch_worker_exit",
-        lambda *args, **kwargs: False,
+        "svc.data_agg_cancel.wait_batch_worker_exit_adaptive",
+        lambda *args, **kwargs: (False, False),
     )
     monkeypatch.setattr(
         "svc.data_agg_cancel.terminate_batch_worker",
@@ -135,6 +139,14 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         "svc.data_agg_cancel.append_cancel_event_log_from_ui",
         lambda **kwargs: called.__setitem__("append", called["append"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "svc.svc_host.ensure_svc_server",
+        lambda: called.__setitem__("ensure_svc", called["ensure_svc"] + 1),
+    )
+    monkeypatch.setattr(
+        "core.excel_host_restore.restore_excel_host_ui_state",
+        lambda hwnd, sheet_id="": called.__setitem__("restore", called["restore"] + 1) or True,
     )
 
     ok = force_data_agg_batch_cancel_from_ui(
@@ -148,9 +160,37 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     )
     assert ok is True
     assert called["append"] == 1
+    assert called["ensure_svc"] == 1
+    assert called["restore"] >= 2
     d = __import__("ui_qt.ipc_file", fromlist=["read_pickle"]).read_pickle(progress_path)
     assert isinstance(d, dict) and str(d.get("status", "")).upper() == "CANCEL"
     assert batch_cancel_tombstone_path(sid, tmp_path).is_file()
+
+
+def test_force_cancel_skips_ensure_svc_on_cooperative_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sid = "SHEET_COOP"
+    cancel_path = cancel_request_path_data_agg_batch(sid, tmp_path)
+    cancel_path.parent.mkdir(parents=True, exist_ok=True)
+    called = {"ensure_svc": 0}
+
+    monkeypatch.setattr(
+        "svc.data_agg_cancel.wait_batch_worker_exit_adaptive",
+        lambda *args, **kwargs: (True, False),
+    )
+    monkeypatch.setattr(
+        "svc.svc_host.ensure_svc_server",
+        lambda: called.__setitem__("ensure_svc", called["ensure_svc"] + 1),
+    )
+
+    ok = force_data_agg_batch_cancel_from_ui(
+        cancel_path=cancel_path,
+        ipc_root=tmp_path,
+        cooperative_wait_ms=0,
+    )
+    assert ok is False
+    assert called["ensure_svc"] == 0
 
 
 def test_batch_cancel_tombstone_blocks_matching_run_id(tmp_path: Path) -> None:
@@ -187,8 +227,8 @@ def test_force_cancel_clears_active_and_purges_svc_req(
     cancel_path = cancel_request_path_data_agg_batch(sid, ipc)
     cancel_path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "svc.data_agg_cancel.wait_batch_worker_exit",
-        lambda *args, **kwargs: True,
+        "svc.data_agg_cancel.wait_batch_worker_exit_adaptive",
+        lambda *args, **kwargs: (True, False),
     )
     force_data_agg_batch_cancel_from_ui(
         cancel_path=cancel_path,
@@ -220,6 +260,37 @@ def test_purge_pending_data_agg_batch_svc_requests(tmp_path: Path) -> None:
     assert purge_pending_data_agg_batch_svc_requests(tmp_path, sid) == 1
     assert not drop.exists()
     assert keep.exists()
+
+
+def test_log_cancel_detected_writes_coop_marker(tmp_path: Path) -> None:
+    sid = "SHEET_COOP_M"
+    log_cancel_detected(
+        sheet_id=sid,
+        phase="compute",
+        files_n=3,
+        ipc_root=tmp_path,
+    )
+    assert coop_cancel_detected(sid, tmp_path) is True
+    assert batch_coop_cancel_detected_path(sid, tmp_path).is_file()
+
+
+def test_wait_batch_worker_exit_adaptive_extends_on_coop_marker(tmp_path: Path) -> None:
+    sid = "SHEET_ADAPT"
+    p = batch_worker_pid_path(sid, tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("999999", encoding="ascii")
+    log_cancel_detected(sheet_id=sid, phase="compute", files_n=1, ipc_root=tmp_path)
+    t0 = __import__("time").monotonic()
+    ok, coop = wait_batch_worker_exit_adaptive(
+        sid,
+        tmp_path,
+        initial_ms=50,
+        extended_ms=200,
+    )
+    elapsed_ms = (__import__("time").monotonic() - t0) * 1000
+    assert ok is False
+    assert coop is True
+    assert elapsed_ms >= 150
 
 
 def test_clear_batch_cancel_tombstone(tmp_path: Path) -> None:

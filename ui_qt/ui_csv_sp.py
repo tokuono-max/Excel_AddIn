@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -43,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui_qt.ui_common import _normalize_message_newlines
+from ui_qt.ui_common import _normalize_message_newlines, show_warning_notice
 from ui_qt.ui_dialog_progress import raise_csv_sp_partner_progress
 
 try:
@@ -534,7 +533,7 @@ class _SplitDialog(QDialog):
         """分割開始: テーブルから範囲を取得し、保存先フォルダ選択を直接表示。OK で結果を設定して閉じる。"""
         ranges_payload = self._collect_ranges_from_table()
         if not ranges_payload:
-            QMessageBox.warning(self, self._title, "有効な分割範囲がありません。開始行・終了行を確認してください。")
+            show_warning_notice(self, self._title, "有効な分割範囲がありません。開始行・終了行を確認してください。")
             return
         self._ranges = [(int(r.get("start_row")), int(r.get("end_row"))) for r in ranges_payload]
         self._file_names = [str(r.get("file_name") or f"{self._sheet_name}_{i + 1}") for i, r in enumerate(ranges_payload)]
@@ -767,7 +766,7 @@ class _ConflictDialog(QDialog):
             self._finish("cancel")
             return
         if tbl.rowCount() <= 0:
-            QMessageBox.warning(self, "同名ファイルの確認", "分割対象がありません。1行以上残してください。")
+            show_warning_notice(self, "同名ファイルの確認", "分割対象がありません。1行以上残してください。")
             return
         # 元一覧インデックス -> 現在の残行インデックスを作る
         remain_old_indices: set[int] = set()
@@ -806,17 +805,17 @@ class _ConflictDialog(QDialog):
             if not old_nm:
                 continue
             if not new_base:
-                QMessageBox.warning(self, "同名ファイルの確認", "変更後ファイル名に空欄があります。")
+                show_warning_notice(self, "同名ファイルの確認", "変更後ファイル名に空欄があります。")
                 return
             if new_base.lower().endswith(".csv"):
                 new_base = new_base[:-4].rstrip()
             if not new_base:
-                QMessageBox.warning(self, "同名ファイルの確認", "変更後ファイル名が不正です。")
+                show_warning_notice(self, "同名ファイルの確認", "変更後ファイル名が不正です。")
                 return
             # 入力欄内の重複は不可（同一バッチ内で同名になるため）
             low = new_base.lower()
             if low in seen:
-                QMessageBox.warning(self, "同名ファイルの確認", "変更後ファイル名が重複しています。")
+                show_warning_notice(self, "同名ファイルの確認", "変更後ファイル名が重複しています。")
                 return
             seen.add(low)
             rename_map[str(old_idx)] = f"{new_base}.csv"

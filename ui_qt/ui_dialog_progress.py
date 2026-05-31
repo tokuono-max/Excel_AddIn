@@ -560,6 +560,12 @@ class ProgressDialog(QDialog):
                     excel_unlock=bool(self._parent_hwnd),
                 )
                 msg = _normalize_message_newlines(str(d.get("msg", "") or "Excelの最大行数を超えるため結合を中止しました。").strip())
+                try:
+                    from ui_qt.ui_notification_sound import play_notification_sound
+
+                    play_notification_sound("info")
+                except Exception:
+                    pass
                 mb = QMessageBox(self)
                 mb.setIcon(QMessageBox.Icon.Warning)
                 mb.setWindowTitle("行数超過")
@@ -595,6 +601,12 @@ class ProgressDialog(QDialog):
                 self._teardown_progress_shared_state(
                     excel_unlock=bool(self._parent_hwnd),
                 )
+                try:
+                    from ui_qt.ui_notification_sound import play_notification_sound
+
+                    play_notification_sound("error")
+                except Exception:
+                    pass
                 mb = QMessageBox(self)
                 mb.setIcon(QMessageBox.Icon.Critical)
                 mb.setWindowTitle("エラー")

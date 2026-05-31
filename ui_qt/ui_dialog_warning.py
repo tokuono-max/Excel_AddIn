@@ -192,6 +192,15 @@ class WarningDialog(QDialog):
         親なし: 従来どおりその場で無効化は行わない。
         """
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_for_icon
+
+            play_notification_for_icon(
+                str(self._warning_cfg.get("ICON") or ""),
+                default_kind="info",
+            )
+        except Exception:
+            pass
         ph = int(self._parent_hwnd or 0)
         if not ph:
             return

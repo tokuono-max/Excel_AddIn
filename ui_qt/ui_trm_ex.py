@@ -554,6 +554,12 @@ class _TrmExDoneDialog(QDialog):
         """表示時に WINDOW 設定に従い Excel 中央・前面化し、Excel を無効化する。"""
         super().showEvent(event)
         try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
+        try:
             from ui_qt.ui_common import done_dialog_show_event_on_excel
 
             done_dialog_show_event_on_excel(self, self._parent_hwnd, self._req, self._done_cfg)
@@ -655,6 +661,7 @@ def create_dialog(
     if action == "trm_ex_no_target":
         no_cfg = (cfg.get("SCREENS") or {}).get("NO_TARGET") or {}
         dlg = _TrmExDoneDialog(req, int(parent_hwnd or 0), str(sheet_id or ""), no_cfg)
+        dlg._hc_notification_sound_kind = "info"
         ph = int(parent_hwnd or 0)
         try:
             from ui_qt.ui_common import excel_rect_tuple_from_req, prepare_dialog_excel_center_before_show

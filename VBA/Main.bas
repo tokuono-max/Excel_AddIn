@@ -4,9 +4,11 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' ���W���[����: Main (�W�����W���[��)
 ' �쐬��: 2025-11-28
-' �X�V��: 2026-04-11
+' �X�V��: 2026-05-31
 ' �����R�[�h: �{���W���[���� Shift-JIS�iCP932�j�ŕۑ����邱�Ɓi���{��R�����g�E������̔j���h�~�j�B
 ' ���Ŕԍ�����ї���:
+'   2.9.0 (2026-05-30) [�I��] ShutdownExcelUiCleanup: WaitForm/OnTime/Cursor/Interactive �����iExcel �c���΍�j�B
+'   2.10.0 (2026-05-31) [�I��] ShutdownExcelUiCleanup: Python EXCEL_RESTORE �Ăяo���iCOM �n���O�~�ρj�B
 '   2.6.0 (2026-04-11) [����] TerminatePython / RunPythonSafe �� RunPython �����񂩂� hc_main �������Bcore.excel_session�iclear_internal_registry / invoke_action�j�o�R�B
 '   2.7.0 (2026-04-11) [�d��] check_duplicates: bridge JSON �� selection_areas�i�e Area �� External �A�h���X�j��t�^�B
 '   2.8.0 (2026-04-11) check_duplicates: bridge JSON CountLarge (selection_count_large / sheet_cells_count_large).
@@ -487,6 +489,38 @@ End Sub
 ' �ďo����: ThisWorkbook �̏I����
 ' �w���p�[�v���V�[�W���̐e�q�֌W: (�q) xlwings.RunPython
 ' ---------------------------------------------------------------------------------------------------------------------
+' ---------------------------------------------------------------------------------------------------------------------
+' �v���V�[�W����: ShutdownExcelUiCleanup
+' ���Ŕԍ�����ї���:
+'   1.1.0 (2026-05-31) Python restore_excel_host_ui_state �Ăяo���EEnableEvents ������ǉ��B
+'   1.0.0 (2026-05-30) Excel �I����: WaitForm/OnTime/Interactive/ScreenUpdating �̕����B
+' �v���V�[�W���̓���T�v: �A�h�C���I�����O�� VBA ���̑ҋ@ UI �� OnTime ���������AExcel �����Ԃ�߂��B
+' �ďo����: Call Main.ShutdownExcelUiCleanup
+' �w���p�[�v���V�[�W���̐e�q�֌W: (�q) HC_WaitForm.NotifyUiReady, CancelCursorGuardTimer, xlwings.RunPython
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub ShutdownExcelUiCleanup()
+    On Error Resume Next
+    Dim hwnd As LongPtr
+    Dim sId As String
+    Dim sCmd As String
+    Call HC_WaitForm.NotifyUiReady
+    Call CancelCursorGuardTimer("shutdown")
+    Application.Cursor = xlDefault
+    Application.Interactive = True
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    hwnd = Application.hwnd
+    sId = vbNullString
+    If Not ActiveSheet Is Nothing Then
+        sId = ExcelUtil.GetSheetIdSafe(ActiveSheet)
+    End If
+    sCmd = "from core.excel_host_restore import restore_excel_host_ui_state; restore_excel_host_ui_state(" _
+        & CStr(hwnd) & ", '" & PyEscSq(sId) & "')"
+    RunPython sCmd
+    Call HC_Log.Info("Main", "ShutdownExcelUiCleanup done")
+    On Error GoTo 0
+End Sub
+
 Public Sub TerminatePython()
     On Error Resume Next
     ' # �y�ړI�z�A�h�C���I������ Python ���� COM �Q�Ƃ��N���A���邽�߁B

@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.win_running_file_replace import (
+    cleanup_stale_sidecar_files,
+    collect_self_sidecar_dst_paths,
+    copy_file_with_sharing_fallback,
+)
 from core.update_process_cleanup import (
     ensure_packaged_children_stopped,
     mutex_snapshot,
@@ -120,75 +125,25 @@ def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
 
 
 def _self_hc_updater_dst_paths() -> set[Path]:
-    """``hc_updater.exe`` paths that this run may replace via sidecar (frozen exe or script sibling)."""
-    out: set[Path] = set()
-    try:
-        out.add(Path(sys.executable).resolve())
-    except OSError:
-        pass
+    """Paths under app\\bin that this updater run may replace via sidecar."""
+    extra: set[Path] = set()
     try:
         here = Path(__file__).resolve()
         if here.suffix.lower() == ".py":
             sibling = here.parent / "hc_updater.exe"
             if sibling.is_file():
-                out.add(sibling.resolve())
+                extra.add(sibling.resolve())
     except OSError:
         pass
-    return out
-
-
-def _is_hc_updater_exe_name(name: str) -> bool:
-    return name.lower() == "hc_updater.exe"
+    return collect_self_sidecar_dst_paths(extra=extra)
 
 
 def _cleanup_stale_renamed_updaters(bin_dir: Path, log_path: Path | None) -> None:
-    for pat in ("hc_updater.exe.was_running_*", "hc_updater.exe.old_*"):
-        for p in bin_dir.glob(pat):
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                if log_path is not None:
-                    _append_with_cap(
-                        log_path,
-                        f"{_ts()} apply_bin: stale_updater_sidecar skip path={p}\n",
-                    )
-
-
-def _replace_running_hc_updater_exe(src: Path, dst: Path, log_path: Path | None) -> None:
-    """
-    Windows: 実行中の hc_updater.exe は上書きできない。同一ディレクトリで別名へ replace すると
-    元パスに新ファイルを置ける（プロセスは退避したパスのイメージのまま動作）。
-    """
-    if log_path is not None:
-        _append_with_cap(log_path, f"{_ts()} apply_bin: self_exe_replace begin dst={dst}\n")
-    side = dst.with_name(f"{dst.name}.was_running_{os.getpid()}")
-    try:
-        if side.is_file():
-            side.unlink(missing_ok=True)
-    except OSError:
-        pass
-    os.replace(dst, side)
-    try:
-        shutil.copy2(src, dst)
-    except Exception:
-        try:
-            os.replace(side, dst)
-        except OSError:
-            pass
-        raise
-    if log_path is not None:
-        _append_with_cap(
-            log_path,
-            f"{_ts()} apply_bin: self_exe_replace ok stale_sidecar={side.name}\n",
-        )
-    try:
-        side.unlink(missing_ok=True)
-    except OSError:
+    def _log(msg: str) -> None:
         if log_path is not None:
-            _append_with_cap(
-                log_path,
-                f"{_ts()} apply_bin: self_exe_replace stale_unlink_deferred path={side}\n",
-            )
+            _append_with_cap(log_path, f"{_ts()} apply_bin: {msg}\n")
+
+    cleanup_stale_sidecar_files(bin_dir, _log)
 
 
 def _copy_merge_tree(
@@ -204,54 +159,34 @@ def _copy_merge_tree(
 ) -> None:
     if not src_root.exists():
         return
-    self_dsts = _self_hc_updater_dst_paths()
+    proactive = _self_hc_updater_dst_paths()
+
+    def _log(msg: str) -> None:
+        if log_path is not None:
+            _append_with_cap(log_path, f"{_ts()} apply_bin: {msg}\n")
+
     files = [p for p in src_root.rglob("*") if p.is_file()]
     total = max(len(files), 1)
     for idx, fp in enumerate(files, 1):
         rel = fp.relative_to(src_root)
         dst = dst_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        did_self = False
-        if self_dsts and _is_hc_updater_exe_name(dst.name) and dst.is_file():
-            try:
-                if dst.resolve() in self_dsts:
-                    _replace_running_hc_updater_exe(fp, dst, log_path)
-                    did_self = True
-            except OSError:
-                pass
-        if did_self:
-            continue
-        for attempt in range(3):
-            try:
-                shutil.copy2(fp, dst)
-                break
-            except OSError as e:
-                wno = int(getattr(e, "winerror", 0) or 0)
-                if (
-                    wno == 32
-                    and self_dsts
-                    and _is_hc_updater_exe_name(dst.name)
-                    and dst.is_file()
-                ):
-                    try:
-                        if dst.resolve() in self_dsts:
-                            _replace_running_hc_updater_exe(fp, dst, log_path)
-                            break
-                    except OSError:
-                        pass
-                if log_path is not None and wno == 32 and attempt < 2:
-                    _append_with_cap(
-                        log_path,
-                        f"{_ts()} apply_bin: copy_merge retry_sharing attempt={attempt + 1}/3 rel={rel.as_posix()}\n",
-                    )
-                    time.sleep(1.0 if attempt == 0 else 2.0)
-                    continue
-                if log_path is not None:
-                    _append_with_cap(
-                        log_path,
-                        f"{_ts()} apply_bin: copy_merge_fail rel={rel.as_posix()} err={e!s} winerror={getattr(e, 'winerror', None)}\n",
-                    )
-                raise
+        try:
+            copy_file_with_sharing_fallback(
+                fp,
+                dst,
+                proactive_sidecar=proactive,
+                log=_log,
+                rel_label=rel.as_posix(),
+            )
+        except OSError as e:
+            if log_path is not None:
+                _append_with_cap(
+                    log_path,
+                    f"{_ts()} apply_bin: copy_merge_fail rel={rel.as_posix()} err={e!s} "
+                    f"winerror={getattr(e, 'winerror', None)}\n",
+                )
+            raise
         if ui is not None and ui._ok:
             pct = progress_lo + int((progress_hi - progress_lo) * idx / total)
             ui.set(ui_title, ui_message, pct)
@@ -283,21 +218,22 @@ def _mirror_tree(
             f"mirror refused: updater runs from dst={dst_root} (use copy_merge for app/bin)"
         )
     _append_with_cap(log_path, f"{_ts()} apply_bin: mirror rmtree_if_exists dst={dst_root}\n")
-    self_dsts = _self_hc_updater_dst_paths()
+    proactive = _self_hc_updater_dst_paths()
     self_dst = dst_root / "hc_updater.exe"
-    if dst_root.exists() and self_dst.is_file() and self_dst.resolve() in self_dsts:
+    if dst_root.exists() and self_dst.is_file():
         try:
-            side = Path(tempfile.gettempdir()) / f"csv_tool_hc_updater_mirror_stale_{os.getpid()}.exe"
-            try:
-                if side.is_file():
-                    side.unlink(missing_ok=True)
-            except OSError:
-                pass
-            os.replace(self_dst, side)
-            _append_with_cap(
-                log_path,
-                f"{_ts()} apply_bin: mirror moved_running_updater_exe to={side}\n",
-            )
+            if self_dst.resolve() in proactive:
+                side = Path(tempfile.gettempdir()) / f"csv_tool_hc_updater_mirror_stale_{os.getpid()}.exe"
+                try:
+                    if side.is_file():
+                        side.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                os.replace(self_dst, side)
+                _append_with_cap(
+                    log_path,
+                    f"{_ts()} apply_bin: mirror moved_running_updater_exe to={side}\n",
+                )
         except OSError as e:
             _append_with_cap(
                 log_path,
@@ -307,12 +243,22 @@ def _mirror_tree(
         shutil.rmtree(dst_root, ignore_errors=True)
     files = [p for p in src_root.rglob("*") if p.is_file()]
     total = max(len(files), 1)
+
+    def _log(msg: str) -> None:
+        _append_with_cap(log_path, f"{_ts()} apply_bin: {msg}\n")
+
     try:
         for idx, fp in enumerate(files, 1):
             rel = fp.relative_to(src_root)
             dst = dst_root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(fp, dst)
+            copy_file_with_sharing_fallback(
+                fp,
+                dst,
+                proactive_sidecar=proactive,
+                log=_log,
+                rel_label=rel.as_posix(),
+            )
             if ui is not None and ui._ok:
                 pct = progress_lo + int((progress_hi - progress_lo) * idx / total)
                 ui.set(ui_title, ui_message, pct)

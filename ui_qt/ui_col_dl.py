@@ -327,6 +327,12 @@ class _ColDlDoneDialog(QDialog):
     def showEvent(self, event) -> None:
         """prepare で座標済み。ここでは Excel 操作ロックのみ。"""
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
         if self._parent_hwnd:
             try:
                 from ui_qt.ui_common import enable_excel_window

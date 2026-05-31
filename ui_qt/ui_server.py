@@ -745,7 +745,9 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
             except Exception:
                 pass
             try:
-                QMessageBox.critical(None, "設定エラー", err_msg)
+                from ui_qt.ui_common import show_error_notice
+
+                show_error_notice(None, "設定エラー", err_msg)
             except Exception:
                 pass
             return _error_result(err_msg, config_exc)

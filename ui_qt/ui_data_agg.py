@@ -116,7 +116,14 @@ from PySide6.QtWidgets import (
 )
 
 from core import core_env
-from ui_qt.ui_common import _normalize_message_newlines, excel_rect_tuple_from_req as _excel_rect_tuple_from_req
+from ui_qt.ui_common import (
+    _normalize_message_newlines,
+    excel_rect_tuple_from_req as _excel_rect_tuple_from_req,
+    show_done_notice,
+    show_error_notice,
+    show_info_notice,
+    show_warning_notice,
+)
 from ui_qt.ui_data_agg_scenario_layout import (
     build_scenario_detail_cell_scroll,
     build_scenario_detail_name_scroll,
@@ -368,7 +375,7 @@ def _data_agg_warn_debug_open_failed(
     except Exception:
         pass
     try:
-        QMessageBox.warning(
+        show_error_notice(
             parent,
             title,
             "デバッグ画面を開けませんでした。\n\n%s" % exc,
@@ -1976,7 +1983,7 @@ class _DataAggMainWindow(QDialog):
             text = Path(path).read_text(encoding="utf-8-sig")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             if not lines:
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     self._main_ui_disp("TITLE_ITEM_CSV_LOAD", "CSV読込"),
                     self._main_ui_disp("MSG_ITEM_CSV_EMPTY", "項目が含まれていません。"),
@@ -1986,14 +1993,14 @@ class _DataAggMainWindow(QDialog):
             headers = lines[0].split(",") if "," in lines[0] else lines
             self._on_scenario_clear_all()
             self._apply_items_to_table([h.strip() for h in headers if h.strip()])
-            QMessageBox.information(
+            show_info_notice(
                 self,
                 self._main_ui_disp("TITLE_ITEM_CSV_LOAD", "CSV読込"),
                 self._main_ui_disp("MSG_ITEM_CSV_LOADED_FMT", "項目を %s 件読込みました。")
                 % len(headers),
             )
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 self._main_ui_disp("TITLE_ITEM_CSV_LOAD", "CSV読込"),
                 self._main_ui_disp("MSG_ITEM_CSV_FAILED_FMT", "読込に失敗しました: %s") % exc,
@@ -2005,7 +2012,7 @@ class _DataAggMainWindow(QDialog):
             from core.core_xlc import get_excel_context_from_hwnd
             ctx = get_excel_context_from_hwnd(self._parent_hwnd, "")
             if not ctx:
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     self._main_ui_disp("TITLE_ITEM_SHEET_LOAD", "シート読込"),
                     self._main_ui_disp("MSG_ITEM_SHEET_NO_EXCEL", "Excel に接続できません。"),
@@ -2022,7 +2029,7 @@ class _DataAggMainWindow(QDialog):
                 headers = []
             headers = [h for h in headers if h]
             if not headers:
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     self._main_ui_disp("TITLE_ITEM_SHEET_LOAD", "シート読込"),
                     self._main_ui_disp(
@@ -2032,14 +2039,14 @@ class _DataAggMainWindow(QDialog):
                 return
             self._on_scenario_clear_all()
             self._apply_items_to_table(headers)
-            QMessageBox.information(
+            show_info_notice(
                 self,
                 self._main_ui_disp("TITLE_ITEM_SHEET_LOAD", "シート読込"),
                 self._main_ui_disp("MSG_ITEM_SHEET_LOADED_FMT", "項目を %s 件読込みました。")
                 % len(headers),
             )
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 self._main_ui_disp("TITLE_ITEM_SHEET_LOAD", "シート読込"),
                 self._main_ui_disp("MSG_ITEM_SHEET_FAILED_FMT", "読込に失敗しました: %s") % exc,
@@ -2715,13 +2722,13 @@ class _DataAggMainWindow(QDialog):
         try:
             data = self._build_scenario_from_ui()
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self, _u("TITLE_SCENARIO_EXPORT", "シナリオ出力"), str(exc)
             )
             return
         errs = scenario_mod.validate_scenario(data)
         if errs:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _u("TITLE_SCENARIO_EXPORT", "シナリオ出力"),
                 _u("MSG_SCENARIO_EXPORT_VALIDATE", "検証エラーのため出力できません。")
@@ -2740,7 +2747,7 @@ class _DataAggMainWindow(QDialog):
             self._ui or {},
         )
         if not rows:
-            QMessageBox.information(
+            show_info_notice(
                 self,
                 _u("TITLE_SCENARIO_EXPORT", "シナリオ出力"),
                 _u("MSG_SCENARIO_EXPORT_EMPTY", "出力する取得ソースがありません。"),
@@ -2751,7 +2758,7 @@ class _DataAggMainWindow(QDialog):
         except Exception:
             ctx = None
         if not ctx:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _u("TITLE_SCENARIO_EXPORT", "シナリオ出力"),
                 _u("MSG_SCENARIO_EXPORT_NO_EXCEL", "Excel に接続できませんでした。"),
@@ -2778,7 +2785,7 @@ class _DataAggMainWindow(QDialog):
                 try:
                     ws_new = book.sheets.add(name=base_name, after=book.sheets.active)
                 except Exception as e:
-                    QMessageBox.warning(self, title, str(e))
+                    show_warning_notice(self, title, str(e))
                     return None
                 return (ws_new, base_name)
             while True:
@@ -2801,7 +2808,7 @@ class _DataAggMainWindow(QDialog):
                     return None
                 sn = write_mod.sanitize_excel_tab_name(text)
                 if not sn:
-                    QMessageBox.warning(self, title, bad_name)
+                    show_warning_notice(self, title, bad_name)
                     continue
                 if sn in names:
                     yn = QMessageBox.question(
@@ -2816,7 +2823,7 @@ class _DataAggMainWindow(QDialog):
                     try:
                         ws_ex = book.sheets[sn]
                     except Exception:
-                        QMessageBox.warning(
+                        show_warning_notice(
                             self,
                             title,
                             _u("MSG_SCENARIO_EXPORT_OPEN_SHEET_FAIL", "シートを開けませんでした。"),
@@ -2830,7 +2837,7 @@ class _DataAggMainWindow(QDialog):
                 try:
                     ws_new = book.sheets.add(name=sn, after=book.sheets.active)
                 except Exception as e:
-                    QMessageBox.warning(self, title, str(e))
+                    show_warning_notice(self, title, str(e))
                     return None
                 return (ws_new, sn)
 
@@ -2848,7 +2855,7 @@ class _DataAggMainWindow(QDialog):
             except Exception:
                 pass
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 title,
                 _u("MSG_SCENARIO_EXPORT_WRITE_FAIL", "書き込みに失敗しました。")
@@ -2856,7 +2863,7 @@ class _DataAggMainWindow(QDialog):
                 % exc,
             )
             return
-        QMessageBox.information(
+        show_done_notice(
             self,
             title,
             _u("MSG_SCENARIO_EXPORT_DONE", "書き出しました。\nシート名: %s") % used_name,
@@ -2939,7 +2946,7 @@ class _DataAggMainWindow(QDialog):
             )
             dlg.exec()
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 "シナリオ編集",
                 "シナリオ編集画面を開けませんでした。\n%s" % exc,
@@ -2983,7 +2990,7 @@ class _DataAggMainWindow(QDialog):
                     except Exception:
                         pass
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _ui_disp_str(self._ui or {}, "BTN_FOLDER", "フォルダ選択"),
                 _ui_disp_str(
@@ -3014,7 +3021,7 @@ class _DataAggMainWindow(QDialog):
                     t_scan = _ui_disp_str(
                         self._ui or {}, "BTN_SEARCH_RUN", "検索実行"
                     )
-                    QMessageBox.warning(
+                    show_warning_notice(
                         self,
                         t_scan,
                         _ui_disp_str(
@@ -3052,13 +3059,13 @@ class _DataAggMainWindow(QDialog):
                     "MSG_SCAN_DONE",
                     "%s 件のファイルを検出しました。",
                 )
-                QMessageBox.information(self, t_scan, msg % len(paths))
+                show_info_notice(self, t_scan, msg % len(paths))
         except Exception as exc:
             if not auto_mode:
                 t_scan = _ui_disp_str(
                     self._ui or {}, "BTN_SEARCH_RUN", "検索実行"
                 )
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     t_scan,
                     _ui_disp_str(
@@ -3115,7 +3122,7 @@ class _DataAggMainWindow(QDialog):
                     "MSG_SCENARIO_LOAD_VALIDATE_PREFIX",
                     "シナリオの検証エラー:",
                 )
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     title_ld,
                     pre + "\n" + "\n".join(errs[:5]),
@@ -3196,19 +3203,19 @@ class _DataAggMainWindow(QDialog):
                 "MSG_SCENARIO_LOAD_DONE_FMT",
                 "シナリオを読込みました。\n項目数: %d\n対象ファイル数: %d",
             )
-            QMessageBox.information(
+            show_done_notice(
                 self,
                 title_ld,
                 done_msg % (len(items), len(file_paths)),
             )
         except FileNotFoundError as e:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込"),
                 str(e),
             )
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込"),
                 _ui_disp_str(
@@ -3307,7 +3314,7 @@ class _DataAggMainWindow(QDialog):
                     "MSG_SCENARIO_SAVE_VALIDATE_PREFIX",
                     "保存できません（検証エラー）:",
                 )
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     title_sv,
                     pre_sv + "\n" + "\n".join(save_errs[:8]),
@@ -3322,7 +3329,7 @@ class _DataAggMainWindow(QDialog):
             self._clear_scenario_dirty()
             self._refresh_scenario_display_label()
             title_sv = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存")
-            QMessageBox.information(
+            show_done_notice(
                 self,
                 title_sv,
                 _ui_disp_str(
@@ -3333,7 +3340,7 @@ class _DataAggMainWindow(QDialog):
                 % path,
             )
         except Exception as exc:
-            QMessageBox.warning(
+            show_warning_notice(
                 self,
                 _ui_disp_str(self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存"),
                 _ui_disp_str(
@@ -3411,9 +3418,9 @@ class _DataAggMainWindow(QDialog):
         title = str(d.get("title") or "データ集約")
         msg = _normalize_message_newlines(str(d.get("message") or ""))
         if d.get("ok", True):
-            QMessageBox.information(self, title, msg)
+            show_done_notice(self, title, msg)
         else:
-            QMessageBox.warning(self, title, msg)
+            show_warning_notice(self, title, msg)
 
     def _on_batch_run(self) -> None:
         """一括実行を開始する。"""
@@ -3447,10 +3454,10 @@ class _DataAggMainWindow(QDialog):
             msg = _normalize_message_newlines(
                 str(self._messages.get("NO_ITEMS") or "項目が定義されていません。").strip()
             )
-            QMessageBox.warning(self, "データ集約", msg)
+            show_warning_notice(self, "データ集約", msg)
             return
         if action != "batch_run":
-            QMessageBox.warning(self, "データ集約", "未対応の実行種別です。")
+            show_warning_notice(self, "データ集約", "未対応の実行種別です。")
             return
         # 永続パスは「シナリオ保存」のみ。一括は UI スナップショットを一時 JSON に書き子へ渡す。
         scenario_path_persistent = (self._scenario_path or "").strip()
@@ -3459,14 +3466,14 @@ class _DataAggMainWindow(QDialog):
 
             pre_errs = scenario_mod.validate_scenario(data)
             if pre_errs:
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     "データ集約",
                     "一括実行できません（検証エラー）:\n" + "\n".join(pre_errs[:8]),
                 )
                 return
         except Exception as exc:
-            QMessageBox.warning(self, "データ集約", "検証に失敗しました: %s" % exc)
+            show_warning_notice(self, "データ集約", "検証に失敗しました: %s" % exc)
             return
         show_batch_start = bool(self._ui.get("SHOW_BATCH_START_MESSAGE", False))
         notify_parent_dialog = bool(self._ui.get("BATCH_NOTIFY_PARENT_DIALOG", True))
@@ -3587,13 +3594,13 @@ class _DataAggMainWindow(QDialog):
             spawn_cwd = str(install_root) if install_root is not None else str(proj_root)
             subprocess.Popen(cmd, cwd=spawn_cwd, env=env)
             if show_batch_start:
-                QMessageBox.information(
+                show_info_notice(
                     self,
                     "データ集約",
                     "%s を開始しました。" % "一括実行",
                 )
         except Exception as exc:
-            QMessageBox.warning(self, "データ集約", "実行の開始に失敗しました: %s" % exc)
+            show_warning_notice(self, "データ集約", "実行の開始に失敗しました: %s" % exc)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -4416,7 +4423,7 @@ class _ScenarioEditDialog(QDialog):
                             "MSG_REGISTER_VALIDATE_PREFIX",
                             "登録できません:",
                         )
-                        QMessageBox.warning(
+                        show_warning_notice(
                             self,
                             t_reg,
                             pre_reg + "\n" + "\n".join(_val_errs[:8]),
@@ -5192,7 +5199,7 @@ class _ScenarioEditDialog(QDialog):
                 continue
             ob = _scenario_lineage_bucket(str(other.get("type") or "cell"))
             if ob != new_b:
-                QMessageBox.warning(
+                show_warning_notice(
                     self,
                     _ui_disp_str(self._screen_cfg, "TITLE", "シナリオ編集"),
                     _ui_disp_str(
@@ -5850,6 +5857,12 @@ class _DataAggDoneDialog(QDialog):
     def showEvent(self, event: Any) -> None:
         """表示時に Excel 中央に配置し、WINDOW.EXCEL_LOCK に従い Excel 子 HWND を無効化する。"""
         super().showEvent(event)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_on_widget
+
+            play_notification_on_widget(self)
+        except Exception:
+            pass
         if self._parent_hwnd:
             try:
                 from ui_qt.ui_common import (
