@@ -35,8 +35,9 @@ from core.core_log import get_logger  # noqa: E402
 # ==============================================================================
 # Constants
 # ==============================================================================
-# Excel 定数: xlDefault = -4143
+# Excel 定数: xlDefault = -4143, xlWait = -4112
 _XL_CURSOR_DEFAULT: int = -4143
+_XL_CURSOR_WAIT: int = -4112
 
 
 # ==============================================================================
@@ -46,6 +47,10 @@ _LOG = get_logger("core.hc_cursor")
 
 # VBA: HC_WaitForm.NotifyUiReady（リボン待機 UserForm を閉じる）
 _VBA_WAITFORM_NOTIFY_MACRO: str = "HC_WaitForm.NotifyUiReady"
+_VBA_CURSOR_GUARD_START: str = "Main.StartCursorGuardTimer"
+_VBA_CURSOR_FORCE_ON: str = "Main.ForceCursorOn"
+
+_data_agg_batch_cursor_last_rearm: float = 0.0
 
 
 # ==============================================================================
@@ -73,6 +78,89 @@ class CursorGuardResult:
 # ==============================================================================
 # Public API
 # ==============================================================================
+def notify_excel_wait_cursor_on(
+    *,
+    sheet_id: str = "",
+    vba_force_on_macro: str = _VBA_CURSOR_FORCE_ON,
+    vba_guard_macro: str = _VBA_CURSOR_GUARD_START,
+    try_get_excel: int = 20,
+    get_excel_interval_ms: int = 50,
+) -> None:
+    """Excel 砂時計（xlWait）を ON にし、VBA 保険タイマを再武装する（ベストエフォート）。
+
+    外部プロセスからの Application.Cursor 直書きは Excel 側で拒否されることがあるため、
+    原則 VBA の ForceCursorOn（Excel スレッド）を Application.Run で呼ぶ。
+    """
+    sid = str(sheet_id or "batch")
+    try:
+        import pythoncom  # noqa: WPS433
+        import win32com.client  # noqa: WPS433
+    except Exception as ex:
+        _LOG.warning("CURSOR_WAIT_ON: pywin32 import failed: %s", str(ex))
+        return
+
+    pythoncom.CoInitialize()
+    try:
+        excel = _get_excel_app(
+            win32com_client=win32com.client,
+            try_count=try_get_excel,
+            interval_ms=get_excel_interval_ms,
+        )
+        if excel is None:
+            _LOG.warning("CURSOR_WAIT_ON: GetActiveObject(Excel.Application) failed")
+            return
+        try:
+            excel.Run(vba_force_on_macro, sid)
+            _LOG.info("CURSOR_WAIT_ON: Run(%s) ok sheet_id=%s", vba_force_on_macro, sid)
+            return
+        except Exception as ex:
+            _LOG.warning(
+                "CURSOR_WAIT_ON: Run(%s) failed: %s; fallback COM/guard",
+                vba_force_on_macro,
+                str(ex),
+            )
+        try:
+            excel.Cursor = _XL_CURSOR_WAIT
+            _LOG.info("CURSOR_WAIT_ON: Cursor xlWait (COM fallback) sheet_id=%s", sid)
+        except Exception as ex:
+            _LOG.warning("CURSOR_WAIT_ON: Cursor ON failed: %s", str(ex))
+        try:
+            excel.Run(vba_guard_macro, sid)
+            _LOG.info("CURSOR_WAIT_ON: Run(%s) ok", vba_guard_macro)
+        except Exception as ex:
+            _LOG.warning("CURSOR_WAIT_ON: guard timer Run failed: %s", str(ex))
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+def data_agg_batch_cursor_on(sheet_id: str = "") -> None:
+    """本番一括: 砂時計 ON（進捗表示直前・再開時も呼ぶ）。"""
+    global _data_agg_batch_cursor_last_rearm
+    _data_agg_batch_cursor_last_rearm = time.perf_counter()
+    notify_excel_wait_cursor_on(sheet_id=sheet_id)
+
+
+def data_agg_batch_cursor_tick(
+    sheet_id: str = "",
+    *,
+    min_interval_sec: float = 7.0,
+) -> None:
+    """本番一括: 10 秒保険タイマ切れ前に砂時計を再武装する。"""
+    global _data_agg_batch_cursor_last_rearm
+    now = time.perf_counter()
+    if now - _data_agg_batch_cursor_last_rearm < float(min_interval_sec):
+        return
+    data_agg_batch_cursor_on(sheet_id)
+
+
+def data_agg_batch_cursor_off(*, cancel_reason: str = "data_agg_batch_done") -> None:
+    """本番一括完了・失敗・キャンセル時: 砂時計 OFF + WaitForm 解除。"""
+    notify_ui_ready(cancel_reason=cancel_reason)
+
+
 def notify_wait_form_ready(
     *,
     vba_macro: str = _VBA_WAITFORM_NOTIFY_MACRO,

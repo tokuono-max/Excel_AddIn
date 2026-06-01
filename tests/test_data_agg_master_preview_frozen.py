@@ -10,6 +10,7 @@ if str(_root) not in sys.path:
 
 from svc.data_agg_master_preview import (  # noqa: E402
     FROZEN_SNAPSHOT_VERSION,
+    best_frozen_snapshot_for_mi,
     build_master_preview_frozen_snapshot,
     frozen_snapshot_invalid_reason,
     scenario_for_stepped_preview,
@@ -112,6 +113,90 @@ def test_frozen_overlay_by_row_key() -> None:
     assert merged[0]["B"] == "new_b"
     assert len(merged) == 3
     assert merged[2]["A"] == "a1"
+
+
+def test_best_frozen_prefers_strict_adjacent() -> None:
+    headers = ["A", "B", "C"]
+    paths = [r"C:\f%d.xlsx" % i for i in range(3)]
+    row = {"__norm_path": "c:/f0.xlsx", "__iter_index": 0, "A": "a", "B": "b", "C": "c"}
+    snap0: dict = {}
+    build_master_preview_frozen_snapshot(
+        snap0, pool_rows=[row], headers=headers, through_mi=0, file_paths=paths
+    )
+    snap1: dict = {}
+    build_master_preview_frozen_snapshot(
+        snap1, pool_rows=[row], headers=headers, through_mi=1, file_paths=paths
+    )
+    snapshots = {0: snap0, 1: snap1}
+    got, through = best_frozen_snapshot_for_mi(
+        snapshots, 2, headers=headers, file_paths=paths
+    )
+    assert through == 1
+    assert got is snap1
+
+
+def test_best_frozen_rejects_paths_count_mismatch_even_with_gap() -> None:
+    headers = ["A", "B"]
+    paths_old = [r"C:\f%d.xlsx" % i for i in range(10)]
+    paths_new = paths_old + [r"C:\f%d.xlsx" % i for i in range(10, 20)]
+    snap: dict = {}
+    build_master_preview_frozen_snapshot(
+        snap,
+        pool_rows=[{"__norm_path": "c:/f0.xlsx", "__iter_index": 0, "A": "x", "B": "y"}],
+        headers=headers,
+        through_mi=6,
+        file_paths=paths_old,
+    )
+    got, through = best_frozen_snapshot_for_mi(
+        {6: snap}, 21, headers=headers, file_paths=paths_new
+    )
+    assert got is None
+    assert through is None
+
+
+def test_frozen_context_skipped_for_join_item_in_ui_helper() -> None:
+    """結合項目では凍結を使わない（ui 側ガードの仕様確認用スタブ）。"""
+    from svc.svc_data_agg import _item_join_defs_list  # noqa: E402
+
+    items = [
+        {
+            "name": "MAC RMT",
+            "sources": [
+                {
+                    "type": "cell",
+                    "sheet_name": "S",
+                    "cell_ref": "A1",
+                    "ui_scenario_source_v1": {
+                        "join_defs": [{"target": "MAC LOC", "key": "k"}]
+                    },
+                }
+            ],
+        }
+    ]
+    assert _item_join_defs_list(items[0])
+
+
+def test_frozen_scenario_omits_anchor_headers_on_carried_forward() -> None:
+    base = {
+        "items": [
+            {"name": "A", "sources": [{"type": "cell", "sheet_name": "S", "cell_ref": "A1"}]},
+            {"name": "B", "sources": [{"type": "cell", "sheet_name": "S", "cell_ref": "B1"}]},
+            {"name": "C", "sources": [{"type": "cell", "sheet_name": "S", "cell_ref": "C1"}]},
+        ]
+    }
+    stepped = scenario_for_stepped_preview(
+        base,
+        mi_idx=2,
+        master_step_idx=1,
+        active_slot_indices=[0],
+        frozen_through_mi=0,
+        frozen_prior={
+            "version": FROZEN_SNAPSHOT_VERSION,
+            "rows_by_key": {("c:/host.xlsx", 0): ["x", "y", "z"]},
+        },
+    )
+    diag = stepped.get("__debug_diag") or {}
+    assert "frozen_anchor_headers" not in diag
 
 
 def test_frozen_scenario_carries_anchor_headers_for_emit_filter() -> None:

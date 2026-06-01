@@ -194,10 +194,20 @@ def data_agg_diag_file_needed() -> bool:
     )
 
 
+def data_agg_batch_file_path_filter_enabled() -> bool:
+    """本番一括: file_pattern 付き cell ソースで走査結果を OR 絞込。DATA_AGG_BATCH_FILE_PATH_FILTER=0 で無効。"""
+    raw = os.environ.get("DATA_AGG_BATCH_FILE_PATH_FILTER", "").strip().lower()
+    if raw == "0":
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
 def data_agg_file_parallel_workers(*, n_files: int) -> int:
     """
     一括集約の入力ファイル並列数。0 で逐次。
-    DATA_AGG_FILE_PARALLEL_WORKERS: 0=オフ, auto/未設定= min(4, CPU, ファイル数)（2ファイル以上）, 正整数=上限。
+    DATA_AGG_FILE_PARALLEL_WORKERS: 0=オフ, auto/未設定= min(8, CPU, ファイル数)（2ファイル以上）, 正整数=上限。
     """
     if n_files < 2:
         return 0
@@ -206,7 +216,7 @@ def data_agg_file_parallel_workers(*, n_files: int) -> int:
         return 0
     cpu = os.cpu_count() or 4
     if not raw or raw == "auto":
-        return max(1, min(4, cpu, n_files))
+        return max(1, min(8, cpu, n_files))
     try:
         w = int(raw)
         return max(0, min(w, n_files))
@@ -232,6 +242,14 @@ def data_agg_master_progress_one_shot_enabled() -> bool:
 def data_agg_master_frozen_columns_enabled() -> bool:
     """マスタ進捗: 完了項目列を行キー付き凍結し、次項目以降の compute で再走査しない。DATA_AGG_MASTER_FROZEN_COLUMNS=0 で無効。"""
     raw = os.environ.get("DATA_AGG_MASTER_FROZEN_COLUMNS", "").strip().lower()
+    if raw == "0":
+        return False
+    return True
+
+
+def data_agg_master_parallel_extract_enabled() -> bool:
+    """マスタプレビューでもファイル並列抽出を使う。DATA_AGG_MASTER_PARALLEL_EXTRACT=0 で無効。"""
+    raw = os.environ.get("DATA_AGG_MASTER_PARALLEL_EXTRACT", "").strip().lower()
     if raw == "0":
         return False
     return True

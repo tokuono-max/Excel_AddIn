@@ -174,6 +174,15 @@ VBA（`HC_Log`）と Python（`core_log`）が **同じファイル名** で追�
 **結合キー調査（`HC_DIAG_DATA_AGG_JOIN=1`）**  
 `hc_csv_diag.log` に **`[DATA_AGG_JOIN_DUMP]`** を出します。各ファイルの結合書き込み前後で、`phase=enter` / `slice` / `done` / `skip`（理由付き）および **`phase=post_merge`**（結合定義がある列の先頭行プレビュー）が記録されます。`HC_LOG_DIAG=1` と併用してください。MAC RMT など特定列に絞る場合は **`HC_DIAG_DATA_AGG_JOIN_COL=MAC RMT`**（列名の部分一致・大小無視）。
 
+**本番一括の性能（`hc_csv.log` にも出力）**
+
+| 変数名 | 既定 | 意味 |
+|--------|------|------|
+| `DATA_AGG_FILE_PARALLEL_WORKERS` | `auto` | 入力ファイル並列読込。`0` で逐次。`auto` は `min(8, CPU, ファイル数)`。本番一括開始時に `[DATA_AGG] batch extract parallel …` が出る。 |
+| `DATA_AGG_BATCH_FILE_PATH_FILTER` | 有効 | `0` で無効。`file_pattern` 付き cell 項目の OR で走査結果を絞る（マスタプレビューと同ロジック）。 |
+| `DATA_AGG_PER_FILE_TIMING` / `HC_DIAG_DATA_AGG_FILE_TIMING` | オフ | `1` でファイル別 open/read/merge ms を診断ログへ。 |
+| `DATA_AGG_COMPUTE_BATCH_TIMING` / `HC_DIAG_DATA_AGG_BATCH_TIMING` | 本番は常時1行 | 本番一括完了時 `[DATA_AGG] compute_batch_timing …`（extract/merge/total_ms）を `hc_csv.log` に出力。 |
+
 ### 4.3 svc / ブリッジ・Excel 連携
 
 | 変数名 | 既定（概要） | 意味（概要） |

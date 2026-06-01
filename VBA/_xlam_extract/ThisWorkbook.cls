@@ -12,8 +12,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: ThisWorkbook (クラスモジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-02-01
+' 更新日: 2026-06-01
 ' 改版番号および履歴:
+'   1.9.7 (2026-06-01) [保守] モジュールコメント・本文を CP932 正本から復旧（UTF-8 混入による文字化け修復）。
+'   1.9.6 (2026-05-30) [終了] BeforeClose で Main.ShutdownExcelUiCleanup を呼び出し（OnTime 残留・Interactive 復元）。
 '   1.9.5 (2026-02-01) [最終仕様確定] 起動時の環境情報（Ver/Path）および全アドイン走査ログ機能を完全統合。
 '                          VBA開発規定（非省略、1行1命令、ヘッダ強化、Comm禁止、HC_Log一本化）を全域適用。
 '   1.8.0 (2026-02-01) 起動時に全アドインの読込状態を走査しログ出力する機能を実装。
@@ -111,6 +113,9 @@ End Sub
 ' ---------------------------------------------------------------------------------------------------------------------
 ' コールバック名: Workbook_BeforeClose
 ' 作成日: 2026-02-01
+' 改版番号および履歴:
+'   1.0.2 (2026-05-31) Main.ShutdownExcelUiCleanup 1.1.0（EnableEvents・Python 復元）に追随。本クラスは呼び出しのみ。
+'   1.0.1 (2026-05-30) ShutdownExcelUiCleanup 呼び出しを追加。
 ' プロシージャの動作概要: アドイン終了（Excel 終了）直前に発火し、全リソースを安全に解放する。
 ' 引数: Cancel (Boolean) - 終了をキャンセルする場合に True をセット。
 ' 戻り値: なし
@@ -125,7 +130,10 @@ Private Sub Workbook_BeforeClose(ByRef Cancel As Boolean)
     ' 2. 監視センサーの物理解放。
     ' # 【目的】メモリリークを防止し、アプリケーションレベルのフックを安全に解除するため。
     Set mSensor = Nothing
-    
+
+    ' 2b. VBA 側 UI / OnTime の解除（WaitForm・CursorGuard・Interactive）。
+    Call Main.ShutdownExcelUiCleanup
+
     ' 3．Python/Qt側へ終了要求（共通基盤）
     Dim PYSHUT As String
     PYSHUT = "from svc import svc_host; svc_host.request_shutdown_all()"

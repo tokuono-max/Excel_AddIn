@@ -61,6 +61,35 @@ def test_one_shot_ineligible_join_defs() -> None:
     assert master_preview_one_shot_eligible(base, 0, [0, 0]) is False
 
 
+def test_one_shot_eligible_join_on_other_item_only() -> None:
+    base = {
+        "items": [
+            {
+                "name": "品名",
+                "sources": [
+                    {"type": "cell", "sheet_name": "S", "cell_ref": "A1"},
+                    {"type": "cell", "sheet_name": "S", "cell_ref": "B1"},
+                ],
+            },
+            {
+                "name": "MAC",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "S",
+                        "cell_ref": "C1",
+                        "ui_scenario_source_v1": {
+                            "join_defs": [{"target": "MAC LOC", "key": "k"}]
+                        },
+                    }
+                ],
+            },
+        ]
+    }
+    assert master_preview_one_shot_eligible(base, 0, [0, 1]) is True
+    assert master_preview_one_shot_eligible(base, 1, [0]) is False
+
+
 def test_one_shot_uses_max_sources_in_scenario_builder() -> None:
     from svc.data_agg_master_preview import scenario_for_stepped_preview  # noqa: E402
 

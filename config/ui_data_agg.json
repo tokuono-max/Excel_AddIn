@@ -250,7 +250,7 @@
         "SHOW_MINIMIZE": false,
         "SHOW_MAXIMIZE": false,
         "DEFAULT_WIDTH": 400,
-        "DEFAULT_HEIGHT": 120,
+        "DEFAULT_HEIGHT": 138,
         "SHOW_IN_TASKBAR": false,
         "SHOW_CLOSE_BUTTON": false,
         "TOPMOST": false

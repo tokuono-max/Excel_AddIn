@@ -396,6 +396,64 @@ def _extract_paths(req_path: Path, payload: dict[str, Any]) -> _ReqPaths:
     return _ReqPaths(req_path=req_path, result_path=result_path, ready_path=ready_path)
 
 
+def _read_request_payload_with_retry(
+    req_path: Path,
+    *,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """要求 pickle 読み込みの上位再試行。瞬間的なファイルロック揺らぎを吸収する。"""
+    last_exc: Exception | None = None
+    for i in range(max(1, int(max_attempts))):
+        try:
+            payload = ipc_file.read_pickle(req_path)
+            if not isinstance(payload, dict):
+                raise TypeError("payload is not dict")
+            return payload
+        except (PermissionError, EOFError, FileNotFoundError) as exc:
+            last_exc = exc
+            if i + 1 >= max_attempts:
+                break
+            time.sleep(min(0.08, 0.02 * (i + 1)))
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("request payload read failed")
+
+
+def _quarantine_bad_request(req_path: Path) -> None:
+    """読込不能な要求を隔離。即削除せず診断用に残す。"""
+    try:
+        failed_dir = ipc_file.get_request_dir() / "_failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        ts_ms = int(time.time() * 1000)
+        dst = failed_dir / f"{req_path.stem}_{ts_ms}.bad.pkl"
+        req_path.replace(dst)
+        try:
+            logger.warning("[UI_SERVER] moved unreadable req to failed dir: %s", dst)
+        except Exception:
+            pass
+        try:
+            max_keep = 200
+            raw = (os.environ.get("HC_IPC_FAILED_REQ_MAX_KEEP") or "").strip()
+            if raw:
+                max_keep = max(0, int(raw))
+            trimmed = ipc_file.cap_failed_requests(max_keep=max_keep)
+            if trimmed > 0:
+                logger.info(
+                    "[UI_SERVER] failed req cap trimmed=%s max_keep=%s",
+                    trimmed,
+                    max_keep,
+                )
+        except Exception:
+            pass
+        return
+    except Exception:
+        pass
+    try:
+        req_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _write_ready(path: Path) -> None:
     try:
         ipc_file.write_pickle(path, {"status": "READY_UI"})
@@ -1401,6 +1459,7 @@ def main() -> int:
         _start_shutdown_poll_timer()
 
         inst = QApplication.instance()
+        next_failed_cleanup_at = time.monotonic()
 
         while True:
             # Pump Qt events so modeless windows (show) can paint and timers fire.
@@ -1416,6 +1475,21 @@ def main() -> int:
 
             req = ipc_file.pop_next_request()
             if req is None:
+                now_mono = time.monotonic()
+                if now_mono >= next_failed_cleanup_at:
+                    try:
+                        n_removed = ipc_file.cleanup_failed_requests(
+                            ttl_sec=24 * 60 * 60,
+                            max_remove=10,
+                        )
+                        if n_removed > 0:
+                            logger.info(
+                                "[UI_SERVER] cleaned failed requests count=%s",
+                                n_removed,
+                            )
+                    except Exception:
+                        pass
+                    next_failed_cleanup_at = now_mono + 60.0
                 if inst is not None:
                     try:
                         inst.processEvents()
@@ -1427,9 +1501,7 @@ def main() -> int:
             req_path = _claim_request(Path(str(req)))
 
             try:
-                payload = ipc_file.read_pickle(req_path)
-                if not isinstance(payload, dict):
-                    raise TypeError("payload is not dict")
+                payload = _read_request_payload_with_retry(req_path)
                 paths = _extract_paths(req_path, payload)
             except Exception:
                 msg = f"failed to read req: {req_path}\n{traceback.format_exc()}"
@@ -1438,10 +1510,7 @@ def main() -> int:
                     logger.error("[UI_SERVER] %s", msg.replace("\n", " "))
                 except Exception:
                     pass
-                try:
-                    req_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                _quarantine_bad_request(req_path)
                 continue
 
             if paths.ready_path is not None:

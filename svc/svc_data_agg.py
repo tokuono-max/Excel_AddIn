@@ -9,6 +9,9 @@ Purpose:
   データ集約・クレンジング。シナリオの保存・読込、ステップ実行（動作確認）、一括実行のオーケストレーション。
   画面は ui_qt.ui_data_agg + config/ui_data_agg.json。走査・シナリオ・抽出・書き込みはサブモジュールに分離する。
 History (latest 3):
+  - 0.5.2 (2026-06-01) 本番一括: compute 完了時の不変条件を診断ログ warning のみで検知（UI 不変）。
+  - 0.5.1 (2026-06-01) 本番一括: 並列 extract 中の進捗（ファイル名・k/n・読込中）。「集約を実行中」を廃止。
+  - 0.5.0 (2026-06-01) 本番一括性能: join write+link 1パス、進捗 IPC 256 間引き、file_pattern 先スキップ、並列 auto=6。
   - 0.4.9 (2026-05-28) 本番一括キャンセル: ポール無間隔・結合プール走査・Excel読込前・batch_cancel_scope で応答短縮。
   - 0.4.8 (2026-05-28) 本番一括キャンセル: 押下・検知ログ、ポール 50ms、項目抽出・結合ループ内チェック、進捗「中止しています…」。
   - 0.4.7 (2026-05-28) 本番一括: 進捗キャンセル（走査・集約計算、中止フラグ IPC）。途中データ破棄・STATUS_CANCEL 通知。
@@ -39,6 +42,7 @@ import re
 import sys
 import threading
 import time
+import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +66,7 @@ __version__ = "0.4.9"
 
 # data_agg_master_preview.MASTER_PREVIEW_DIAG_SOURCE と同一（循環 import 避け）
 _MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
+_JOIN_SLICE_PROGRESS_STRIDE = 256
 
 
 def _master_preview_item_cap_idx(debug_diag: Any) -> int | None:
@@ -77,6 +82,87 @@ def _master_preview_item_cap_idx(debug_diag: Any) -> int | None:
     if isinstance(cap, int) and cap >= 0:
         return cap
     return None
+
+
+def master_preview_extract_item_allowlist(
+    scenario: dict[str, Any],
+    *,
+    mi_idx: int,
+) -> list[int] | None:
+    """
+    横断 join_search（光特性×紐づけ型）のマスタ項目では、未到達列の再抽出を避ける。
+    match_keys・結合比較列・ホスト・link 先だけをファイル走査で読む。
+
+    横断でない通常項目では None（従来どおり master_preview_item_cap_idx のみ）。
+    """
+    items = list((scenario or {}).get("items") or [])
+    if mi_idx < 0 or mi_idx >= len(items):
+        return None
+    host = items[mi_idx]
+    if not isinstance(host, dict) or not _item_join_defs_list(host):
+        return None
+    headers = [
+        str(it.get("name") or it.get("id") or ("項目_%s" % i))
+        for i, it in enumerate(items)
+    ]
+    if not _join_host_needs_cross_file_pool(host, items, headers):
+        return None
+    header_set = set(headers)
+    join_targets = _join_search_targets_from_defs(_item_join_defs_list(host))
+    allow: set[int] = {int(mi_idx)}
+    for col in _resolve_match_keys_to_headers(
+        (scenario or {}).get("match_keys") or [], items, headers
+    ):
+        if col in header_set:
+            allow.add(headers.index(col))
+    # 比較列を「列名」だけでなく link_defs 経由で供給する項目も含める（例: 機器番号→MAC）。
+    # これが無いと global_pool に光特性側の錨行が無く cross_join で side_rows=0 になる。
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        h = headers[i] if i < len(headers) else str(it.get("name") or it.get("id") or "")
+        h = str(h).strip()
+        supplies = h in join_targets
+        if not supplies:
+            for src in it.get("sources") or []:
+                if not isinstance(src, dict):
+                    continue
+                block = source_ui_block(src)
+                if not isinstance(block, dict):
+                    continue
+                for ld in block.get("link_defs") or []:
+                    if str(ld.get("item") or "").strip() in join_targets:
+                        supplies = True
+                        break
+                if supplies:
+                    break
+        if supplies:
+            allow.add(int(i))
+    for src in host.get("sources") or []:
+        if not isinstance(src, dict):
+            continue
+        block = source_ui_block(src)
+        if not isinstance(block, dict):
+            continue
+        for ld in block.get("link_defs") or []:
+            if not isinstance(ld, dict):
+                continue
+            ln = str(ld.get("item") or "").strip()
+            if ln in header_set:
+                allow.add(headers.index(ln))
+    path_col = resolve_path_column_for_merge(items, headers)
+    if path_col and path_col in header_set:
+        allow.add(headers.index(path_col))
+    side_patterns = _join_comparison_side_file_patterns(host, items, headers)
+    host_patterns = _item_source_file_patterns(host)
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        for p in _item_source_file_patterns(it):
+            if p in side_patterns or p in host_patterns:
+                allow.add(int(i))
+                break
+    return sorted(allow)
 
 cst: Any = None
 try:
@@ -436,6 +522,58 @@ def _row_iter_index(row: dict[str, Any]) -> int:
         return 0
 
 
+def _batch_paths_rank_index(paths: Sequence[str | Path]) -> dict[str, int]:
+    """一括入力 paths の走査順（filter 後の順序）を __file_path / __norm_path 参照用に登録する。"""
+    rank: dict[str, int] = {}
+    for i, p in enumerate(paths):
+        sp = str(p)
+        rank[sp] = int(i)
+        try:
+            rank[normalize_source_path(sp)] = int(i)
+        except Exception:
+            pass
+    return rank
+
+
+def _master_preview_merged_row_sort_key(
+    row: dict[str, Any],
+    paths_rank: dict[str, int],
+) -> tuple[Any, ...]:
+    """結合プール行の並び: 集約ファイル順 → 反復 index → パス文字列（安定）。"""
+    fp = str(row.get("__file_path") or "")
+    np = str(row.get("__norm_path") or "")
+    ri = paths_rank.get(fp)
+    if ri is None and np:
+        ri = paths_rank.get(np)
+    if ri is None:
+        return (10**9, _row_iter_index(row), fp, np)
+    return (int(ri), _row_iter_index(row), fp)
+
+
+def preview_use_production_table_rows(dd: dict[str, Any] | None) -> bool:
+    """マスタプレビューで本番一括と同じ table_rows 組立（match_keys 結合）を使う。"""
+    return bool(isinstance(dd, dict) and dd.get("preview_use_production_table_rows"))
+
+
+def apply_master_preview_table_row_order(
+    scenario: dict[str, Any],
+    headers: list[str],
+    table_rows: list[list[Any]],
+) -> list[list[Any]]:
+    """本番一括と同じ excel_options.sort_keys で table_rows を並べ替える（マスタデバッグ表示用）。"""
+    from svc import svc_data_agg_scenario as scenario_mod  # noqa: WPS433
+    from svc import svc_data_agg_write as write_mod  # noqa: WPS433
+
+    if not table_rows or not headers:
+        return table_rows
+    excel_opts = scenario_mod.normalize_excel_options(
+        (scenario or {}).get("excel_options")
+    )
+    return write_mod.sort_table_rows_for_excel_options(
+        headers, table_rows, excel_opts
+    )
+
+
 def _apply_master_preview_frozen_overlay(
     merged_rows: list[dict[str, Any]],
     *,
@@ -633,17 +771,150 @@ def _join_host_needs_cross_file_pool(
     return False
 
 
+def _join_comparison_side_file_patterns(
+    host_item: dict[str, Any],
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> list[str]:
+    """横断結合の比較列を供給する項目の file_pattern（小文字・重複なし）。"""
+    join_targets = _join_search_targets_from_defs(_item_join_defs_list(host_item))
+    if not join_targets:
+        return []
+    patterns: list[str] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        h = headers[i] if i < len(headers) else str(it.get("name") or it.get("id") or "")
+        h = str(h).strip()
+        supplies = h in join_targets
+        if not supplies:
+            for src in it.get("sources") or []:
+                if not isinstance(src, dict):
+                    continue
+                block = source_ui_block(src)
+                if not isinstance(block, dict):
+                    continue
+                for ld in block.get("link_defs") or []:
+                    if str(ld.get("item") or "").strip() in join_targets:
+                        supplies = True
+                        break
+                if supplies:
+                    break
+        if not supplies:
+            continue
+        for p in _item_source_file_patterns(it):
+            if p not in patterns:
+                patterns.append(p)
+    return patterns
+
+
+def _pool_rows_for_host_file(
+    pool: list[dict[str, Any]],
+    host_file_path: str,
+) -> list[dict[str, Any]]:
+    hf = str(host_file_path or "")
+    if not hf:
+        return []
+    return [r for r in pool if isinstance(r, dict) and str(r.get("__file_path") or "") == hf]
+
+
+def _pool_rows_matching_file_patterns(
+    pool: list[dict[str, Any]],
+    patterns: list[str],
+) -> list[dict[str, Any]]:
+    if not patterns:
+        return []
+    return [
+        r
+        for r in pool
+        if isinstance(r, dict)
+        and _file_path_matches_patterns(str(r.get("__file_path") or ""), patterns)
+    ]
+
+
 def _join_search_pool_scope(
     pool: list[dict[str, Any]],
     host_file_path: str,
     cross_file: bool,
+    *,
+    host_item: Optional[dict[str, Any]] = None,
+    items: Optional[list[dict[str, Any]]] = None,
+    headers: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
-    if cross_file:
-        return pool
+    if not cross_file:
+        hf = str(host_file_path or "")
+        if not hf:
+            return pool
+        return _pool_rows_for_host_file(pool, hf)
     hf = str(host_file_path or "")
-    if not hf:
+    side_patterns: list[str] = []
+    if host_item is not None and items is not None and headers is not None:
+        side_patterns = _join_comparison_side_file_patterns(host_item, items, headers)
+    if not side_patterns and not hf:
         return pool
-    return [r for r in pool if isinstance(r, dict) and str(r.get("__file_path") or "") == hf]
+    out: list[dict[str, Any]] = []
+    host_rows = _pool_rows_for_host_file(pool, hf) if hf else []
+    if host_rows:
+        out.extend(host_rows)
+    side_rows = _pool_rows_matching_file_patterns(pool, side_patterns)
+    if side_rows:
+        seen = {id(r) for r in out}
+        for r in side_rows:
+            if id(r) not in seen:
+                seen.add(id(r))
+                out.append(r)
+    return out
+
+
+@dataclass(frozen=True)
+class _CrossFileJoinSearchPlan:
+    """横断結合: side 行と索引を join 項目あたり 1 回だけ構築する。"""
+
+    side_rows: tuple[dict[str, Any], ...]
+    side_index: JoinSearchIndex
+
+
+def _build_cross_file_join_search_plan(
+    global_pool: list[dict[str, Any]],
+    host_item: dict[str, Any],
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> _CrossFileJoinSearchPlan:
+    side_patterns = _join_comparison_side_file_patterns(host_item, items, headers)
+    side_rows = tuple(_pool_rows_matching_file_patterns(global_pool, side_patterns))
+    join_defs = _item_join_defs_list(host_item)
+    side_index = _build_join_search_index(list(side_rows), join_defs)
+    return _CrossFileJoinSearchPlan(side_rows, side_index)
+
+
+def _join_search_rows_for_slice_with_host_supplement(
+    side_index: JoinSearchIndex,
+    host_rows: list[dict[str, Any]],
+    join_defs: list[dict[str, Any]],
+    jv: dict[str, Any],
+    targets: list[str],
+    k: int,
+) -> list[dict[str, Any]]:
+    """side 索引 lookup + 当該 host 行の線形スキャン（索引再構築なし）。"""
+    idx_cols, idx_map = side_index
+    if idx_cols and idx_map:
+        side = _join_search_rows_for_slice_indexed(idx_cols, idx_map, jv, k)
+    else:
+        side = []
+    if not host_rows:
+        return side
+    host = _join_search_rows_for_slice(host_rows, join_defs, jv, targets, k)
+    if not side:
+        return host
+    if not host:
+        return side
+    seen = {id(r) for r in side}
+    out = list(side)
+    for r in host:
+        if id(r) not in seen:
+            seen.add(id(r))
+            out.append(r)
+    return out
 
 
 def _narrow_join_matched_rows_for_write(
@@ -815,6 +1086,21 @@ def _join_search_rows_for_slice(
     return out
 
 
+def _index_pool_rows_by_host_file(
+    pool: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """global_pool を __file_path ごとに 1 回だけ索引化（join pass 毎の全件走査を避ける）。"""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in pool:
+        if not isinstance(r, dict):
+            continue
+        fp = str(r.get("__file_path") or "")
+        if not fp:
+            continue
+        out.setdefault(fp, []).append(r)
+    return out
+
+
 def _build_join_search_index(
     search_rows: list[dict[str, Any]],
     join_defs: list[dict[str, Any]],
@@ -823,6 +1109,8 @@ def _build_join_search_index(
     join_defs の比較列で検索行を前索引化する。
     1スライスごとの全行走査を避け、長時間化（O(n_join * pool_len)）を抑える。
     """
+    from svc.data_agg_cancel import poll_active_cancel_every  # noqa: WPS433
+
     cols: list[str] = []
     for jd in join_defs:
         c = str(jd.get("item") or "").strip()
@@ -831,7 +1119,8 @@ def _build_join_search_index(
     if not cols:
         return [], {}
     idx: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    for r in search_rows:
+    for ri, r in enumerate(search_rows):
+        poll_active_cancel_every(ri, stride=256)
         key = tuple(_join_cell_compare_norm(r.get(c)) for c in cols)
         idx.setdefault(key, []).append(r)
     return cols, idx
@@ -1022,6 +1311,9 @@ def _apply_join_key_search_write(
     join_dump_ctx: Optional[dict[str, Any]] = None,
     cross_file: bool = False,
     join_index: Optional[JoinSearchIndex] = None,
+    join_host_rows: Optional[list[dict[str, Any]]] = None,
+    join_slice_progress: Optional[Callable[[int, int], None]] = None,
+    header_set: Optional[set[str]] = None,
 ) -> None:
     """
     結合キー新仕様: セルから読んだ値と、表上の同一マスタ列の値を AND で比較し、
@@ -1115,6 +1407,16 @@ def _apply_join_key_search_write(
             )
         return
 
+    link_targets: list[str] = []
+    lv: dict[str, Any] = {}
+    if header_set is not None:
+        for ld in _item_link_defs_list(item):
+            t = str(ld.get("item") or "").strip()
+            if t and t in header_set and t not in link_targets:
+                link_targets.append(t)
+        if link_targets:
+            lv = bundle.get("link_values") or {}
+
     _search = search_pool if search_pool is not None else pool
     t_join_start = time.perf_counter()
     if join_index is not None:
@@ -1124,7 +1426,11 @@ def _apply_join_key_search_write(
     idx_hit = bool(idx_cols) and bool(idx_map)
 
     def _rows_for_slice(k: int) -> list[dict[str, Any]]:
-        if idx_hit:
+        if join_host_rows is not None and join_index is not None:
+            raw = _join_search_rows_for_slice_with_host_supplement(
+                join_index, join_host_rows, join_defs, jv, targets, k
+            )
+        elif idx_hit:
             raw = _join_search_rows_for_slice_indexed(idx_cols, idx_map, jv, k)
         else:
             raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
@@ -1148,8 +1454,13 @@ def _apply_join_key_search_write(
         from svc.data_agg_cancel import poll_active_cancel, poll_active_cancel_every  # noqa: WPS433
 
         n_write = 0
+        n_link = 0
         for k in range(n_join):
             poll_active_cancel(force=True)
+            if join_slice_progress is not None and (
+                k == 0 or k == n_join - 1 or k % _JOIN_SLICE_PROGRESS_STRIDE == 0
+            ):
+                join_slice_progress(k, n_join)
             rows_k = _rows_for_slice(k)
             if _jd_detail and k < max_sl:
                 ex_map_log: dict[str, Any] = {}
@@ -1174,14 +1485,23 @@ def _apply_join_key_search_write(
                 poll_active_cancel_every(ri, stride=32)
                 r[item_col] = merge_cell_for_write_mode(r.get(item_col), pk_write, write_mode)
                 n_write += 1
+                if link_targets:
+                    for tgt in link_targets:
+                        vals = lv.get(tgt) or []
+                        if not isinstance(vals, list):
+                            continue
+                        new_v = vals[k] if k < len(vals) else None
+                        r[tgt] = merge_cell_for_write_mode(r.get(tgt), new_v, write_mode)
+                        n_link += 1
         if _jd_on:
             _agg_diag.info(
                 "[DATA_AGG_JOIN_DUMP] phase=done %s mode=1prim_n_join item_col=%s "
-                "n_join_slices=%s row_writes=%s pk=%s index_hit=%s pool_len=%s ms=%s",
+                "n_join_slices=%s row_writes=%s link_writes=%s pk=%s index_hit=%s pool_len=%s ms=%s",
                 _pfx,
                 item_col,
                 n_join,
                 n_write,
+                n_link,
                 _join_dump_pv(pk_write),
                 idx_hit,
                 len(_search),
@@ -1193,8 +1513,13 @@ def _apply_join_key_search_write(
 
     n_op = min(n_prim, n_join)
     total_w = 0
+    total_link = 0
     for k in range(n_op):
         poll_active_cancel(force=True)
+        if join_slice_progress is not None and (
+            k == 0 or k == n_op - 1 or k % _JOIN_SLICE_PROGRESS_STRIDE == 0
+        ):
+            join_slice_progress(k, n_op)
         pk = prim_vals[k]
         pk_write = _coerce_cell_scalar_to_full_text(pk).strip() if pk is not None else ""
         if not pk_write:
@@ -1222,14 +1547,23 @@ def _apply_join_key_search_write(
             poll_active_cancel_every(ri, stride=32)
             r[item_col] = merge_cell_for_write_mode(r.get(item_col), pk_write, write_mode)
             total_w += 1
+            if link_targets:
+                for tgt in link_targets:
+                    vals = lv.get(tgt) or []
+                    if not isinstance(vals, list):
+                        continue
+                    new_v = vals[k] if k < len(vals) else None
+                    r[tgt] = merge_cell_for_write_mode(r.get(tgt), new_v, write_mode)
+                    total_link += 1
     if _jd_on:
         _agg_diag.info(
             "[DATA_AGG_JOIN_DUMP] phase=done %s mode=paired item_col=%s n_op=%s row_writes=%s "
-            "index_hit=%s pool_len=%s ms=%s",
+            "link_writes=%s index_hit=%s pool_len=%s ms=%s",
             _pfx,
             item_col,
             n_op,
             total_w,
+            total_link,
             idx_hit,
             len(_search),
             int((time.perf_counter() - t_join_start) * 1000),
@@ -1252,6 +1586,8 @@ def _apply_join_key_search_link_write(
     join_dump_ctx: Optional[dict[str, Any]] = None,
     cross_file: bool = False,
     join_index: Optional[JoinSearchIndex] = None,
+    join_host_rows: Optional[list[dict[str, Any]]] = None,
+    join_slice_progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
     波及抑制 G1–G5: join_defs と link_defs を持つ項目のみ。
@@ -1303,7 +1639,11 @@ def _apply_join_key_search_link_write(
     max_sl = core_env.data_agg_join_dump_max_slices() if _jd_detail else 0
 
     def _rows_for_slice_link(k: int) -> list[dict[str, Any]]:
-        if idx_hit:
+        if join_host_rows is not None and join_index is not None:
+            raw = _join_search_rows_for_slice_with_host_supplement(
+                join_index, join_host_rows, join_defs, jv, targets, k
+            )
+        elif idx_hit:
             raw = _join_search_rows_for_slice_indexed(idx_cols, idx_map, jv, k)
         else:
             raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
@@ -1331,6 +1671,10 @@ def _apply_join_key_search_link_write(
     if n_prim == 1:
         for k in range(n_join):
             poll_active_cancel(force=True)
+            if join_slice_progress is not None and (
+                k == 0 or k == n_join - 1 or k % _JOIN_SLICE_PROGRESS_STRIDE == 0
+            ):
+                join_slice_progress(k, n_join)
             rows_k = _rows_for_slice_link(k)
             if _jd_detail and k < max_sl:
                 _agg_diag.info(
@@ -1354,6 +1698,10 @@ def _apply_join_key_search_link_write(
         n_op = min(n_prim, n_join)
         for k in range(n_op):
             poll_active_cancel(force=True)
+            if join_slice_progress is not None and (
+                k == 0 or k == n_op - 1 or k % _JOIN_SLICE_PROGRESS_STRIDE == 0
+            ):
+                join_slice_progress(k, n_op)
             rows_k = _rows_for_slice_link(k)
             if _jd_detail and k < max_sl:
                 _agg_diag.info(
@@ -1393,6 +1741,8 @@ def _apply_join_key_search_across_file_passes(
     probe_caller: Optional[str],
     preview_master_mode: bool,
     cancel_check: Optional[Callable[..., None]] = None,
+    progress_hook: Optional[Callable[..., None]] = None,
+    progress_n_files: int = 0,
 ) -> None:
     """
     全ファイル走査後に結合キー検索を実行する（ファイル横断結合で table_rows へ先出ししないため）。
@@ -1406,6 +1756,91 @@ def _apply_join_key_search_across_file_passes(
         if cancel_check is not None:
             cancel_check(force=force)
 
+    _join_prog_last: list[float] = [0.0]
+    _join_slice_prog_last: list[float] = [0.0]
+    if progress_hook is not None and preview_master_mode:
+        _join_prog_interval = 0.10
+    elif preview_master_mode:
+        _join_prog_interval = 0.25
+    else:
+        _join_prog_interval = 0.0
+    _join_slice_prog_interval = (
+        0.0 if preview_master_mode else (0.12 if progress_hook is not None else 0.0)
+    )
+
+    def _join_progress(
+        suffix: str,
+        *,
+        file_index: int = 1,
+        log: bool | None = None,
+    ) -> None:
+        if log is None:
+            log = not preview_master_mode
+        if log:
+            try:
+                logger.info(
+                    "[DATA_AGG] join_progress %s file_index=%s",
+                    str(suffix or "")[:120],
+                    file_index,
+                )
+            except Exception:
+                pass
+        if progress_hook is None:
+            return
+        if preview_master_mode and _join_prog_interval > 0:
+            now = time.monotonic()
+            if (now - _join_prog_last[0]) < _join_prog_interval:
+                return
+            _join_prog_last[0] = now
+        nf = max(int(progress_n_files or len(file_passes) or 1), 1)
+        try:
+            progress_hook(6, suffix, file_index, nf)
+        except DataAggCancelled:
+            raise
+        except TypeError:
+            try:
+                progress_hook(6, suffix)
+            except DataAggCancelled:
+                raise
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _join_slice_progress_hook(k: int, n: int, *, file_name: str) -> None:
+        """スライス進捗は UI のみ更新（logger は出さない）。"""
+        if progress_hook is None:
+            return
+        if _join_slice_prog_interval > 0:
+            now = time.monotonic()
+            if (now - _join_slice_prog_last[0]) < _join_slice_prog_interval:
+                return
+            _join_slice_prog_last[0] = now
+        nf = max(int(progress_n_files or len(file_passes) or 1), 1)
+        fi = max(int(progress_n_files or 1), 1)
+        suffix = "%s 結合 %s/%s" % (file_name, k + 1, n)
+        try:
+            progress_hook(6, suffix, fi, nf)
+        except DataAggCancelled:
+            raise
+        except TypeError:
+            try:
+                progress_hook(6, suffix)
+            except DataAggCancelled:
+                raise
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        logger.info(
+            "[DATA_AGG] join_search enter pool_rows=%s file_passes=%s",
+            len(global_pool),
+            len(file_passes),
+        )
+    except Exception:
+        pass
     t_all = time.perf_counter()
     n_item_with_join = 0
     n_file_attempt = 0
@@ -1418,7 +1853,29 @@ def _apply_join_key_search_across_file_passes(
         n_item_with_join += 1
         item_col = headers[ji] if ji < len(headers) else ""
         wm = column_modes[ji] if ji < len(column_modes) else "fill_in"
+        if progress_hook is not None and item_col:
+            _join_progress(
+                "結合項目「%s」" % item_col,
+                file_index=max(progress_n_files, 1),
+                log=False,
+            )
         cross = _join_host_needs_cross_file_pool(jit, items, headers)
+        cross_plan: Optional[_CrossFileJoinSearchPlan] = None
+        side_list_ref: Optional[list[dict[str, Any]]] = None
+        if cross:
+            _join_progress("結合索引を構築中", file_index=max(progress_n_files, 1))
+            cross_plan = _build_cross_file_join_search_plan(global_pool, jit, items, headers)
+            side_list_ref = list(cross_plan.side_rows)
+            try:
+                logger.info(
+                    "[DATA_AGG] cross_join index_built side_rows=%s index_keys=%s",
+                    len(cross_plan.side_rows),
+                    len(cross_plan.side_index[1]),
+                )
+            except Exception:
+                pass
+        join_defs_item = _item_join_defs_list(jit)
+        n_cross_applied = 0
         for fp_info in file_passes:
             n_file_attempt += 1
             _poll_cancel()
@@ -1432,11 +1889,42 @@ def _apply_join_key_search_across_file_passes(
             jb = bundles[ji] if ji < len(bundles) else {}
             if not isinstance(jb, dict):
                 jb = {}
-            search_pool = _join_search_pool_scope(global_pool, file_path, cross)
-            join_defs_item = _item_join_defs_list(jit)
-            join_index = _resolve_join_search_index(
-                search_pool, join_defs_item, join_index_cache
-            )
+            join_host_rows: Optional[list[dict[str, Any]]] = None
+            search_pool_len = 0
+            join_slice_progress: Optional[Callable[[int, int], None]] = None
+            if cross and cross_plan is not None:
+                join_index = cross_plan.side_index
+                search_pool = side_list_ref or []
+                search_pool_len = len(search_pool)
+                n_cross_applied += 1
+                _join_progress(
+                    Path(file_path).name if file_path else "結合",
+                    file_index=max(progress_n_files, 1),
+                    log=False,
+                )
+
+                def _slice_progress(
+                    k: int,
+                    n: int,
+                    *,
+                    _fn: str = Path(file_path).name,
+                ) -> None:
+                    _join_slice_progress_hook(k, n, file_name=_fn)
+
+                join_slice_progress = _slice_progress
+            else:
+                search_pool = _join_search_pool_scope(
+                    global_pool,
+                    file_path,
+                    cross,
+                    host_item=jit,
+                    items=items,
+                    headers=headers,
+                )
+                search_pool_len = len(search_pool)
+                join_index = _resolve_join_search_index(
+                    search_pool, join_defs_item, join_index_cache
+                )
             t_pair = time.perf_counter()
             _jd_ctx: Optional[dict[str, Any]] = None
             try:
@@ -1460,29 +1948,22 @@ def _apply_join_key_search_across_file_passes(
                 join_dump_ctx=_jd_ctx,
                 cross_file=cross,
                 join_index=join_index,
+                join_host_rows=join_host_rows,
+                join_slice_progress=join_slice_progress,
+                header_set=header_set,
             )
-            _apply_join_key_search_link_write(
-                global_pool,
-                jit,
-                jb,
-                wm,
-                header_set,
-                search_pool=search_pool,
-                join_dump_ctx=_jd_ctx,
-                cross_file=cross,
-                join_index=join_index,
-            )
-            try:
-                _agg_diag.info(
-                    "[DATA_AGG_DIAG] join_pass item=%s file=%s cross_file=%s search_pool=%s elapsed_ms=%s",
-                    item_col or ("item_%s" % ji),
-                    Path(file_path).name if file_path else "-",
-                    cross,
-                    len(search_pool),
-                    int((time.perf_counter() - t_pair) * 1000),
-                )
-            except Exception:
-                pass
+            if not preview_master_mode:
+                try:
+                    _agg_diag.info(
+                        "[DATA_AGG_DIAG] join_pass item=%s file=%s cross_file=%s search_pool=%s elapsed_ms=%s",
+                        item_col or ("item_%s" % ji),
+                        Path(file_path).name if file_path else "-",
+                        cross,
+                        search_pool_len,
+                        int((time.perf_counter() - t_pair) * 1000),
+                    )
+                except Exception:
+                    pass
     try:
         _agg_diag.info(
             "[DATA_AGG_DIAG] join_pass summary items_with_join=%s file_attempt=%s file_applied=%s "
@@ -2115,6 +2596,26 @@ def _batch_progress_pct_from_hook(
     if m3:
         rdone, rtot = int(m3.group(1)), max(int(m3.group(2)), 1)
     if sub == 4:
+        if m2:
+            itot = itot or max(int(ni or 1), 1)
+            idone = idone or 1
+            frac = (fi_cur - 1) / nfm + (1.0 / nfm) * (idone / itot)
+            return 5 + int(min(1.0, max(0.0, frac)) * 62)
+        m_file_done = re.search(r"（\s*(\d+)\s*/\s*(\d+)\s*）", s)
+        if m_file_done:
+            kdone = int(m_file_done.group(1))
+            ktot = max(int(m_file_done.group(2)), 1)
+            frac = kdone / ktot
+            return 5 + int(min(1.0, max(0.0, frac)) * 62)
+        m_file_begin = re.search(r"ファイル\s+(\d+)\s*/\s*(\d+)", s)
+        if m_file_begin:
+            kdone = int(m_file_begin.group(1))
+            ktot = max(int(m_file_begin.group(2)), 1)
+            frac = kdone / ktot
+            return 5 + int(min(1.0, max(0.0, frac)) * 62)
+        if "読込中" in s:
+            frac = max(0.0, (fi_cur - 1) / nfm)
+            return 5 + int(min(1.0, frac) * 62)
         itot = itot or max(int(ni or 1), 1)
         idone = idone or 1
         frac = (fi_cur - 1) / nfm + (1.0 / nfm) * (idone / itot)
@@ -2132,6 +2633,110 @@ def _batch_progress_pct_from_hook(
     return 8
 
 
+def _batch_hook_resolve_current_file(
+    suffix: str,
+    fi_kw: int | None,
+    file_paths: Sequence[str | Path],
+) -> str:
+    """progress_hook suffix / file_index から進捗 UI 用のファイル名を解決する。"""
+    sfx = str(suffix or "").strip()
+    if sfx:
+        m_path = re.search(
+            r"ファイル\s*\d+\s*/\s*\d+\s*:\s*(.+?)(?:\s|$|（)",
+            sfx,
+        )
+        if m_path:
+            return m_path.group(1).strip()
+        m_fn = re.match(r"^(.+?)\s+（", sfx)
+        if m_fn:
+            return m_fn.group(1).strip()
+        m_fn2 = re.match(r"^(.+?)\s+読込中", sfx)
+        if m_fn2:
+            return m_fn2.group(1).strip()
+        m_list = re.search(
+            r"一覧行\s*\d+\s*/\s*\d+\s*（\s*(.+?)\s*）",
+            sfx,
+        )
+        if m_list:
+            return m_list.group(1).strip()
+        m_join = re.match(r"^(.+?)\s+結合\s+\d+\s*/\s*\d+", sfx)
+        if m_join:
+            return m_join.group(1).strip()
+    fps = list(file_paths)
+    if fi_kw is not None:
+        try:
+            ix = int(fi_kw) - 1
+            if 0 <= ix < len(fps):
+                return Path(str(fps[ix])).name
+        except Exception:
+            pass
+    mfp = re.search(r"（\s*(\d+)\s*/\s*(\d+)\s*）", sfx)
+    if mfp:
+        try:
+            ix = int(mfp.group(1)) - 1
+            if 0 <= ix < len(fps):
+                return Path(str(fps[ix])).name
+        except Exception:
+            pass
+    return ""
+
+
+def _batch_hook_progress_lines(sub: int, suffix: str) -> tuple[str, str]:
+    """本番一括進捗: 1 行目=フェーズ名、2 行目=詳細（suffix）。"""
+    labels = {4: "取り出し", 5: "行のまとめ", 6: "照合・パス", 7: "一覧の組立"}
+    base = labels.get(int(sub), "処理")
+    sfx = str(suffix or "").strip()
+    if not sfx:
+        return base, ""
+    if int(sub) in (4, 5, 6, 7):
+        return base, sfx[:120]
+    return ("%s %s" % (base, sfx)).strip()[:120], ""
+
+
+def _log_compute_batch_result_invariants(
+    *,
+    scenario_id: str,
+    n_files: int,
+    table_rows: list[list[Any]],
+    join_search_global_pool: list[dict[str, Any]],
+    use_join_search_merge: bool,
+    preview_master_mode: bool,
+    max_table_rows: Optional[int],
+    parallel_expected: int,
+    parallel_got: int,
+) -> None:
+    """compute 完了時の異常パターンを診断ログのみで警告（UI・結果は変更しない）。"""
+    try:
+        if preview_master_mode or n_files < 1:
+            return
+        if max_table_rows is not None and max_table_rows > 0:
+            return
+        if parallel_expected > 0 and parallel_got != parallel_expected:
+            _agg_diag.warning(
+                "[DATA_AGG_DIAG] invariant parallel_extract_incomplete scenario=%s "
+                "expected=%s got=%s",
+                scenario_id,
+                parallel_expected,
+                parallel_got,
+            )
+        if not table_rows and join_search_global_pool and use_join_search_merge:
+            _agg_diag.warning(
+                "[DATA_AGG_DIAG] invariant table_empty pool_nonempty scenario=%s "
+                "files=%s pool=%s",
+                scenario_id,
+                n_files,
+                len(join_search_global_pool),
+            )
+        elif not table_rows and n_files > 0 and not use_join_search_merge:
+            _agg_diag.warning(
+                "[DATA_AGG_DIAG] invariant table_empty scenario=%s files=%s",
+                scenario_id,
+                n_files,
+            )
+    except Exception:
+        pass
+
+
 def _batch_done_notify(
     parent_hwnd: int,
     sheet_id: str,
@@ -2140,14 +2745,21 @@ def _batch_done_notify(
     *,
     ok: bool,
     use_parent_dialog: bool,
+    run_id: str = "",
 ) -> None:
     """一括実行の完了表示。親 Qt がポーリングするファイル通知を優先し、失敗時は従来の完了 IPC にフォールバックする。"""
+    try:
+        from core.core_cursor import data_agg_batch_cursor_off  # noqa: WPS433
+
+        data_agg_batch_cursor_off()
+    except Exception:
+        pass
     wrote = False
     if use_parent_dialog:
         try:
             from ui_qt.ipc_file import write_batch_done_notify  # noqa: WPS433
 
-            write_batch_done_notify(sheet_id, title, message, ok=ok)
+            write_batch_done_notify(sheet_id, title, message, ok=ok, run_id=run_id)
             wrote = True
         except Exception as exc:
             logger.warning("[DATA_AGG] batch done notify ファイル書込失敗: %s", exc)
@@ -2276,16 +2888,15 @@ def _snapshot_rows_for_path_trace(
     return out
 
 
-def filter_file_paths_for_master_preview(
+def filter_file_paths_by_item_file_patterns(
     file_paths: Sequence[str | Path],
     items: list[dict[str, Any]],
 ) -> list[str]:
     """
-    マスタ本番同等プレビュー用。cell ソースで file_pattern が空でない項目について絞る。
+    cell ソースで file_pattern が空でない項目について走査結果を絞る。
 
     パターンが1種類のみ: その pattern に合うファイル。
-    複数パターン（光特性×紐づけ等のファイル横断結合）: OR（いずれかに合致）— AND だと該当ファイル0件になる。
-    本番一括は preview_master_mode 外のためこの関数は呼ばれない。
+    複数パターン（光特性×紐づけ等）: OR（いずれかに合致）。
     """
     from svc import svc_data_agg_extract as extract_mod  # noqa: E402
 
@@ -2324,6 +2935,14 @@ def filter_file_paths_for_master_preview(
     return out
 
 
+def filter_file_paths_for_master_preview(
+    file_paths: Sequence[str | Path],
+    items: list[dict[str, Any]],
+) -> list[str]:
+    """マスタ本番同等プレビュー用（filter_file_paths_by_item_file_patterns の別名）。"""
+    return filter_file_paths_by_item_file_patterns(file_paths, items)
+
+
 @dataclass
 class _BatchFileExtractResult:
     bundles: list[dict[str, Any]]
@@ -2334,6 +2953,21 @@ class _BatchFileExtractResult:
     pf_merge_ms: int = 0
     bt_extract_sec: float = 0.0
     bt_merge_sec: float = 0.0
+
+
+def _master_preview_extract_allowset(debug_diag: Any) -> frozenset[int] | None:
+    if not isinstance(debug_diag, dict):
+        return None
+    if str(debug_diag.get("source") or "") != _MASTER_PREVIEW_DIAG_SOURCE:
+        return None
+    raw = debug_diag.get("preview_extract_item_allowlist")
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: set[int] = set()
+    for x in raw:
+        if isinstance(x, int) and x >= 0:
+            out.add(int(x))
+    return frozenset(out) if out else None
 
 
 def _batch_file_extract_and_merge(
@@ -2347,6 +2981,7 @@ def _batch_file_extract_and_merge(
     join_targets: set[str],
     path_col: str,
     master_preview_cap_idx: Optional[int],
+    master_preview_extract_allow: frozenset[int] | None,
     preview_master_mode: bool,
     use_join_search_merge: bool,
     max_primary_rows: Optional[int],
@@ -2365,8 +3000,10 @@ def _batch_file_extract_and_merge(
     cell_positions: dict[str, tuple[int, int]] = {}
     file_rows: list[dict[str, Any]] = []
     bundles: list[dict[str, Any]] = []
+    fp_str = str(file_path)
+    items_for_file = [it for it in items if _item_sources_pass_file(it, fp_str)]
     with extract_mod.xlsx_workbook_scope():
-        extract_mod.precache_xlsx_workbook_sheets_for_items(file_path, items)
+        extract_mod.precache_xlsx_workbook_sheets_for_items(file_path, items_for_file)
         for i, it in enumerate(items):
             _poll()
             t_item0 = time.perf_counter()
@@ -2376,7 +3013,13 @@ def _batch_file_extract_and_merge(
             if col_name in linked_targets and not (it.get("sources") or []):
                 bundles.append({})
                 continue
+            if not _item_sources_pass_file(it, fp_str):
+                bundles.append({})
+                continue
             if master_preview_cap_idx is not None and i > master_preview_cap_idx:
+                bundles.append({"primary_values": []})
+                continue
+            if master_preview_extract_allow is not None and i not in master_preview_extract_allow:
                 bundles.append({"primary_values": []})
                 continue
             if preview_master_mode and not srcs:
@@ -2473,17 +3116,33 @@ def _run_batch_files_extract_parallel(
     workers: int,
     extract_kwargs: dict[str, Any],
     cancel_check: Optional[Callable[..., None]] = None,
+    progress_callback: Optional[Callable[[str, int, int, str, int], None]] = None,
 ) -> dict[int, _BatchFileExtractResult]:
     """ファイル単位で抽出・マージを並列実行し、fi（1 始まり）→結果を返す。"""
     out: dict[int, _BatchFileExtractResult] = {}
     if workers <= 1:
         return out
 
+    n_paths = len(paths)
+    done_lock = threading.Lock()
+    done_count = 0
+
     def _work(fi_path: tuple[int, str | Path]) -> tuple[int, _BatchFileExtractResult]:
+        nonlocal done_count
         fi, fp = fi_path
+        fname = Path(fp).name
+        if progress_callback is not None:
+            with done_lock:
+                dc_now = done_count
+            progress_callback("start", fi, n_paths, fname, dc_now)
         if cancel_check is not None:
             cancel_check(force=True)
         res = _batch_file_extract_and_merge(fp, **extract_kwargs)
+        if progress_callback is not None:
+            with done_lock:
+                done_count += 1
+                dc_done = done_count
+            progress_callback("done", fi, n_paths, fname, dc_done)
         return fi, res
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -2525,6 +3184,7 @@ def compute_batch_table_rows(
     from svc import svc_data_agg_pipeline as pipeline_mod  # noqa: E402
     from svc import svc_data_agg_scenario as scenario_mod  # noqa: E402
     from svc import svc_data_agg_write as write_mod  # noqa: E402
+    from core import core_env  # noqa: E402
 
     paths: list[str] = [str(p) for p in file_paths]
     items = data.get("items") or []
@@ -2562,9 +3222,36 @@ def compute_batch_table_rows(
     path_trace_on, path_trace_max = _path_trace_settings(data)
     diag_on = bool(dd.get("enabled"))
     master_preview_cap_idx = _master_preview_item_cap_idx(dd)
+    master_preview_extract_allow = _master_preview_extract_allowset(dd)
+    if preview_master_mode and master_preview_extract_allow is not None:
+        try:
+            _agg_diag.info(
+                "[DATA_AGG_DIAG] master_preview_extract_allowlist indices=%s n=%s",
+                sorted(master_preview_extract_allow),
+                len(master_preview_extract_allow),
+            )
+        except Exception:
+            pass
     n_paths_before = len(paths)
     if preview_master_mode and paths:
         paths = filter_file_paths_for_master_preview(paths, items)
+    elif (
+        paths
+        and probe_caller == "excel_batch_submit"
+        and core_env.data_agg_batch_file_path_filter_enabled()
+    ):
+        n_pf_in = len(paths)
+        paths = filter_file_paths_by_item_file_patterns(paths, items)
+        if n_pf_in != len(paths):
+            try:
+                logger.info(
+                    "[DATA_AGG] batch file_path_filter before=%s after=%s scenario=%s",
+                    n_pf_in,
+                    len(paths),
+                    scenario_id,
+                )
+            except Exception:
+                pass
     try:
         _agg_diag.info(
             "[DATA_AGG_PROBE] compute_batch scenario=%s paths_in=%s paths_after_filter=%s "
@@ -2630,11 +3317,29 @@ def compute_batch_table_rows(
 
     join_search_global_pool: list[dict[str, Any]] = []
     use_join_search_merge = _scenario_has_join_defs(items)
+    if (
+        preview_master_mode
+        and use_join_search_merge
+        and isinstance(dd, dict)
+        and not dd.get("join_search_skip_seed")
+    ):
+        seed_pool = dd.get("join_search_seed_pool")
+        if isinstance(seed_pool, list) and seed_pool:
+            join_search_global_pool.extend(
+                r for r in seed_pool if isinstance(r, dict)
+            )
+            try:
+                _agg_diag.info(
+                    "[DATA_AGG_DIAG] join_search seed_pool rows=%s paths=%s",
+                    len(join_search_global_pool),
+                    len(paths),
+                )
+            except Exception:
+                pass
     join_file_passes: list[dict[str, Any]] = []
 
-    from core import core_env
-
     batch_timing = core_env.data_agg_batch_timing_enabled()
+    timing_log = batch_timing or probe_caller == "excel_batch_submit"
     per_file_timing = core_env.data_agg_file_timing_enabled()
     t_batch_start = time.perf_counter()
     bt_extract = 0.0
@@ -2646,11 +3351,60 @@ def compute_batch_table_rows(
     file_parallel_workers = core_env.data_agg_file_parallel_workers(n_files=n_files)
     use_file_parallel = (
         file_parallel_workers > 1
-        and not preview_master_mode
         and not path_trace_on
+        and (
+            not preview_master_mode
+            or core_env.data_agg_master_parallel_extract_enabled()
+        )
     )
+    try:
+        if use_file_parallel:
+            logger.info(
+                "[DATA_AGG] batch extract parallel workers=%s files=%s scenario=%s",
+                file_parallel_workers,
+                n_files,
+                scenario_id,
+            )
+        else:
+            _seq_reasons: list[str] = []
+            if path_trace_on:
+                _seq_reasons.append("path_trace")
+            if file_parallel_workers <= 1:
+                _seq_reasons.append("workers<=1")
+            if preview_master_mode and not core_env.data_agg_master_parallel_extract_enabled():
+                _seq_reasons.append("master_parallel_off")
+            logger.info(
+                "[DATA_AGG] batch extract sequential files=%s scenario=%s reason=%s",
+                n_files,
+                scenario_id,
+                ",".join(_seq_reasons) or "-",
+            )
+    except Exception:
+        pass
     parallel_extract_by_fi: dict[int, _BatchFileExtractResult] = {}
+    _parallel_prog_lock = threading.Lock()
+
+    def _parallel_extract_progress(
+        event: str,
+        fi: int,
+        nf: int,
+        fname: str,
+        done: int,
+    ) -> None:
+        with _parallel_prog_lock:
+            if event == "start":
+                _ph(4, "ファイル %s/%s: %s 読込中" % (fi, nf, fname), file_index=fi)
+            elif event == "done":
+                _ph(
+                    4,
+                    "ファイル %s/%s: %s（完了）" % (fi, nf, fname),
+                    file_index=fi,
+                )
+            else:
+                _ph(4, "並列読込 %s/%s ファイル" % (done, nf), file_index=1)
+
     if use_file_parallel:
+        _parallel_extract_progress("begin", 1, n_files, "", 0)
         parallel_extract_by_fi = _run_batch_files_extract_parallel(
             paths,
             workers=file_parallel_workers,
@@ -2663,6 +3417,7 @@ def compute_batch_table_rows(
                 "join_targets": join_targets,
                 "path_col": path_col or "",
                 "master_preview_cap_idx": master_preview_cap_idx,
+                "master_preview_extract_allow": master_preview_extract_allow,
                 "preview_master_mode": preview_master_mode,
                 "use_join_search_merge": use_join_search_merge,
                 "max_primary_rows": max_primary_rows,
@@ -2671,14 +3426,24 @@ def compute_batch_table_rows(
                 "n_items": n_items,
             },
             cancel_check=cancel_check,
+            progress_callback=_parallel_extract_progress,
         )
+        if timing_log:
+            for _pe in parallel_extract_by_fi.values():
+                bt_extract += _pe.bt_extract_sec
+                bt_merge_join += _pe.bt_merge_sec
 
     for fi, file_path in enumerate(paths, start=1):
         _poll_cancel(force=True)
-        _ph(4, "", file_index=fi)
+        if not (use_file_parallel and fi in parallel_extract_by_fi):
+            _ph(
+                4,
+                "ファイル %s/%s: %s" % (fi, n_files, Path(str(file_path)).name),
+                file_index=fi,
+            )
         _extract_prog_t0 = 0.0
         _tbl_prog_t0 = 0.0
-        _bt0 = time.perf_counter() if batch_timing else 0.0
+        _bt0 = time.perf_counter() if timing_log else 0.0
         pf_t0 = time.perf_counter() if per_file_timing else 0.0
         pf_open_ms = 0
         pf_read_extract_ms = 0
@@ -2731,9 +3496,7 @@ def compute_batch_table_rows(
             pf_open_ms = _pe.pf_open_ms
             pf_read_extract_ms = _pe.pf_read_extract_ms
             pf_merge_ms = _pe.pf_merge_ms
-            if batch_timing:
-                bt_extract += _pe.bt_extract_sec
-                bt_merge_join += _pe.bt_merge_sec
+            if timing_log:
                 _bt0 = time.perf_counter()
             _ph(5, "", file_index=fi)
             if use_join_search_merge:
@@ -2761,7 +3524,7 @@ def compute_batch_table_rows(
                     if progress_hook is not None and n_items > 0:
                         _ph(
                             4,
-                            "項目 %s/%s 開始" % (done_i, n_items),
+                            "項目 %s/%s: %s" % (done_i, n_items, col_name),
                             file_index=fi,
                         )
 
@@ -2775,7 +3538,8 @@ def compute_batch_table_rows(
                             _item_heartbeat_t0 = t_hb_now
                             _ph(
                                 4,
-                                "項目 %s/%s 処理中" % (done_i, n_items),
+                                "項目 %s/%s: %s（処理中）"
+                                % (done_i, n_items, col_name),
                                 file_index=fi,
                             )
                     if diag_on:
@@ -2809,6 +3573,20 @@ def compute_batch_table_rows(
                         if diag_on:
                             _agg_diag.info(
                                 "[DATA_AGG_DIAG] item_skip file=%s idx=%s item=%s reason=master_preview_item_cap",
+                                str(file_path),
+                                i,
+                                str(it.get("name") or it.get("id") or ""),
+                            )
+                        continue
+                    if (
+                        master_preview_extract_allow is not None
+                        and i not in master_preview_extract_allow
+                    ):
+                        bundles.append({"primary_values": []})
+                        if diag_on:
+                            _agg_diag.info(
+                                "[DATA_AGG_DIAG] item_skip file=%s idx=%s item=%s "
+                                "reason=master_preview_extract_allowlist",
                                 str(file_path),
                                 i,
                                 str(it.get("name") or it.get("id") or ""),
@@ -2913,7 +3691,7 @@ def compute_batch_table_rows(
                             _extract_prog_t0 = t_now
                             _ph(
                                 4,
-                                "項目 %s/%s" % (done_i, n_items),
+                                "項目 %s/%s: %s" % (done_i, n_items, col_name),
                                 file_index=fi,
                             )
                     try:
@@ -2934,7 +3712,7 @@ def compute_batch_table_rows(
                 ext_wall_ms = int((time.perf_counter() - pf_t_extract0) * 1000)
                 pf_open_ms = extract_mod.consume_workbook_open_ms_for_path(str(file_path))
                 pf_read_extract_ms = max(0, ext_wall_ms - pf_open_ms)
-            if batch_timing:
+            if timing_log:
                 bt_extract += time.perf_counter() - _bt0
                 _bt0 = time.perf_counter()
             pf_t_merge0 = time.perf_counter() if per_file_timing else 0.0
@@ -2946,7 +3724,7 @@ def compute_batch_table_rows(
                 # 行をまとめる条件が無い場合でも、同一ファイル・同一反復位置で
                 # 1 行にまとめ、疎な行が周期的に増える見え方を抑える。
                 join_key_names = ["__file_path", "__iter_index"]
-            _ph(5, "", file_index=fi)
+            _ph(5, "行をまとめ中（%s 行）" % len(file_rows), file_index=fi)
             merged_rows = _merge_rows_by_join_keys(file_rows, join_key_names)
             if (
                 preview_master_mode
@@ -2975,7 +3753,7 @@ def compute_batch_table_rows(
                 )
             if per_file_timing:
                 pf_merge_ms = int((time.perf_counter() - pf_t_merge0) * 1000)
-            if batch_timing:
+            if timing_log:
                 bt_merge_join += time.perf_counter() - _bt0
                 _bt0 = time.perf_counter()
         pf_t_diag0 = time.perf_counter() if per_file_timing else 0.0
@@ -3011,7 +3789,7 @@ def compute_batch_table_rows(
                 )
         if per_file_timing:
             pf_diag_ms = int((time.perf_counter() - pf_t_diag0) * 1000)
-        if batch_timing:
+        if timing_log:
             bt_diag_merge += time.perf_counter() - _bt0
             _bt0 = time.perf_counter()
         pf_t_pn0 = time.perf_counter() if per_file_timing else 0.0
@@ -3067,10 +3845,15 @@ def compute_batch_table_rows(
             )
         if use_join_search_merge:
             join_search_global_pool.extend(merged_rows)
-        _ph(6, "", file_index=fi)
+        _ph(
+            6,
+            "ファイル %s/%s: %s（結合待ち %s 行）"
+            % (fi, n_files, Path(str(file_path)).name, len(merged_rows)),
+            file_index=fi,
+        )
         if per_file_timing:
             pf_path_name_ms = int((time.perf_counter() - pf_t_pn0) * 1000)
-        if batch_timing:
+        if timing_log:
             bt_path_name += time.perf_counter() - _bt0
             _bt0 = time.perf_counter()
         # マスタデバッグの batch プレビュー: 各ファイル内は上記 _merge_rows_by_join_keys で
@@ -3081,8 +3864,13 @@ def compute_batch_table_rows(
             _emit_per_file_timing()
             continue
         if not match_cols or preview_master_mode:
-            _ph(7, "", file_index=fi)
             n_merged = len(merged_rows)
+            _ph(
+                7,
+                "一覧行を組立 %s/%s: %s（%s 行）"
+                % (fi, n_files, Path(str(file_path)).name, n_merged),
+                file_index=fi,
+            )
             _tbl_rows_before = len(table_rows)
 
             def _sparse_skip_row(row: dict[str, Any]) -> bool:
@@ -3127,7 +3915,8 @@ def compute_batch_table_rows(
                         _tbl_prog_t0 = t_now
                         _ph(
                             7,
-                            "行 %s/%s" % (ri, n_merged),
+                            "一覧行 %s/%s（%s）"
+                            % (ri, n_merged, Path(str(file_path)).name),
                             file_index=fi,
                         )
             if rows_for_table:
@@ -3173,13 +3962,13 @@ def compute_batch_table_rows(
                 except Exception:
                     pass
             if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
-                if batch_timing:
+                if timing_log:
                     bt_table += time.perf_counter() - _bt0
                 if per_file_timing:
                     pf_table_ms = int((time.perf_counter() - pf_t_tb0) * 1000)
                 _emit_per_file_timing()
                 break
-            if batch_timing:
+            if timing_log:
                 bt_table += time.perf_counter() - _bt0
             if per_file_timing:
                 pf_table_ms = int((time.perf_counter() - pf_t_tb0) * 1000)
@@ -3248,7 +4037,7 @@ def compute_batch_table_rows(
                         "primary_value": rows_to_add[iter_i][0] if rows_to_add[iter_i] else None,
                     }
                 )
-        if batch_timing:
+        if timing_log:
             bt_table += time.perf_counter() - _bt0
         if per_file_timing:
             pf_table_ms = int((time.perf_counter() - pf_t_tb0) * 1000)
@@ -3258,7 +4047,20 @@ def compute_batch_table_rows(
     if use_join_search_merge and join_search_global_pool:
         _join_t0 = time.perf_counter()
         _poll_cancel(force=True)
-        _ph(6, "", file_index=max(n_files, 1))
+        try:
+            logger.info(
+                "[DATA_AGG] join_search start pool_rows=%s file_passes=%s",
+                len(join_search_global_pool),
+                len(join_file_passes),
+            )
+        except Exception:
+            pass
+        _ph(
+            6,
+            "結合キー検索（プール %s 行・%s ファイル）"
+            % (len(join_search_global_pool), len(join_file_passes)),
+            file_index=max(n_files, 1),
+        )
         _apply_join_key_search_across_file_passes(
             join_search_global_pool,
             join_file_passes,
@@ -3270,6 +4072,8 @@ def compute_batch_table_rows(
             probe_caller=probe_caller,
             preview_master_mode=preview_master_mode,
             cancel_check=cancel_check,
+            progress_hook=progress_hook,
+            progress_n_files=n_files,
         )
         try:
             _agg_diag.info(
@@ -3297,7 +4101,12 @@ def compute_batch_table_rows(
                 )
             except Exception:
                 pass
-    if use_join_search_merge and match_cols and not preview_master_mode:
+    _prod_table_rows = preview_use_production_table_rows(
+        dd if isinstance(dd, dict) else None
+    )
+    if use_join_search_merge and match_cols and (
+        not preview_master_mode or _prod_table_rows
+    ):
         _poll_cancel(force=True)
         _ph(7, "", file_index=max(n_files, 1))
         _tbl_t0 = time.perf_counter()
@@ -3349,9 +4158,22 @@ def compute_batch_table_rows(
                             "primary_value": rows_to_add[iter_i][0] if rows_to_add[iter_i] else None,
                         }
                     )
-        if batch_timing:
+        if timing_log:
             bt_table += time.perf_counter() - _tbl_t0
-    elif use_join_search_merge and (not match_cols or preview_master_mode):
+        try:
+            if preview_master_mode and _prod_table_rows:
+                _agg_diag.info(
+                    "[DATA_AGG_DIAG] preview_table_rows mode=production_match_keys "
+                    "scenario=%s files=%s rows=%s",
+                    scenario_id,
+                    n_files,
+                    len(table_rows),
+                )
+        except Exception:
+            pass
+    elif use_join_search_merge and (
+        not match_cols or (preview_master_mode and not _prod_table_rows)
+    ):
         _ph(7, "", file_index=max(n_files, 1))
         _tbl_t0 = time.perf_counter()
         pf_t_tb0 = _tbl_t0 if per_file_timing else 0.0
@@ -3369,11 +4191,24 @@ def compute_batch_table_rows(
             for r in join_search_global_pool
             if isinstance(r, dict) and _emit_ctx.should_emit(r)
         ]
+        if progress_hook is not None:
+            _ph(
+                7,
+                "行を並べ替え中（%s 行）" % len(filtered_rows),
+                file_index=max(n_files, 1),
+            )
+        _paths_rank = _batch_paths_rank_index(paths)
         output_rows = sorted(
             filtered_rows,
-            key=lambda r: (str(r.get("__file_path") or ""), _row_iter_index(r)),
+            key=lambda r, pr=_paths_rank: _master_preview_merged_row_sort_key(r, pr),
         )
         n_out = len(output_rows)
+        if progress_hook is not None:
+            _ph(
+                7,
+                "結果一覧へ反映中（%s 行）" % n_out,
+                file_index=max(n_files, 1),
+            )
         _tbl_prog_t0 = 0.0
         rows_for_table: list[dict[str, Any]] = []
         sparse_skip = (
@@ -3416,7 +4251,7 @@ def compute_batch_table_rows(
                     _ph(7, "行 %s/%s" % (ri, n_out), file_index=max(n_files, 1))
         if rows_for_table:
             table_rows.extend(_merged_dict_rows_to_table_rows(rows_for_table, headers))
-        if batch_timing:
+        if timing_log:
             bt_table += time.perf_counter() - _tbl_t0
     if preview_master_mode and isinstance(dd, dict):
         cap_pool: list[dict[str, Any]] = []
@@ -3430,12 +4265,21 @@ def compute_batch_table_rows(
             _finalize_master_preview_frozen_capture(
                 data, headers, paths, pool_rows=cap_pool
             )
-    if batch_timing:
+        pool_out = dd.get("join_search_pool_out")
+        if isinstance(pool_out, list) and use_join_search_merge and join_search_global_pool:
+            pool_out.clear()
+            pool_out.extend(
+                r for r in join_search_global_pool if isinstance(r, dict)
+            )
+    if timing_log:
         try:
             total_ms = int((time.perf_counter() - t_batch_start) * 1000)
-            _agg_diag.info(
-                "[DATA_AGG_PROBE] compute_batch_timing scenario=%s caller=%s files=%s items=%s "
-                "extract_ms=%s merge_join_ms=%s diag_merged_ms=%s path_name_ms=%s table_ms=%s total_ms=%s",
+            _timing_msg = (
+                "[DATA_AGG] compute_batch_timing scenario=%s caller=%s files=%s items=%s "
+                "extract_ms=%s merge_join_ms=%s diag_merged_ms=%s path_name_ms=%s table_ms=%s "
+                "total_ms=%s parallel=%s"
+            )
+            _timing_args = (
                 scenario_id,
                 probe_caller or "-",
                 n_files,
@@ -3446,7 +4290,12 @@ def compute_batch_table_rows(
                 int(bt_path_name * 1000),
                 int(bt_table * 1000),
                 total_ms,
+                len(parallel_extract_by_fi),
             )
+            if batch_timing:
+                _agg_diag.info(_timing_msg, *_timing_args)
+            if probe_caller == "excel_batch_submit":
+                logger.info(_timing_msg, *_timing_args)
         except Exception:
             pass
     if diag_on:
@@ -3465,6 +4314,19 @@ def compute_batch_table_rows(
                 len(table_rows),
                 vals,
             )
+    if preview_master_mode and table_rows:
+        table_rows = apply_master_preview_table_row_order(data, headers, table_rows)
+    _log_compute_batch_result_invariants(
+        scenario_id=scenario_id,
+        n_files=n_files,
+        table_rows=table_rows,
+        join_search_global_pool=join_search_global_pool,
+        use_join_search_merge=use_join_search_merge,
+        preview_master_mode=preview_master_mode,
+        max_table_rows=max_table_rows,
+        parallel_expected=n_files if use_file_parallel else 0,
+        parallel_got=len(parallel_extract_by_fi),
+    )
     return headers, table_rows, event_log_rows, join_events_total
 
 
@@ -3640,7 +4502,13 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         except Exception:
             pass
         _batch_done_notify(
-            parent_hwnd, sheet_id, title, msg, ok=ok, use_parent_dialog=notify_parent
+            parent_hwnd,
+            sheet_id,
+            title,
+            msg,
+            ok=ok,
+            use_parent_dialog=notify_parent,
+            run_id=batch_run_id,
         )
 
     try:
@@ -3906,6 +4774,12 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     reset_cancel_path(cancel_path)
     cancel_check = make_cancel_check(cancel_path, min_interval_sec=0.0)
     register_batch_worker_pid(sheet_id, ipc_root)
+    try:
+        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
+
+        data_agg_batch_cursor_on(str(sheet_id or ""))
+    except Exception:
+        pass
     _finish_release = _finish
 
     def _finish(  # noqa: F811
@@ -3956,9 +4830,18 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         cf = str(kw.get("current_file", "") or "").strip()
         if cf:
             d["current_file"] = cf
+        dt = str(kw.get("detail", "") or "").strip()
+        if dt:
+            d["detail"] = dt
         try:
             prog_path.parent.mkdir(parents=True, exist_ok=True)
             write_pickle(prog_path, d)
+        except Exception:
+            pass
+        try:
+            from core.core_cursor import data_agg_batch_cursor_tick  # noqa: WPS433
+
+            data_agg_batch_cursor_tick(str(sheet_id or ""))
         except Exception:
             pass
 
@@ -4021,7 +4904,6 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         msg = str(cfg_msgs.get("STATUS_CANCEL") or "一括実行を中止しました。").strip()
         _finish(msg, ok=False, elapsed_ms=_tms)
 
-    _ph_labels = {4: "取り出し", 5: "行のまとめ", 6: "照合・パス", 7: "一覧の組立"}
     file_paths_holder: list[list[Path]] = [[]]
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
@@ -4042,33 +4924,20 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         )
         prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
         pi = min(4, max(1, int(sub) - 3))
-        base = _ph_labels.get(int(sub), "処理")
-        phase_txt = ("%s %s" % (base, str(suffix or "").strip())).strip()
-        cf = ""
-        if fi_kw is not None:
-            try:
-                ix = int(fi_kw) - 1
-                if 0 <= ix < len(fps):
-                    cf = Path(str(fps[ix])).name
-            except Exception:
-                pass
-        else:
-            mfp = re.search(r"（\s*(\d+)\s*/\s*(\d+)\s*）", str(suffix or ""))
-            if mfp:
-                try:
-                    ix = int(mfp.group(1)) - 1
-                    if 0 <= ix < len(fps):
-                        cf = Path(str(fps[ix])).name
-                except Exception:
-                    pass
-        _prog_write(
-            pct=prog_last_pct[0],
-            phase=phase_txt[:120],
-            phase_i=pi,
-            done=prog_last_pct[0],
-            total=100,
-            current_file=cf,
-        )
+        phase_txt, detail_txt = _batch_hook_progress_lines(sub, suffix)
+        cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
+        prog_kw: dict[str, Any] = {
+            "pct": prog_last_pct[0],
+            "phase": phase_txt[:120],
+            "phase_i": pi,
+            "done": prog_last_pct[0],
+            "total": 100,
+        }
+        if detail_txt:
+            prog_kw["detail"] = detail_txt
+        elif cf:
+            prog_kw["current_file"] = cf
+        _prog_write(**prog_kw)
 
     _prog_write(
         pct=2,
@@ -4146,7 +5015,6 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         len(file_paths),
         head_paths,
     )
-    _prog_write(pct=6, phase="集約を実行中", phase_i=1, done=0, total=len(file_paths))
 
     data = dict(data)
     data["id"] = scenario_id
@@ -4546,8 +5414,21 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
         except Exception:
             pass
         _batch_done_notify(
-            parent_hwnd, sheet_id, title, msg, ok=ok, use_parent_dialog=notify_parent
+            parent_hwnd,
+            sheet_id,
+            title,
+            msg,
+            ok=ok,
+            use_parent_dialog=notify_parent,
+            run_id=batch_run_id,
         )
+
+    try:
+        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
+
+        data_agg_batch_cursor_on(str(sheet_id or ""))
+    except Exception:
+        pass
 
     if not spill_dir_s:
         _dlog("abort reason=no_spill_dir")
@@ -4637,7 +5518,7 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
         write_mod.append_event_log_rows(_book, [row] + list(extra_rows or []))
 
     def _prog_write(**kw: Any) -> None:
-        if not prog_path_s or write_pickle is None:
+        if not prog_path_s:
             return
         try:
             from ui_qt.ipc_file import read_pickle  # noqa: WPS433
@@ -4663,7 +5544,29 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
                     "show_done_dialog": False,
                 }
             )
-            write_pickle(Path(prog_path_s), d)
+            p = Path(prog_path_s)
+            if write_pickle is not None:
+                try:
+                    write_pickle(p, d)
+                    return
+                except Exception:
+                    pass
+            # フォールバック: ui_qt.ipc_file が利用できない環境でも進捗が閉じないのを避ける
+            # （ProgressDialog は DONE を見て閉じるため、ここは best-effort で書く）
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            try:
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            with tmp.open("wb") as fp:
+                pickle.dump(d, fp, protocol=pickle.HIGHEST_PROTOCOL)
+            try:
+                tmp.replace(p)
+            except Exception:
+                try:
+                    p.write_bytes(tmp.read_bytes())
+                except Exception:
+                    pass
         except Exception:
             pass
 

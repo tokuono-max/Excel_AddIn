@@ -93,6 +93,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     from svc import svc_data_agg_scan as scan_mod  # noqa: WPS433
     from svc import svc_data_agg_write as write_mod  # noqa: WPS433
     from svc.svc_data_agg import (  # noqa: WPS433
+        _batch_hook_progress_lines,
+        _batch_hook_resolve_current_file,
         _batch_progress_pct_from_hook,
         _clear_active_batch_run_if_current,
         _excel_options_log_summary,
@@ -122,6 +124,14 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     except Exception:
         ipc_root = None
 
+    def _batch_compute_cursor_off() -> None:
+        try:
+            from core.core_cursor import data_agg_batch_cursor_off  # noqa: WPS433
+
+            data_agg_batch_cursor_off()
+        except Exception:
+            pass
+
     def _finish_compute_only(msg: str, *, ok: bool, spill_path: Path | None = None) -> None:
         if ipc_root is not None and batch_run_id:
             try:
@@ -146,6 +156,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                         Path(scenario_snapshot_path).unlink(missing_ok=True)
                     except OSError:
                         pass
+                _batch_compute_cursor_off()
                 return
         except Exception:
             pass
@@ -159,6 +170,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     Path(scenario_snapshot_path).unlink(missing_ok=True)
                 except OSError:
                     pass
+            _batch_compute_cursor_off()
             return
 
     load_path = scenario_snapshot_path or scenario_path_user
@@ -170,14 +182,17 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     _clear_active_batch_run_if_current(sheet_id, ipc_root, batch_run_id)
             except Exception:
                 pass
+            _batch_compute_cursor_off()
             return
         if scenario_path_user:
             load_path = scenario_path_user
         else:
+            _batch_compute_cursor_off()
             return
 
     if not load_path:
         _dlog("abort reason=no_scenario_path")
+        _batch_compute_cursor_off()
         return
 
     scenario_path_log = scenario_path_user or scenario_snapshot_path
@@ -316,12 +331,19 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     if ipc_root is None:
         logger.error("[DATA_AGG] batch_compute IPC root unavailable")
+        _batch_compute_cursor_off()
         return
 
     cancel_path = cancel_request_path_data_agg_batch(sheet_id, ipc_root)
     reset_cancel_path(cancel_path)
     cancel_check = make_cancel_check(cancel_path, min_interval_sec=0.0)
     register_batch_worker_pid(sheet_id, ipc_root)
+    try:
+        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
+
+        data_agg_batch_cursor_on(str(sheet_id or ""))
+    except Exception:
+        pass
 
     prog_path = ipc_root / "progress" / (
         "data_agg_batch_%s_%s.pkl" % (os.getpid(), int(time.time() * 1000))
@@ -356,9 +378,18 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         cf = str(kw.get("current_file", "") or "").strip()
         if cf:
             d["current_file"] = cf
+        dt = str(kw.get("detail", "") or "").strip()
+        if dt:
+            d["detail"] = dt
         try:
             prog_path.parent.mkdir(parents=True, exist_ok=True)
             write_pickle(prog_path, d)
+        except Exception:
+            pass
+        try:
+            from core.core_cursor import data_agg_batch_cursor_tick  # noqa: WPS433
+
+            data_agg_batch_cursor_tick(str(sheet_id or ""))
         except Exception:
             pass
 
@@ -425,7 +456,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
 
-    _ph_labels = {4: "取り出し", 5: "行のまとめ", 6: "照合・パス", 7: "一覧の組立"}
     file_paths_holder: list[list[Path]] = [[]]
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
@@ -446,33 +476,20 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         )
         prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
         pi = min(4, max(1, int(sub) - 3))
-        base = _ph_labels.get(int(sub), "処理")
-        phase_txt = ("%s %s" % (base, str(suffix or "").strip())).strip()
-        cf = ""
-        if fi_kw is not None:
-            try:
-                ix = int(fi_kw) - 1
-                if 0 <= ix < len(fps):
-                    cf = Path(str(fps[ix])).name
-            except Exception:
-                pass
-        else:
-            mfp = re.search(r"（\s*(\d+)\s*/\s*(\d+)\s*）", str(suffix or ""))
-            if mfp:
-                try:
-                    ix = int(mfp.group(1)) - 1
-                    if 0 <= ix < len(fps):
-                        cf = Path(str(fps[ix])).name
-                except Exception:
-                    pass
-        _prog_write(
-            pct=prog_last_pct[0],
-            phase=phase_txt[:120],
-            phase_i=pi,
-            done=prog_last_pct[0],
-            total=100,
-            current_file=cf,
-        )
+        phase_txt, detail_txt = _batch_hook_progress_lines(sub, suffix)
+        cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
+        prog_kw: dict[str, Any] = {
+            "pct": prog_last_pct[0],
+            "phase": phase_txt[:120],
+            "phase_i": pi,
+            "done": prog_last_pct[0],
+            "total": 100,
+        }
+        if detail_txt:
+            prog_kw["detail"] = detail_txt
+        elif cf:
+            prog_kw["current_file"] = cf
+        _prog_write(**prog_kw)
 
     _prog_write(
         pct=2,
@@ -552,7 +569,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         )
         return
 
-    _prog_write(pct=6, phase="集約を実行中", phase_i=1, done=0, total=len(file_paths))
     data = dict(data)
     data["id"] = scenario_id
     event_log_rows: list[list[Any]] = []

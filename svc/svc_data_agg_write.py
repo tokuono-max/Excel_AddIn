@@ -36,6 +36,10 @@ from core.core_log import get_logger  # noqa: E402
 logger = get_logger(__name__)
 __version__ = "0.1.3"
 
+# data_agg は出力行数が大きくなりやすく、全行を対象にした AutoFit が重い。
+# 見た目（列幅）よりも「処理完了→Excel操作復帰」を優先し、一定行数超過時はヘッダ行のみ AutoFit に縮退する。
+_DATA_AGG_AUTOFIT_MAX_ROWS = 3000
+
 MODE_APPEND = "append"
 MODE_OVERWRITE = "overwrite"
 MODE_FILL_IN = "fill_in"
@@ -941,11 +945,15 @@ def write_master_to_sheet(
                         sheet, tr, tc, n_rows_rect, ncols
                     )
             try:
+                # 行数が大きい場合はヘッダ行のみ AutoFit（Excel完了待ち短縮）
+                max_row_af = max(tr, full_bottom)
+                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
+                    max_row_af = tr
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
                     min_col=tc,
-                    max_row=max(tr, full_bottom),
+                    max_row=max_row_af,
                     max_col=max(tc, tc + ncols - 1),
                 )
             except Exception:
@@ -1019,11 +1027,14 @@ def write_master_to_sheet(
                         sheet, tr, tc, n_rows_rect, ncols
                     )
             try:
+                max_row_af = max(tr, full_bottom)
+                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
+                    max_row_af = tr
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
                     min_col=tc,
-                    max_row=max(tr, full_bottom),
+                    max_row=max_row_af,
                     max_col=max(tc, tc + ncols - 1),
                 )
             except Exception:
@@ -1111,11 +1122,14 @@ def write_master_to_sheet(
                         sheet, tr, tc, len(data_2d), len(prev_headers)
                     )
             try:
+                max_row_af = max(tr, tr + len(data_2d) - 1)
+                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
+                    max_row_af = tr
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
                     min_col=tc,
-                    max_row=max(tr, tr + len(data_2d) - 1),
+                    max_row=max_row_af,
                     max_col=max(tc, tc + len(prev_headers) - 1),
                 )
             except Exception:

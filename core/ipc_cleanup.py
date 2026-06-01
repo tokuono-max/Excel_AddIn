@@ -28,6 +28,7 @@ DEFAULT_SVC_RESULTS_TTL_SEC = 3600.0  # hc_main._cleanup_old_res_files と整合
 DEFAULT_STARTING_FLAG_TTL_SEC = 600.0  # 10m: クラッシュ等で残った起動ガード
 DEFAULT_RESULT_TTL_SEC = 86400.0  # 24h: ui_server 応答の result/*.pkl
 DEFAULT_PROGRESS_TTL_SEC = 86400.0  # 24h: progress/*.pkl
+DEFAULT_BATCH_SPILL_TTL_SEC = 86400.0  # 24h: progress/batch_spill_*
 DEFAULT_LOGS_TTL_SEC = 604800.0  # 7d: logs/*.log（ブートログ等）
 
 
@@ -130,6 +131,9 @@ def run_common_startup_sweeps(ipc_root: Path) -> None:
     progress_ttl = _float_env(
         "HC_IPC_SWEEP_PROGRESS_TTL_SEC", DEFAULT_PROGRESS_TTL_SEC
     )
+    spill_ttl = _float_env(
+        "HC_IPC_SWEEP_BATCH_SPILL_TTL_SEC", DEFAULT_BATCH_SPILL_TTL_SEC
+    )
     logs_ttl = _float_env("HC_IPC_SWEEP_LOGS_TTL_SEC", DEFAULT_LOGS_TTL_SEC)
     try:
         sweep_stale_in_dir(
@@ -143,6 +147,12 @@ def run_common_startup_sweeps(ipc_root: Path) -> None:
             "*.pkl",
             progress_ttl,
             log_tag="progress",
+        )
+        sweep_stale_dirs_in_dir(
+            ipc_root / "progress",
+            "batch_spill_*",
+            spill_ttl,
+            log_tag="batch_spill_dirs",
         )
         sweep_stale_in_dir(
             ipc_root / "logs",
@@ -186,6 +196,49 @@ def _trim_oversized_logs(directory: Path, glob_pattern: str, log_tag: str) -> in
         except Exception:
             pass
     return trimmed
+
+
+def sweep_stale_dirs_in_dir(
+    directory: Path,
+    glob_pattern: str,
+    max_age_sec: float,
+    *,
+    log_tag: str,
+) -> int:
+    """directory 直下を glob し、最終更新が古いディレクトリを再帰削除する。"""
+    if max_age_sec <= 0 or not directory.is_dir():
+        return 0
+    now = time.time()
+    removed = 0
+    try:
+        candidates = list(directory.glob(glob_pattern))
+    except OSError:
+        return 0
+    for p in candidates:
+        try:
+            if not p.is_dir():
+                continue
+            if now - p.stat().st_mtime <= max_age_sec:
+                continue
+            import shutil
+
+            shutil.rmtree(p, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        try:
+            logger.info(
+                "[IPC_SWEEP] %s removed=%s dir=%s pattern=%s ttl_sec=%s",
+                log_tag,
+                removed,
+                directory,
+                glob_pattern,
+                max_age_sec,
+            )
+        except Exception:
+            pass
+    return removed
 
 
 def clear_all_bridge_request_json(
@@ -238,6 +291,12 @@ def run_ui_server_startup_sweeps(ipc_root: Path) -> None:
             "req_*.pkl",
             q_ttl,
             log_tag="ui_requests",
+        )
+        sweep_stale_in_dir(
+            ipc_root / "requests" / "_failed",
+            "*.bad.pkl",
+            q_ttl,
+            log_tag="ui_failed_requests",
         )
         sweep_stale_starting_flags(ipc_root / "control", st_ttl)
         run_common_startup_sweeps(ipc_root)

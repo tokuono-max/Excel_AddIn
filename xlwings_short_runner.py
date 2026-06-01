@@ -28,6 +28,11 @@ def main() -> int:
         return 2
 
     src = script_path.read_text(encoding="utf-8-sig")
+    try:
+        # 実行内容はメモリへ読み込んだため、スクリプト残骸を残さない。
+        script_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     root = (os.environ.get("HC_INSTALL_ROOT") or "").strip()
     if root:

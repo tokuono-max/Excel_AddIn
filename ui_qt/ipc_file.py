@@ -221,7 +221,7 @@ def batch_done_notify_path(sheet_id: str) -> Path:
 
 
 def write_batch_done_notify(
-    sheet_id: str, title: str, message: str, *, ok: bool
+    sheet_id: str, title: str, message: str, *, ok: bool, run_id: str = ""
 ) -> None:
     """別プロセス一括実行の完了を、メイン UI と同一 IPC ルートへ書き出す。"""
     write_pickle(
@@ -230,6 +230,7 @@ def write_batch_done_notify(
             "title": str(title or "データ集約"),
             "message": str(message or ""),
             "ok": bool(ok),
+            "run_id": str(run_id or ""),
             "ts": time.time(),
         },
     )
@@ -254,7 +255,20 @@ def delete_batch_done_notify(sheet_id: str) -> None:
 
 
 def read_pickle(path: Path) -> Any:
-    """pickle を読み込む。"""
+    """pickle を読み込む（Windows の瞬間的な PermissionError を短いリトライで吸収）。"""
+    last_exc: Exception | None = None
+    max_attempts = 24
+    for i in range(max_attempts):
+        try:
+            return pickle.loads(path.read_bytes())
+        except PermissionError as e:
+            last_exc = e
+            time.sleep(min(0.06, 0.004 * (i + 1)))
+        except EOFError as e:
+            last_exc = e
+            time.sleep(min(0.06, 0.004 * (i + 1)))
+    if last_exc is not None:
+        raise last_exc
     return pickle.loads(path.read_bytes())
 
 
@@ -340,18 +354,73 @@ def _claim_request_file(path: Path) -> Optional[Path]:
         return None
 
 
+def _safe_mtime_for_sort(path: Path) -> float:
+    """mtime 取得失敗時は末尾扱いにする（列挙中の競合で全体が落ちないように）。"""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
 def pop_next_request() -> Optional[Path]:
     """次に処理すべき req を1つ取り出す（無ければ None）。
 
     取り出しは「claim（リネーム）」で行い、二重処理やレースでの FileNotFound を抑止する。
     """
     req_dir = get_request_dir()
-    items = sorted(req_dir.glob("req_*.pkl"), key=lambda p: p.stat().st_mtime)
+    items = sorted(req_dir.glob("req_*.pkl"), key=_safe_mtime_for_sort)
     for p in items:
         claimed = _claim_request_file(p)
         if claimed is not None:
             return claimed
     return None
+
+
+def cleanup_failed_requests(*, ttl_sec: int = 24 * 60 * 60, max_remove: int = 20) -> int:
+    """隔離済み req（requests/_failed/*.bad.pkl）を TTL ベースで掃除する。"""
+    req_dir = get_request_dir()
+    failed_dir = req_dir / "_failed"
+    if not failed_dir.is_dir():
+        return 0
+    ttl = max(0, int(ttl_sec))
+    limit = max(1, int(max_remove))
+    cutoff = time.time() - ttl
+    removed = 0
+    for p in sorted(failed_dir.glob("*.bad.pkl"), key=_safe_mtime_for_sort):
+        if removed >= limit:
+            break
+        try:
+            if p.stat().st_mtime > cutoff:
+                continue
+            p.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def cap_failed_requests(*, max_keep: int = 200) -> int:
+    """隔離済み req の件数上限を維持し、超過分（古い順）を削除する。"""
+    req_dir = get_request_dir()
+    failed_dir = req_dir / "_failed"
+    if not failed_dir.is_dir():
+        return 0
+    keep = max(0, int(max_keep))
+    try:
+        files = sorted(failed_dir.glob("*.bad.pkl"), key=_safe_mtime_for_sort)
+    except OSError:
+        return 0
+    excess = max(0, len(files) - keep)
+    if excess <= 0:
+        return 0
+    removed = 0
+    for p in files[:excess]:
+        try:
+            p.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def create_single_instance_mutex(name: str | None = None) -> Tuple[int, bool]:

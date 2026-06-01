@@ -93,7 +93,46 @@ try:
 except Exception:  # pragma: no cover
     _diag_ui = None  # type: ignore
 
-__version__ = "0.1.20"
+__version__ = "0.1.21"
+
+
+def _progress_label_min_height_for_lines(label: QLabel, lines: int = 2) -> int:
+    """2 行表示が切れないようラベルの最小高さ（px）を返す。"""
+    n = max(1, int(lines))
+    try:
+        fm = label.fontMetrics()
+        lh = int(fm.lineSpacing() or fm.height() or 16)
+        return max(lh * n + 2, 30)
+    except Exception:
+        return 40
+
+
+def _format_progress_status_text(
+    *,
+    phase: str,
+    msg: str,
+    detail: str,
+    current_file: str,
+    window_title: bool,
+) -> str:
+    """進捗ラベル用: フェーズ＋詳細（最大 2 行）。detail があるときは ［ファイル名］ 行を付けない。"""
+    phase_s = str(phase or "").strip()
+    msg_s = str(msg or "").strip()
+    detail_s = str(detail or "").strip()
+    cf = str(current_file or "").strip()
+    if detail_s:
+        line1 = phase_s or "準備中"
+        return "%s\n%s" % (line1, detail_s)
+    parts: list[str] = []
+    if phase_s:
+        parts.append(phase_s)
+    if msg_s and msg_s != phase_s:
+        parts.append(msg_s)
+    body = "\n".join(parts) if parts else "準備中"
+    # detail 無しの旧形式のみ。ファイル名が本文に無いときだけ ［］ 行を足す。
+    if cf and cf not in body:
+        return "%s\n［%s］" % (body, cf)
+    return body
 
 
 class ProgressDialog(QDialog):
@@ -181,25 +220,45 @@ class ProgressDialog(QDialog):
         # 変数: UI 部品（上: 処理中ファイル名・工程、中: 進捗バー、下: done/total 右寄せ）
         self._label_file = QLabel("準備中...")
         self._label_file.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # 折り返しは使わない（phase + detail の 2 行固定。wrap すると疑似 3 段目が見切れる）
+        try:
+            self._label_file.setWordWrap(False)
+        except Exception:
+            pass
+        try:
+            _lh2 = _progress_label_min_height_for_lines(self._label_file, 2)
+            self._label_file.setMinimumHeight(_lh2)
+            self._label_file.setMaximumHeight(_lh2)
+        except Exception:
+            pass
         self._bar = QProgressBar()
         self._bar.setRange(0, 100)
         self._bar.setValue(0)
         try:
-            self._bar.setMinimumHeight(34)
+            self._bar.setMinimumHeight(22)
+            self._bar.setMaximumHeight(22)
         except Exception:
             pass
         self._label_count = QLabel("0 / 0")
         self._label_count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        try:
+            _lc1 = _progress_label_min_height_for_lines(self._label_count, 1)
+            self._label_count.setMinimumHeight(_lc1)
+            self._label_count.setMaximumHeight(_lc1)
+        except Exception:
+            pass
 
-        # 変数: レイアウト（上: ファイル名左寄せ、中: バー、下: done/total 右寄せ、余白は下に）
+        # 変数: レイアウト（上: 2 行テキスト、中: バー、下: done/total、最下: キャンセル）
         lay = QVBoxLayout(self)
+        try:
+            lay.setContentsMargins(8, 6, 8, 6)
+            lay.setSpacing(2)
+        except Exception:
+            pass
         lay.addWidget(self._label_file)
         lay.addWidget(self._bar)
         lay.addWidget(self._label_count)
-        self._progress_mid_spacer = QSpacerItem(
-            1, 1, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding
-        )
-        lay.addItem(self._progress_mid_spacer)
+        self._progress_mid_spacer = None
 
         self._cancel_request_path = str(req.get("cancel_request_path") or "").strip()
         self._btn_cancel: Optional[QPushButton] = None
@@ -211,6 +270,10 @@ class ProgressDialog(QDialog):
             row_c.setContentsMargins(0, 0, 0, 0)
             row_c.addStretch(1)
             self._btn_cancel = QPushButton(str(_cfg.get("BTN_PROGRESS_CANCEL") or "キャンセル"))
+            try:
+                self._btn_cancel.setFixedHeight(24)
+            except Exception:
+                pass
             try:
                 tt_c = str(_cfg.get("PROGRESS_CANCEL_TOOLTIP") or "").strip()
                 if tt_c:
@@ -854,6 +917,7 @@ class ProgressDialog(QDialog):
             phase = str(d.get("phase", "") or "").strip()
             current_file = str(d.get("current_file", "") or "").strip()
             msg = str(d.get("msg", "") or "").strip()
+            detail = str(d.get("detail", "") or "").strip()
             window_title = str(d.get("window_title", "") or "").strip()
 
             try:
@@ -867,14 +931,14 @@ class ProgressDialog(QDialog):
             except Exception:
                 pass
 
-            # 進捗バー上: 処理概要のみ（フェーズ番号 N/M は付けない。フェーズは右下 done/total やバーで表す）。
-            # window_title 指定時は [ファイル名] を付けずタイトルバーに寄せる。
-            summary = phase or msg or "準備中"
-            head = summary
-            if current_file and not window_title:
-                self._label_file.setText(f"{head} [{current_file}]")
-            else:
-                self._label_file.setText(head)
+            head = _format_progress_status_text(
+                phase=phase,
+                msg=msg,
+                detail=detail,
+                current_file=current_file,
+                window_title=bool(window_title),
+            )
+            self._label_file.setText(head)
 
             self._bar.setValue(pct)
 

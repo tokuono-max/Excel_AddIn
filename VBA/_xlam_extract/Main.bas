@@ -4,9 +4,12 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: Main (標準モジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-04-11
+' 更新日: 2026-06-01
 ' 文字コード: 本モジュールは Shift-JIS（CP932）で保存すること（日本語コメント・文字列の破損防止）。
 ' 改版番号および履歴:
+'   2.11.0 (2026-06-01) [UX] ForceCursorOn: 本番データ集約一括の砂時計 ON。外部 Python から Application.Run で呼ぶ（COM の Cursor 直書きは不可のため）。
+'   2.10.0 (2026-05-31) [終了] ShutdownExcelUiCleanup: Python EXCEL_RESTORE 呼び出し（COM ハング救済）。
+'   2.9.0 (2026-05-30) [終了] ShutdownExcelUiCleanup: WaitForm/OnTime/Cursor/Interactive 復元（Excel 残留対策）。
 '   2.6.0 (2026-04-11) [整理] TerminatePython / RunPythonSafe の RunPython 文字列から hc_main を除去。core.excel_session（clear_internal_registry / invoke_action）経由。
 '   2.7.0 (2026-04-11) [重複] check_duplicates: bridge JSON に selection_areas（各 Area の External アドレス）を付与。
 '   2.8.0 (2026-04-11) check_duplicates: bridge JSON CountLarge (selection_count_large / sheet_cells_count_large).
@@ -454,6 +457,24 @@ Public Sub CancelCursorGuardTimer(Optional ByVal reason As String = "")
     On Error GoTo 0
 End Sub
 
+' ---------------------------------------------------------------------------------------------------------------------
+' プロシージャ名: ForceCursorOn
+' 改版番号および履歴:
+'   1.0.0 (2026-06-01) 本番一括 compute 等: xlWait ON + CursorGuard タイマ再武装。
+' プロシージャの動作概要: RunPythonSafe 非経由の長時間処理で Excel 砂時計を表示する。
+' 呼出し例: Application.Run "Main.ForceCursorOn", sheetId
+' ヘルパープロシージャの親子関係: (子) StartCursorGuardTimer
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub ForceCursorOn(Optional ByVal sId As String = "batch")
+    On Error Resume Next
+    If Len(sId) = 0 Then sId = "batch"
+    m_cursorReleased = False
+    Application.Cursor = xlWait
+    Call HC_Log.Diag("Main", "Application.Cursor: ON (ForceCursorOn)")
+    Call StartCursorGuardTimer(sId)
+    On Error GoTo 0
+End Sub
+
 Public Sub ForceCursorOff()
     ' # 【目的】最終保険として砂時計を解除する。
     ' # 【注意】多重実行されても安全（冪等）にする。
@@ -487,6 +508,38 @@ End Sub
 ' 呼出し例: ThisWorkbook の終了時
 ' ヘルパープロシージャの親子関係: (子) xlwings.RunPython
 ' ---------------------------------------------------------------------------------------------------------------------
+' ---------------------------------------------------------------------------------------------------------------------
+' プロシージャ名: ShutdownExcelUiCleanup
+' 改版番号および履歴:
+'   1.1.0 (2026-05-31) Python restore_excel_host_ui_state 呼び出し・EnableEvents 復元を追加。
+'   1.0.0 (2026-05-30) Excel 終了時: WaitForm/OnTime/Interactive/ScreenUpdating の復元。
+' プロシージャの動作概要: アドイン終了直前に VBA 側の待機 UI と OnTime を解除し、Excel 操作状態を戻す。
+' 呼出し例: Call Main.ShutdownExcelUiCleanup
+' ヘルパープロシージャの親子関係: (子) HC_WaitForm.NotifyUiReady, CancelCursorGuardTimer, xlwings.RunPython
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub ShutdownExcelUiCleanup()
+    On Error Resume Next
+    Dim hwnd As LongPtr
+    Dim sId As String
+    Dim sCmd As String
+    Call HC_WaitForm.NotifyUiReady
+    Call CancelCursorGuardTimer("shutdown")
+    Application.Cursor = xlDefault
+    Application.Interactive = True
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    hwnd = Application.hwnd
+    sId = vbNullString
+    If Not ActiveSheet Is Nothing Then
+        sId = ExcelUtil.GetSheetIdSafe(ActiveSheet)
+    End If
+    sCmd = "from core.excel_host_restore import restore_excel_host_ui_state; restore_excel_host_ui_state(" _
+        & CStr(hwnd) & ", '" & PyEscSq(sId) & "')"
+    RunPython sCmd
+    Call HC_Log.Info("Main", "ShutdownExcelUiCleanup done")
+    On Error GoTo 0
+End Sub
+
 Public Sub TerminatePython()
     On Error Resume Next
     ' # 【目的】アドイン終了時に Python 側の COM 参照をクリアするため。

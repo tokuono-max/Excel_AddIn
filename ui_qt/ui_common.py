@@ -125,6 +125,53 @@ def install_ribbon_startup_wait_dismiss_on_first_show(target: Any) -> None:
     w.installEventFilter(filt)
 
 
+class _DataAggBatchProgressCursorOnShow(QObject):
+    """本番一括進捗の初回 Show: WaitForm を閉じつつ Excel 砂時計を維持・再武装する。"""
+
+    def __init__(self, sheet_id: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._sheet_id = str(sheet_id or "")
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.Show:
+            return False
+        try:
+            watched.removeEventFilter(self)
+        except Exception:
+            pass
+        try:
+            self.deleteLater()
+        except Exception:
+            pass
+        try:
+            from core.core_cursor import (
+                data_agg_batch_cursor_on,
+                notify_wait_form_ready,
+            )
+
+            notify_wait_form_ready()
+            data_agg_batch_cursor_on(self._sheet_id)
+        except Exception:
+            pass
+        return False
+
+
+def install_data_agg_batch_progress_cursor_on_show(
+    target: Any,
+    sheet_id: str,
+) -> None:
+    """本番一括 progress: 初回 Show で WaitForm 解除 + xlWait 再武装（ui_server の ribbon フックと併用可）。"""
+    w = _resolve_widget_for_ribbon_wait_dismiss(target)
+    if w is None:
+        return
+    if getattr(w, "_hc_data_agg_batch_cursor_on_show_installed", False):
+        return
+    w._hc_data_agg_batch_cursor_on_show_installed = True
+    filt = _DataAggBatchProgressCursorOnShow(str(sheet_id or ""), w)
+    filt.setParent(w)
+    w.installEventFilter(filt)
+
+
 # ===== ui_common trace (file based, logger independent) =====
 _UI_COMMON_TRACE_PATH = (
     Path(os.environ.get("TEMP", ".")) / "csv_tool" / "ui_common_trace.log"

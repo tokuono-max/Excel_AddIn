@@ -39,11 +39,11 @@ def master_preview_one_shot_eligible(
     items = list((scenario_base or {}).get("items") or [])
     if mi_idx < 0 or mi_idx >= len(items):
         return False
-    from svc.svc_data_agg import _scenario_has_join_defs  # noqa: WPS433
+    from svc.svc_data_agg import _item_join_defs_list  # noqa: WPS433
 
-    if _scenario_has_join_defs(items):
-        return False
     it = items[mi_idx]
+    if _item_join_defs_list(it):
+        return False
     if not isinstance(it, dict):
         return False
     sources = list(it.get("sources") or [])
@@ -141,8 +141,12 @@ def frozen_snapshot_invalid_reason(
     headers: list[str],
     file_paths: list[str],
     expected_through_mi: int,
+    relax_paths: bool = False,
 ) -> str | None:
-    """有効なら None。無効ならログ用 reason コード。"""
+    """有効なら None。無効ならログ用 reason コード。
+
+    relax_paths: 項目スキップの carry-forward 用。paths_head のみ緩和（paths_count は常に一致必須）。
+    """
     if not isinstance(snapshot, dict):
         return "no_snapshot"
     if snapshot.get("version") != FROZEN_SNAPSHOT_VERSION:
@@ -155,17 +159,71 @@ def frozen_snapshot_invalid_reason(
     paths = [str(p) for p in file_paths]
     if int(snapshot.get("paths_count", -1)) != len(paths):
         return "paths_count"
-    head = snapshot.get("paths_head")
-    if isinstance(head, list):
-        head = tuple(head)
-    if not isinstance(head, tuple):
-        return "paths_head"
-    if head != tuple(paths[:8]):
-        return "paths_head"
+    if not relax_paths:
+        head = snapshot.get("paths_head")
+        if isinstance(head, list):
+            head = tuple(head)
+        if not isinstance(head, tuple):
+            return "paths_head"
+        if head != tuple(paths[:8]):
+            return "paths_head"
     rbk = snapshot.get("rows_by_key")
     if not isinstance(rbk, dict) or len(rbk) <= 0:
         return "empty_rows"
     return None
+
+
+def best_frozen_snapshot_for_mi(
+    snapshots: dict[int, dict[str, Any]],
+    mi_idx: int,
+    *,
+    headers: list[str],
+    file_paths: list[str],
+) -> tuple[dict[str, Any] | None, int | None]:
+    """
+    through_mi < mi_idx のうち最大の有効スナップショットを返す。
+    直前項目 (mi_idx-1) は paths 厳密。それより古い carry-forward は paths_head のみ緩和。
+    """
+    if int(mi_idx) <= 0:
+        return None, None
+    expected_strict = int(mi_idx) - 1
+    strict = snapshots.get(expected_strict)
+    if (
+        frozen_snapshot_invalid_reason(
+            strict,
+            headers=headers,
+            file_paths=file_paths,
+            expected_through_mi=expected_strict,
+            relax_paths=False,
+        )
+        is None
+    ):
+        return strict, expected_strict
+    best_through: int | None = None
+    best_snap: dict[str, Any] | None = None
+    for through in sorted(
+        (int(k) for k in snapshots.keys()),
+        reverse=True,
+    ):
+        if through >= int(mi_idx):
+            continue
+        snap = snapshots.get(through)
+        relax = through < expected_strict
+        if (
+            frozen_snapshot_invalid_reason(
+                snap,
+                headers=headers,
+                file_paths=file_paths,
+                expected_through_mi=through,
+                relax_paths=relax,
+            )
+            is not None
+        ):
+            continue
+        best_through = through
+        best_snap = snap
+        break
+    return best_snap, best_through
 
 
 def validate_frozen_snapshot(
@@ -174,6 +232,7 @@ def validate_frozen_snapshot(
     headers: list[str],
     file_paths: list[str],
     expected_through_mi: int,
+    relax_paths: bool = False,
 ) -> bool:
     return (
         frozen_snapshot_invalid_reason(
@@ -181,6 +240,7 @@ def validate_frozen_snapshot(
             headers=headers,
             file_paths=file_paths,
             expected_through_mi=expected_through_mi,
+            relax_paths=relax_paths,
         )
         is None
     )
@@ -218,9 +278,12 @@ def scenario_for_stepped_preview(
     if frozen_through_mi is not None and isinstance(frozen_prior, dict):
         from svc.svc_data_agg import _anchor_headers_for_table_output  # noqa: WPS433
 
-        frozen_anchor_headers = _anchor_headers_for_table_output(
-            items_orig, headers_full
-        )
+        # carry-forward（through が直前でない）では錨列 emit を緩めない。
+        # パス数不一致の古い凍結＋錨 override だと結合行が全除外され表が空になる。
+        if int(mi_idx) - int(frozen_through_mi) <= 1:
+            frozen_anchor_headers = _anchor_headers_for_table_output(
+                items_orig, headers_full
+            )
     new_items: list[dict[str, Any]] = []
     active = list(active_slot_indices)
     for j, it in enumerate(items_orig):
@@ -284,6 +347,24 @@ def scenario_for_master_batch_on(
     return s
 
 
+def scenario_for_production_parity_preview(
+    scenario_base: dict[str, Any],
+    *,
+    diag_enabled: bool = False,
+) -> dict[str, Any]:
+    """
+    本番一括と同じ table_rows 組立（全項目ソース有効・match_keys 経路）用シナリオ。
+    段階プレビュー（scenario_for_stepped_preview）とは別。
+    """
+    scen = copy.deepcopy(scenario_base or {})
+    scen["__debug_diag"] = {
+        "enabled": bool(diag_enabled),
+        "source": MASTER_PREVIEW_DIAG_SOURCE,
+        "preview_use_production_table_rows": True,
+    }
+    return scen
+
+
 def run_preview_compute(
     scenario: dict[str, Any],
     file_paths: list[str],
@@ -308,3 +389,25 @@ def run_preview_compute(
     except Exception:
         _logger.exception("master preview compute_batch_table_rows failed")
         return [], [], [], 0
+
+
+def run_production_parity_preview_compute(
+    scenario_base: dict[str, Any],
+    file_paths: list[str],
+    *,
+    max_primary_rows: Optional[int],
+    max_table_rows: Optional[int],
+    progress_hook: Optional[Callable[..., None]] = None,
+    probe_caller: Optional[str] = None,
+) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
+    """完了時表示: 本番一括と同じ行順・組立でプレビュー表を得る。"""
+    scen = scenario_for_production_parity_preview(scenario_base)
+    paths = preview_compute_file_paths(scen, file_paths)
+    return run_preview_compute(
+        scen,
+        paths,
+        max_primary_rows=max_primary_rows,
+        max_table_rows=max_table_rows,
+        progress_hook=progress_hook,
+        probe_caller=probe_caller or "mpv_production_parity",
+    )

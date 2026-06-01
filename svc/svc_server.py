@@ -203,6 +203,25 @@ def _write_pickle(path: Path, obj: object) -> None:
     _atomic_write_bytes(path, pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
 def _read_pickle(path: Path) -> object:
+    """
+    Windows で稀に `PermissionError: [Errno 13]` が発生することがある（AV/索引/競合）。
+    要求キューは atomic replace で書かれる前提だが、読み側は短いリトライで吸収する。
+    """
+    last_exc: Exception | None = None
+    for i in range(12):
+        try:
+            with path.open("rb") as f:
+                return pickle.load(f)
+        except PermissionError as e:
+            last_exc = e
+            # 0ms/5ms/10ms... と短く待つ（最大 ~330ms）
+            time.sleep(min(0.03, 0.005 * (i + 1)))
+        except EOFError as e:
+            # 書込途中/AV 介入などの極稀ケース。短く待って再試行。
+            last_exc = e
+            time.sleep(min(0.03, 0.005 * (i + 1)))
+    if last_exc is not None:
+        raise last_exc
     with path.open("rb") as f:
         return pickle.load(f)
 

@@ -133,6 +133,18 @@ def _xlsx_workbook_cache_top() -> Optional[dict[str, Any]]:
     return stack[-1]
 
 
+def _load_workbook_readonly(path: Path) -> Any:
+    """read_only + data_only。リンク展開を省略して読込を軽くする。"""
+    import openpyxl  # noqa: E402
+
+    return openpyxl.load_workbook(
+        path,
+        read_only=True,
+        data_only=True,
+        keep_links=False,
+    )
+
+
 def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
     """スコープ内ならキャッシュから取得または load して登録。スコープ外は None。"""
     frame = _xlsx_workbook_cache_top()
@@ -158,10 +170,10 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
     try:
         if _per_file_workbook_timing_enabled():
             t_ld = time.perf_counter()
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            wb = _load_workbook_readonly(path)
             _add_workbook_open_seconds(key, time.perf_counter() - t_ld)
         else:
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            wb = _load_workbook_readonly(path)
     except Exception as e:
         logger.debug("[DATA_AGG_EXTRACT] Excel 読込エラー %s: %s", path, e)
         return None
@@ -704,7 +716,7 @@ def _get_excel_cell(
         except Exception:
             return None
     try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        wb = _load_workbook_readonly(path)
         if sheet_name:
             if sheet_name not in wb.sheetnames:
                 ws = wb.active
@@ -1297,9 +1309,7 @@ def extract_item_values(
                             try:
                                 import openpyxl  # noqa: E402
 
-                                wb_ctx = openpyxl.load_workbook(
-                                    p_abs, read_only=True, data_only=True
-                                )
+                                wb_ctx = _load_workbook_readonly(p_abs)
                                 wb_owned = True
                             except Exception:
                                 wb_ctx = None
@@ -1535,7 +1545,7 @@ def _extract_cell_rule_series_fast(
         try:
             import openpyxl  # noqa: E402
 
-            wb_ctx = openpyxl.load_workbook(p_abs, read_only=True, data_only=True)
+            wb_ctx = _load_workbook_readonly(p_abs)
             wb_owned = True
         except Exception:
             wb_ctx = None
@@ -1645,7 +1655,7 @@ def _extract_cell_rules_series_fast_map(
         try:
             import openpyxl  # noqa: E402
 
-            wb_ctx = openpyxl.load_workbook(p_abs, read_only=True, data_only=True)
+            wb_ctx = _load_workbook_readonly(p_abs)
             wb_owned = True
         except Exception:
             wb_ctx = None

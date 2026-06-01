@@ -415,6 +415,7 @@ class _DataAggMainWindow(QDialog):
         self._scenario_save_empty_filename: bool = False
         self._batch_poll_timer: QTimer | None = None
         self._batch_poll_deadline: float = 0.0
+        self._batch_poll_run_id: str = ""
         self._excel_menu_bar_lock_applied: bool = False
         self._excel_menu_lock_app: Any = None
         self._excel_lock_interactive_prev: bool | None = None
@@ -3392,10 +3393,11 @@ class _DataAggMainWindow(QDialog):
         )
         return data
 
-    def _start_batch_done_poll_for_sheet(self, sheet_id: str) -> None:
+    def _start_batch_done_poll_for_sheet(self, sheet_id: str, *, run_id: str = "") -> None:
         """別プロセス一括の完了 pickle をポーリングし、親ダイアログでメッセージを出す。"""
         sid = str(sheet_id or "").strip() or str(self._sheet_id or "")
         self._batch_poll_sheet_id = sid
+        self._batch_poll_run_id = str(run_id or "").strip()
         delete_batch_done_notify(sid)
         self._batch_poll_deadline = time.time() + 7200.0
         if self._batch_poll_timer is None:
@@ -3411,6 +3413,12 @@ class _DataAggMainWindow(QDialog):
         sid = str(getattr(self, "_batch_poll_sheet_id", "") or "").strip() or str(self._sheet_id or "")
         d = try_read_batch_done_notify(sid)
         if not d:
+            return
+        expect_run_id = str(getattr(self, "_batch_poll_run_id", "") or "").strip()
+        got_run_id = str(d.get("run_id") or "").strip()
+        # 古い run の通知は無視（先行 run の完了通知が遅れて届く競合対策）
+        if expect_run_id and got_run_id and got_run_id != expect_run_id:
+            delete_batch_done_notify(sid)
             return
         delete_batch_done_notify(sid)
         if self._batch_poll_timer is not None:
@@ -3565,6 +3573,11 @@ class _DataAggMainWindow(QDialog):
                 ]
             else:
                 cmd = [py_exe, "-c", py_src.replace("\n", ";")]
+                try:
+                    # -c 実行時は script_path を参照しないため即時掃除する。
+                    Path(script_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
             env = os.environ.copy()
             ipc_root = core_env.ipc_dir_raw()
             if ipc_root:
@@ -3590,8 +3603,17 @@ class _DataAggMainWindow(QDialog):
             if use_short_runner and install_root is not None:
                 env = runtime_layout.env_with_packaged_dll_search_path(env, install_root)
             if notify_parent_dialog:
-                self._start_batch_done_poll_for_sheet(run_sheet_id)
+                self._start_batch_done_poll_for_sheet(
+                    run_sheet_id,
+                    run_id=batch_run_id,
+                )
             spawn_cwd = str(install_root) if install_root is not None else str(proj_root)
+            try:
+                from core.core_cursor import data_agg_batch_cursor_on
+
+                data_agg_batch_cursor_on(str(run_sheet_id or ""))
+            except Exception:
+                pass
             subprocess.Popen(cmd, cwd=spawn_cwd, env=env)
             if show_batch_start:
                 show_info_notice(
@@ -6088,6 +6110,12 @@ def create_dialog(
             parent_widget=main_parent,
             progress_cfg=progress_cfg,
         )
+        try:
+            from ui_qt.ui_common import install_data_agg_batch_progress_cursor_on_show
+
+            install_data_agg_batch_progress_cursor_on_show(dlg, str(sheet_id or ""))
+        except Exception:
+            pass
         return _DataAggProgressWrapper(dlg)
 
     if action == "done":
