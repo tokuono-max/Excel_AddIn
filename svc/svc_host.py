@@ -3,16 +3,17 @@
 Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
-Updated: 2026-04-19
-Version: 0.4.29
+Updated: 2026-06-03
+Version: 0.4.30
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
   - 判定は Windows named mutex(OpenMutex) により「存在確認のみ」（所有しない）。
-  - Excel終了時は request_shutdown_all() を呼ぶ想定。
+  - Excel終了時は request_shutdown_all() / shutdown_all_with_force_kill() を呼ぶ想定。
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.30 (2026-06-03): shutdown_all_with_force_kill 追加（フラグ終了後に hc_main/svc_server/ui_server の pythonw を taskkill）。
   - 0.4.29 (2026-04-19): Packaged EXE 配置を ``HC_INSTALL_ROOT\\app\\bin\\`` に統一。子プロセス PATH は ``app\\bin`` + インストールルート。
   - 0.4.28 (2026-04-19): Packaged 子プロセスの env に ``app\\shared``・``app`` を PATH 先頭追加（python312.dll 等のローダ解決）。
   - 0.4.26 (2026-04-11): 常駐ブリッジはルート `hc_main.py` のみ必須。`svc/bridge_runner.py` フォールバックを廃止。
@@ -45,8 +46,9 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.29"
+__version__ = "0.4.30"
 import os
+import shlex
 import subprocess
 import ctypes
 from ctypes import wintypes
@@ -828,5 +830,118 @@ def request_shutdown_all() -> None:
         logger.info("[SVC_SERVER] shutdown requested (flag written)")
     except Exception:
         pass
+
+
+_HC_PACKAGED_EXE_MARKERS = (
+    "hc_main.exe",
+    "hc_svc_server.exe",
+    "hc_ui_server.exe",
+)
+
+
+def _safe_kill_pid_windows(pid: int) -> bool:
+    """指定 PID を taskkill で終了する（ベストエフォート）。"""
+    if os.name != "nt" or int(pid or 0) <= 0:
+        return False
+    try:
+        cp = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(int(pid))],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return cp.returncode in (0, 128)
+    except Exception:
+        return False
+
+
+def _list_hc_python_target_pids(project_root: Path) -> list[int]:
+    """現在のプロジェクト配下の hc_main / svc_server / ui_server の PID を列挙する。"""
+    if os.name != "nt":
+        return []
+    try:
+        script_targets = (
+            str((project_root / "hc_main.py").resolve()).lower(),
+            str((project_root / "svc" / "svc_server.py").resolve()).lower(),
+            str((project_root / "ui_qt" / "ui_server.py").resolve()).lower(),
+        )
+        rel_markers = (
+            "hc_main.py",
+            "svc\\svc_server.py",
+            "svc/svc_server.py",
+            "ui_qt\\ui_server.py",
+            "ui_qt/ui_server.py",
+        )
+        root_key = str(project_root.resolve()).lower()
+    except Exception:
+        return []
+    cmd = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match '^(python|pythonw)\\.exe$' -or "
+        "$_.Name -match '^hc_(main|svc_server|ui_server)\\.exe$' } | "
+        "ForEach-Object { $_.ProcessId.ToString() + [char]9 + ($_.CommandLine ?? '') }"
+    )
+    try:
+        cp = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return []
+    if cp.returncode != 0:
+        return []
+    pids: list[int] = []
+    for line in (cp.stdout or "").splitlines():
+        low = line.lower()
+        matched = any(t in low for t in script_targets)
+        if not matched:
+            matched = any(m in low for m in _HC_PACKAGED_EXE_MARKERS)
+        if not matched and root_key in low:
+            matched = any(m in low for m in rel_markers)
+        if not matched:
+            continue
+        try:
+            if "\t" in line:
+                pid_token = line.split("\t", 1)[0]
+                pid = int(pid_token.strip())
+            else:
+                pid = int(shlex.split(line.strip())[0])
+        except Exception:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            try:
+                pid = int(parts[0])
+            except Exception:
+                continue
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def shutdown_all_with_force_kill(reason: str = "excel_shutdown") -> None:
+    """通常 shutdown 要求 + 残留 Python 常駐プロセスのフェイルセーフ終了。"""
+    request_shutdown_all()
+    if os.name != "nt":
+        return
+    time.sleep(1.2)
+    project_root = Path(__file__).resolve().parent.parent
+    self_pid = os.getpid()
+    target_pids = [p for p in _list_hc_python_target_pids(project_root) if p != self_pid]
+    killed = 0
+    for pid in target_pids:
+        if _safe_kill_pid_windows(pid):
+            killed += 1
+    logger.info(
+        "[HOST_SHUTDOWN] reason=%s force_kill_target=%s force_kill_done=%s self_pid=%s",
+        reason,
+        len(target_pids),
+        killed,
+        self_pid,
+    )
 
 # Release: hc_host_v0.4.16

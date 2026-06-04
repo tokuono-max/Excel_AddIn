@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: svc/svc_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-04-09
-Version: 1.3.4
+Updated: 2026-06-04
+Version: 1.3.9
 Purpose:
   CSV保存（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_csv_sv（ファイル「名前を付けて保存」ダイアログ）で行う。
@@ -13,6 +13,11 @@ Purpose:
   - 完了時は csv_ld と同様の完了通知（シート名・ファイル名・容量・行数）を表示。
 
 History (latest 3):
+  - 1.3.9 (2026-06-04) 保存: 既定で画面上の表示文字列をチャンク Copy→クリップボードで読込。文字列行列を csv.writer で直接出力（日付正規化不要）。HC_CSV_SV_USE_VALUE_READ=1 で従来 .value 経路。
+  - 1.3.8 (2026-06-04) 性能: 保存前チェックを先頭行サンプルのみに変更（全 UsedRange 読込廃止）。大容量は日付正規化スキップ。保存計測ログ分割。
+  - 1.3.7 (2026-06-04) 進捗: 単調 seq・明示 pct（読込0–49/保存50–75/DONE100）・例外時 ERROR。UI の pct 優先と整合。
+  - 1.3.6 (2026-06-04) 保存終了時に EnableEvents=True を保証（restore_excel_host_after_operation）。シート切替イベント復帰。
+  - 1.3.5 (2026-06-04) 保存処理中の砂時計 ON（保存先確定後〜完了）。長いシート読込中は tick で再武装。
   - 1.3.4 (2026-04-09) 進捗 IPC に excel_rect（Excel HWND の GetWindowRect）を付与。svc_csv_ld / svc_csv_sp / svc_csv_mg と同様の中央寄せ基準に統一。
   - 1.3.3 (2026-04-07) 保存ダイアログ後・警告 UI 後・処理完了後に bring_to_front で Excel 前面復帰。ui_csv_sv ネイティブダイアログ終了時も同対応。
   - 1.3.2 (2026-04-06) `dialog_wait_ms`（ui_ipc 確定〜result_ok/cancel）。`HC_EXCEL_HWND` を core.core_env 経由に統一。
@@ -35,11 +40,20 @@ from typing import Any
 
 from core import core_env
 from core.core_log import get_diag_logger, get_logger
-from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
+from core.excel_host_restore import restore_excel_host_after_operation
+from core.excel_perf_mode import set_excel_performance_mode
+from core.core_cursor import (
+    csv_tool_wait_cursor_off,
+    csv_tool_wait_cursor_on,
+    csv_tool_wait_cursor_tick,
+    notify_ui_ready,
+    notify_wait_form_ready,
+)
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.4"
+__version__ = "1.3.9"
 
 try:
     from core import core_xlc as xlc
@@ -60,6 +74,10 @@ logger = get_logger(__name__)
 _sv_diag = get_diag_logger("hc_csv_tool.diag.csv_sv")
 
 READ_CHUNK_SIZE: int = 10000
+# 保存前の「データあり」判定で先頭行だけ COM 取得する最大列数（全 UsedRange 読込を避ける）
+_SV_VALID_SAMPLE_MAX_COLS: int = 128
+# この行数超は日付正規化をスキップ（旧版同等の速度）。HC_CSV_SV_FORCE_DATE_NORMALIZE=1 で強制ON
+_SV_DATE_NORMALIZE_MAX_ROWS_DEFAULT: int = 50_000
 _CSV_DATE_TEXT_RE = re.compile(
     r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$"
 )
@@ -98,6 +116,33 @@ def _progress_write(path: Path, obj: dict[str, Any]) -> None:
         write_pickle(path, obj)
     except Exception:
         pass
+
+
+_PROGRESS_SEQ: dict[str, int] = {}
+
+
+def _progress_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path)
+
+
+def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> None:
+    """UI の seq 順序保証用に単調増加 seq を付与して進捗を書く。"""
+    key = _progress_key(path)
+    n = _PROGRESS_SEQ.get(key, -1) + 1
+    _PROGRESS_SEQ[key] = n
+    merged = dict(obj)
+    merged["seq"] = n
+    _progress_write(path, merged)
+
+
+def _calc_sv_read_pct(done_rows: int, total_rows: int) -> int:
+    """Excel 読込フェーズ用バー目標（全体の 0–49%）。"""
+    if total_rows <= 0:
+        return 0
+    return min(49, int(done_rows * 49 / total_rows))
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -161,16 +206,6 @@ def _submit_request_dict(req_dict: dict[str, Any]) -> Path:
     return req_path
 
 
-def _set_performance_mode(app: Any, on: bool) -> None:
-    """Excel の画面更新・計算を抑止/復帰する（高速化）。on=True のとき画面更新を抑止（svc_csv_ld と同じ意味）。"""
-    try:
-        api = getattr(app, "api", None) or app
-        api.ScreenUpdating = not on
-        api.Calculation = -4135 if on else -4105  # xlCalculationManual / xlCalculationAutomatic
-    except Exception:
-        pass
-
-
 def _cell_has_value(cell: Any) -> bool:
     """1セルに値が入っているか（None・空文字・空白のみは無効）。"""
     if cell is None:
@@ -180,11 +215,50 @@ def _cell_has_value(cell: Any) -> bool:
     return True
 
 
+def _matrix_sample_has_value(val: Any) -> bool:
+    """COM から得た 1 行分（またはスカラー）に有効な値があるか。"""
+    if val is None:
+        return False
+    if not isinstance(val, (list, tuple)):
+        return _cell_has_value(val)
+    for row in val:
+        if row is None:
+            continue
+        if not isinstance(row, (list, tuple)):
+            if _cell_has_value(row):
+                return True
+            continue
+        for cell in row:
+            if _cell_has_value(cell):
+                return True
+    return False
+
+
+def _csv_sv_use_display_text() -> bool:
+    """use_display_text_for_csv_save のエイリアス（テスト互換）。"""
+    return use_display_text_for_csv_save()
+
+
+def _should_normalize_dates_for_save(row_count: int) -> bool:
+    """大容量シートでは全セル日付正規化をスキップして保存時間を短縮する。"""
+    if core_env.truthy(core_env.get("HC_CSV_SV_SKIP_DATE_NORMALIZE")):
+        return False
+    if core_env.truthy(core_env.get("HC_CSV_SV_FORCE_DATE_NORMALIZE")):
+        return True
+    try:
+        max_rows = int(
+            core_env.get("HC_CSV_SV_DATE_NORMALIZE_MAX_ROWS")
+            or _SV_DATE_NORMALIZE_MAX_ROWS_DEFAULT
+        )
+    except (TypeError, ValueError):
+        max_rows = _SV_DATE_NORMALIZE_MAX_ROWS_DEFAULT
+    return row_count <= max(0, max_rows)
+
+
 def _sheet_has_valid_data(ptr_s: Any) -> bool:
     """
-    シートに有効なデータがあるか。
-    - UsedRange が 1 行以上・1 列以上あること。
-    - さらに、その範囲内に「値が入っているセル」が 1 個以上あること（まっさら・書式のみは無効）。
+    シートに有効なデータがあるか（保存ダイアログ表示前の軽量チェック）。
+    UsedRange の行数・列数のみ取得し、先頭行の一部列だけ COM 読込（全範囲読込は行わない）。
     """
     if ptr_s is None:
         return False
@@ -196,22 +270,23 @@ def _sheet_has_valid_data(ptr_s: Any) -> bool:
         col_count = int(getattr(api_range.columns, "count", 0) or 0)
         if row_count < 1 or col_count < 1:
             return False
-        val = api_range.options(ndim=2).value
-        if val is None:
-            return False
-        # 1 セルだけのときは scalar で返る場合がある
-        if not isinstance(val, (list, tuple)):
-            return _cell_has_value(val)
-        for row in val:
-            if row is None:
-                continue
-            if not isinstance(row, (list, tuple)):
-                if _cell_has_value(row):
-                    return True
-                continue
-            for cell in row:
-                if _cell_has_value(cell):
-                    return True
+        row_start = int(getattr(api_range, "row", 1) or 1)
+        col_start = int(getattr(api_range, "column", 1) or 1)
+        sample_cols = min(col_count, _SV_VALID_SAMPLE_MAX_COLS)
+        sample = ptr_s.range(
+            (row_start, col_start),
+            (row_start, col_start + sample_cols - 1),
+        )
+        val = sample.options(ndim=2).value
+        if _matrix_sample_has_value(val):
+            return True
+        if sample_cols < col_count:
+            tail_start = col_start + col_count - sample_cols
+            tail = ptr_s.range(
+                (row_start, tail_start),
+                (row_start, col_start + col_count - 1),
+            )
+            return _matrix_sample_has_value(tail.options(ndim=2).value)
         return False
     except Exception:
         return False
@@ -273,6 +348,7 @@ def _read_matrix_safe(
     sheet_ptr: Any,
     progress_path: Path | None = None,
     total_rows: int = 0,
+    sheet_id: str = "",
 ) -> list[list[Any]]:
     """シートをチャンクで読み、2次元リストで返す。progress_path 指定時は進捗を書き込む。"""
     api_range = sheet_ptr.used_range
@@ -293,9 +369,9 @@ def _read_matrix_safe(
         list_chunk = curr_range.options(ndim=2).value
         list_total.extend(list_chunk)
         if progress_path is not None and total_rows > 0:
+            csv_tool_wait_cursor_tick(sheet_id)
             done = len(list_total)
-            pct = min(50, int(done * 50 / total_rows))
-            _progress_write(
+            _progress_write_monotonic(
                 progress_path,
                 {
                     "status": "RUN",
@@ -303,10 +379,62 @@ def _read_matrix_safe(
                     "phase": "データ読込中",
                     "done": done,
                     "total": total_rows,
-                    "pct": pct,
+                    "pct": _calc_sv_read_pct(done, total_rows),
                 },
             )
     return list_total
+
+
+def _read_matrix_display_text(
+    sheet_ptr: Any,
+    progress_path: Path | None = None,
+    total_rows: int = 0,
+    sheet_id: str = "",
+) -> list[list[str]]:
+    """シートをチャンクで読み、画面上の表示文字列の 2 次元リストで返す。"""
+    api_range = sheet_ptr.used_range
+    val_row_start = int(getattr(api_range, "row", 1) or 1)
+    val_col_start = int(getattr(api_range, "column", 1) or 1)
+    val_row_count = int(getattr(api_range.rows, "count", 0) or 0)
+    val_col_count = int(getattr(api_range.columns, "count", 0) or 0)
+    list_total: list[list[str]] = []
+    for i_offset in range(0, val_row_count, READ_CHUNK_SIZE):
+        rows_to_read = min(READ_CHUNK_SIZE, val_row_count - i_offset)
+        list_chunk = read_range_display_text_matrix(
+            sheet_ptr,
+            row_start=val_row_start + i_offset,
+            col_start=val_col_start,
+            n_rows=rows_to_read,
+            n_cols=val_col_count,
+        )
+        list_total.extend(list_chunk)
+        if xlc is not None:
+            try:
+                xlc.yield_to_excel()
+            except Exception:
+                pass
+        if progress_path is not None and total_rows > 0:
+            csv_tool_wait_cursor_tick(sheet_id)
+            done = len(list_total)
+            _progress_write_monotonic(
+                progress_path,
+                {
+                    "status": "RUN",
+                    "phase_i": 1,
+                    "phase": "データ読込中",
+                    "done": done,
+                    "total": total_rows,
+                    "pct": _calc_sv_read_pct(done, total_rows),
+                },
+            )
+    return list_total
+
+
+def _write_string_matrix_to_csv(str_save_path: str, matrix: list[list[str]]) -> None:
+    with open(str_save_path, "w", encoding="utf-8-sig", newline="") as f_out:
+        writer = csv.writer(f_out, quoting=csv.QUOTE_MINIMAL)
+        for row in matrix:
+            writer.writerow(row)
 
 
 def _watch_ready(ready_path: str, sheet_id: str, t_load0: float) -> None:
@@ -351,6 +479,54 @@ def _do_save_csv(
     t_do0 = time.perf_counter()
     if ptr_s is None:
         return
+    csv_tool_wait_cursor_on(sheet_id or sheet_id_for_progress)
+    try:
+        _do_save_csv_body(
+            book,
+            sheet_id,
+            str_save_path,
+            ptr_s,
+            progress_path=progress_path,
+            parent_hwnd=parent_hwnd,
+            sheet_id_for_progress=sheet_id_for_progress,
+            t_load0=t_load0,
+            t_do0=t_do0,
+        )
+    except Exception as ex_save:
+        logger.error("[CSV_SV] 保存処理失敗: %s", ex_save, exc_info=True)
+        if progress_path is not None:
+            _progress_write_monotonic(
+                progress_path,
+                {
+                    "status": "ERROR",
+                    "phase": "CSV保存エラー",
+                    "msg": str(ex_save),
+                    "detail": str(ex_save),
+                    "pct": 0,
+                },
+            )
+        raise
+    finally:
+        restore_excel_host_after_operation(
+            parent_hwnd,
+            sheet_id or sheet_id_for_progress,
+            getattr(book, "app", None),
+        )
+        csv_tool_wait_cursor_off(cancel_reason="csv_sv_done")
+
+
+def _do_save_csv_body(
+    book: Any,
+    sheet_id: str,
+    str_save_path: str,
+    ptr_s: Any,
+    *,
+    progress_path: Path | None = None,
+    parent_hwnd: int = 0,
+    sheet_id_for_progress: str = "",
+    t_load0: float = 0.0,
+    t_do0: float = 0.0,
+) -> None:
     logger.info(
         "[CSV_SV] phase=do_save_enter file=%s sheet_id=%s elapsed_since_enter_ms=%s",
         os.path.basename(str_save_path),
@@ -369,25 +545,36 @@ def _do_save_csv(
     val_total = max(1, val_row_count)
 
     if progress_path is not None:
-        _progress_write(
+        _progress_write_monotonic(
             progress_path,
             {"status": "RUN", "phase_i": 1, "phase": "データ読込中", "done": 0, "total": val_total, "pct": 0},
         )
-    _set_performance_mode(book.app, True)
+    use_display_text = _csv_sv_use_display_text()
+    set_excel_performance_mode(book.app, True, disable_events=False)
     t_read0 = time.perf_counter()
     try:
-        list_matrix_2d = _read_matrix_safe(
-            ptr_s,
-            progress_path=progress_path,
-            total_rows=val_row_count if progress_path else 0,
-        )
+        if use_display_text:
+            list_matrix_2d = _read_matrix_display_text(
+                ptr_s,
+                progress_path=progress_path,
+                total_rows=val_row_count if progress_path else 0,
+                sheet_id=sheet_id or sheet_id_for_progress,
+            )
+        else:
+            list_matrix_2d = _read_matrix_safe(
+                ptr_s,
+                progress_path=progress_path,
+                total_rows=val_row_count if progress_path else 0,
+                sheet_id=sheet_id or sheet_id_for_progress,
+            )
     finally:
-        _set_performance_mode(book.app, False)
+        set_excel_performance_mode(book.app, False, disable_events=False)
     read_ms = _elapsed_ms(t_read0)
     logger.info(
-        "[CSV_SV] phase=read_matrix_done read_ms=%s rows=%s since_enter_ms=%s",
+        "[CSV_SV] phase=read_matrix_done read_ms=%s rows=%s display_text=%s since_enter_ms=%s",
         read_ms,
         len(list_matrix_2d) if list_matrix_2d else 0,
+        use_display_text,
         _elapsed_ms(t_do0),
     )
     _sv_trace(
@@ -399,15 +586,22 @@ def _do_save_csv(
     if not list_matrix_2d:
         logger.warning("[CSV_SV] データなし シート=%s", ptr_s.name)
         if progress_path is not None:
-            _progress_write(
+            _progress_write_monotonic(
                 progress_path,
-                {"status": "DONE", "phase_i": total_steps, "phase": "完了", "done": 0, "total": val_total, "pct": 100},
+                {
+                    "status": "DONE",
+                    "phase_i": total_steps,
+                    "phase": "完了",
+                    "done": 0,
+                    "total": val_total,
+                    "pct": 100,
+                },
             )
         _bring_excel_to_front(parent_hwnd)
         return
 
     if progress_path is not None:
-        _progress_write(
+        _progress_write_monotonic(
             progress_path,
             {
                 "status": "RUN",
@@ -419,30 +613,117 @@ def _do_save_csv(
             },
         )
 
-    import pandas as pd
+    row_count_saved = len(list_matrix_2d)
+    normalize_ms = 0
+    dataframe_ms = 0
+    do_normalize = False
 
-    t_csv0 = time.perf_counter()
-    normalized_2d = _normalize_matrix_dates_for_csv(list_matrix_2d)
-    df = pd.DataFrame(normalized_2d)
-    df.to_csv(
-        str_save_path,
-        encoding="utf-8-sig",
-        index=False,
-        header=False,
-        quoting=csv.QUOTE_MINIMAL,
-    )
-    write_ms = _elapsed_ms(t_csv0)
-    logger.info(
-        "[CSV_SV] phase=write_csv_done write_ms=%s do_save_ms=%s since_enter_ms=%s",
-        write_ms,
-        _elapsed_ms(t_do0),
-        _elapsed_ms(t_load0) if t_load0 else 0,
-    )
-    _sv_trace(
-        "[CSV_SV_TRACE] phase=write_csv_done write_ms=%s wall_perf_s=%.6f",
-        write_ms,
-        time.perf_counter(),
-    )
+    if progress_path is not None:
+        _progress_write_monotonic(
+            progress_path,
+            {
+                "status": "RUN",
+                "phase_i": 2,
+                "phase": "ファイル保存中",
+                "done": val_total,
+                "total": val_total,
+                "pct": 60,
+            },
+        )
+
+    if use_display_text:
+        t_csv0 = time.perf_counter()
+        _write_string_matrix_to_csv(str_save_path, list_matrix_2d)  # type: ignore[arg-type]
+        to_csv_ms = _elapsed_ms(t_csv0)
+        write_ms = to_csv_ms
+        logger.info(
+            "[CSV_SV] phase=write_csv_done display_text=1 to_csv_ms=%s write_total_ms=%s "
+            "do_save_ms=%s since_enter_ms=%s rows=%s",
+            to_csv_ms,
+            write_ms,
+            _elapsed_ms(t_do0),
+            _elapsed_ms(t_load0) if t_load0 else 0,
+            row_count_saved,
+        )
+        _sv_trace(
+            "[CSV_SV_TRACE] phase=write_csv_done display_text=1 to_csv_ms=%s wall_perf_s=%.6f",
+            to_csv_ms,
+            time.perf_counter(),
+        )
+    else:
+        import pandas as pd
+
+        do_normalize = _should_normalize_dates_for_save(row_count_saved)
+        t_norm0 = time.perf_counter()
+        if do_normalize:
+            matrix_for_csv = _normalize_matrix_dates_for_csv(list_matrix_2d)
+        else:
+            matrix_for_csv = list_matrix_2d
+            logger.info(
+                "[CSV_SV] date_normalize skipped rows=%s (HC_CSV_SV_DATE_NORMALIZE_MAX_ROWS or SKIP)",
+                row_count_saved,
+            )
+        normalize_ms = _elapsed_ms(t_norm0)
+
+        if progress_path is not None:
+            _progress_write_monotonic(
+                progress_path,
+                {
+                    "status": "RUN",
+                    "phase_i": 2,
+                    "phase": "ファイル保存中",
+                    "done": val_total,
+                    "total": val_total,
+                    "pct": 75,
+                },
+            )
+
+        t_df0 = time.perf_counter()
+        df = pd.DataFrame(matrix_for_csv)
+        dataframe_ms = _elapsed_ms(t_df0)
+
+        t_csv0 = time.perf_counter()
+        df.to_csv(
+            str_save_path,
+            encoding="utf-8-sig",
+            index=False,
+            header=False,
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        to_csv_ms = _elapsed_ms(t_csv0)
+        write_ms = normalize_ms + dataframe_ms + to_csv_ms
+        logger.info(
+            "[CSV_SV] phase=write_csv_done normalize_ms=%s dataframe_ms=%s to_csv_ms=%s "
+            "write_total_ms=%s do_save_ms=%s since_enter_ms=%s rows=%s normalize=%s",
+            normalize_ms,
+            dataframe_ms,
+            to_csv_ms,
+            write_ms,
+            _elapsed_ms(t_do0),
+            _elapsed_ms(t_load0) if t_load0 else 0,
+            row_count_saved,
+            do_normalize,
+        )
+        _sv_trace(
+            "[CSV_SV_TRACE] phase=write_csv_done normalize_ms=%s dataframe_ms=%s to_csv_ms=%s wall_perf_s=%.6f",
+            normalize_ms,
+            dataframe_ms,
+            to_csv_ms,
+            time.perf_counter(),
+        )
+
+    if progress_path is not None and use_display_text:
+        _progress_write_monotonic(
+            progress_path,
+            {
+                "status": "RUN",
+                "phase_i": 2,
+                "phase": "ファイル保存中",
+                "done": val_total,
+                "total": val_total,
+                "pct": 75,
+            },
+        )
 
     str_fn_saved = os.path.basename(str_save_path)
     val_rows_saved = len(list_matrix_2d)
@@ -464,7 +745,7 @@ def _do_save_csv(
     except Exception:
         pass
     if progress_path is not None:
-        _progress_write(
+        _progress_write_monotonic(
             progress_path,
             {
                 "status": "DONE",
@@ -635,11 +916,13 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
             pass
         return
 
+    ensure_ui_server()
+
     t_valid0 = time.perf_counter()
     has_valid = _sheet_has_valid_data(ptr_s)
     valid_ms = _elapsed_ms(t_valid0)
     logger.info(
-        "[CSV_SV] phase=sheet_valid_check valid_check_ms=%s has_valid=%s",
+        "[CSV_SV] phase=sheet_valid_check valid_check_ms=%s has_valid=%s (sample_row_only)",
         valid_ms,
         has_valid,
     )
@@ -722,7 +1005,6 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
         )
         return
 
-    ensure_ui_server()
     logger.info(
         "[CSV_SV] phase=after_ensure_ui_server elapsed_ms=%s",
         _elapsed_ms(t_load0),

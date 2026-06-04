@@ -12,7 +12,7 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: ThisWorkbook (クラスモジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-06-01
+' 更新日: 2026-06-03
 ' 改版番号および履歴:
 '   1.9.7 (2026-06-01) [保守] モジュールコメント・本文を CP932 正本から復旧（UTF-8 混入による文字化け修復）。
 '   1.9.6 (2026-05-30) [終了] BeforeClose で Main.ShutdownExcelUiCleanup を呼び出し（OnTime 残留・Interactive 復元）。
@@ -114,6 +114,7 @@ End Sub
 ' コールバック名: Workbook_BeforeClose
 ' 作成日: 2026-02-01
 ' 改版番号および履歴:
+'   1.0.3 (2026-06-03) shutdown_all_with_force_kill に変更。
 '   1.0.2 (2026-05-31) Main.ShutdownExcelUiCleanup 1.1.0（EnableEvents・Python 復元）に追随。本クラスは呼び出しのみ。
 '   1.0.1 (2026-05-30) ShutdownExcelUiCleanup 呼び出しを追加。
 ' プロシージャの動作概要: アドイン終了（Excel 終了）直前に発火し、全リソースを安全に解放する。
@@ -136,7 +137,7 @@ Private Sub Workbook_BeforeClose(ByRef Cancel As Boolean)
 
     ' 3．Python/Qt側へ終了要求（共通基盤）
     Dim PYSHUT As String
-    PYSHUT = "from svc import svc_host; svc_host.request_shutdown_all()"
+    PYSHUT = "from svc import svc_host; svc_host.shutdown_all_with_force_kill('workbook_before_close')"
     
     Call HC_Log.Info("ThisWorkbook", "ui_server shutdown:" & PYSHUT)
     Call RunPython(PYSHUT)

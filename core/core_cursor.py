@@ -3,14 +3,15 @@
 Pythonバージョン: 3.12
 モジュール名: core_cursor
 作成日: 2026-02-12
-更新日: 2026-04-06
-バージョン: 0.3.0
+更新日: 2026-06-04
+バージョン: 0.3.1
 概要:
     Excelアドインの「砂時計（Application.Cursor=xlWait）」を、Python側（UI表示完了）で解除する共通モジュール。
     VBA側で起動した保険タイマ（Application.OnTime）も、VBAマクロ呼び出しにより停止する。
     ※Polling（Application.OnTimeの定周期監視）は副作用（STA占有）を招きやすいため、本方式では採用しない。
 
 改訂履歴:
+    0.3.1: 2026-06-04 csv_tool_wait_cursor_on/tick/off（CSV 保存・結合・分割・読込の処理中砂時計）。
     0.3.0: 2026-04-06 notify_wait_form_ready 追加（VBA WaitForm 解除）。notify_ui_ready 成功時も同時に呼ぶ。
     0.2.0: 2026-02-12 core.hc_log.get_logger に完全準拠（フォールバック削除）。ログ出力を統一。
     0.1.0: 2026-02-12 初版。
@@ -51,6 +52,7 @@ _VBA_CURSOR_GUARD_START: str = "Main.StartCursorGuardTimer"
 _VBA_CURSOR_FORCE_ON: str = "Main.ForceCursorOn"
 
 _data_agg_batch_cursor_last_rearm: float = 0.0
+_csv_tool_cursor_last_rearm: float = 0.0
 
 
 # ==============================================================================
@@ -158,6 +160,31 @@ def data_agg_batch_cursor_tick(
 
 def data_agg_batch_cursor_off(*, cancel_reason: str = "data_agg_batch_done") -> None:
     """本番一括完了・失敗・キャンセル時: 砂時計 OFF + WaitForm 解除。"""
+    notify_ui_ready(cancel_reason=cancel_reason)
+
+
+def csv_tool_wait_cursor_on(sheet_id: str = "") -> None:
+    """CSV ツール（読込/保存/結合/分割）: 処理中の砂時計 ON + 保険タイマ再武装。"""
+    global _csv_tool_cursor_last_rearm
+    _csv_tool_cursor_last_rearm = time.perf_counter()
+    notify_excel_wait_cursor_on(sheet_id=sheet_id or "csv_tool")
+
+
+def csv_tool_wait_cursor_tick(
+    sheet_id: str = "",
+    *,
+    min_interval_sec: float = 7.0,
+) -> None:
+    """CSV ツール: 長い COM 処理中に砂時計が切れる前に再武装する。"""
+    global _csv_tool_cursor_last_rearm
+    now = time.perf_counter()
+    if now - _csv_tool_cursor_last_rearm < float(min_interval_sec):
+        return
+    csv_tool_wait_cursor_on(sheet_id)
+
+
+def csv_tool_wait_cursor_off(*, cancel_reason: str = "csv_tool_done") -> None:
+    """CSV ツール完了・失敗・キャンセル時: 砂時計 OFF + WaitForm 解除。"""
     notify_ui_ready(cancel_reason=cancel_reason)
 
 

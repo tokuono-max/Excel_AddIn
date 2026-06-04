@@ -4,9 +4,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: Main (標準モジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-06-01
+' 更新日: 2026-06-03
 ' 文字コード: 本モジュールは Shift-JIS（CP932）で保存すること（日本語コメント・文字列の破損防止）。
 ' 改版番号および履歴:
+'   2.12.0 (2026-06-03) [終了] ShutdownExcelUiCleanup: shutdown_all_with_force_kill('excel_shutdown') を追加。
 '   2.11.0 (2026-06-01) [UX] ForceCursorOn: 本番データ集約一括の砂時計 ON。外部 Python から Application.Run で呼ぶ（COM の Cursor 直書きは不可のため）。
 '   2.10.0 (2026-05-31) [終了] ShutdownExcelUiCleanup: Python EXCEL_RESTORE 呼び出し（COM ハング救済）。
 '   2.9.0 (2026-05-30) [終了] ShutdownExcelUiCleanup: WaitForm/OnTime/Cursor/Interactive 復元（Excel 残留対策）。
@@ -535,6 +536,8 @@ Public Sub ShutdownExcelUiCleanup()
     End If
     sCmd = "from core.excel_host_restore import restore_excel_host_ui_state; restore_excel_host_ui_state(" _
         & CStr(hwnd) & ", '" & PyEscSq(sId) & "')"
+    RunPython sCmd
+    sCmd = "from svc.svc_host import shutdown_all_with_force_kill; shutdown_all_with_force_kill('excel_shutdown')"
     RunPython sCmd
     Call HC_Log.Info("Main", "ShutdownExcelUiCleanup done")
     On Error GoTo 0

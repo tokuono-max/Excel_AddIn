@@ -35,3 +35,15 @@ def test_data_agg_batch_cursor_off_delegates_notify_ui_ready() -> None:
     with patch.object(core_cursor, "notify_ui_ready") as mock_ready:
         core_cursor.data_agg_batch_cursor_off(cancel_reason="test_done")
     mock_ready.assert_called_once_with(cancel_reason="test_done")
+
+
+def test_csv_tool_wait_cursor_on_delegates_notify_excel() -> None:
+    with patch.object(core_cursor, "notify_excel_wait_cursor_on") as mock_on:
+        core_cursor.csv_tool_wait_cursor_on("sheet-x")
+    mock_on.assert_called_once_with(sheet_id="sheet-x")
+
+
+def test_csv_tool_wait_cursor_off_delegates_notify_ui_ready() -> None:
+    with patch.object(core_cursor, "notify_ui_ready") as mock_ready:
+        core_cursor.csv_tool_wait_cursor_off(cancel_reason="csv_sv_done")
+    mock_ready.assert_called_once_with(cancel_reason="csv_sv_done")

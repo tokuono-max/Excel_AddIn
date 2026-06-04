@@ -4,13 +4,14 @@ Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
 Updated: 2026-05-05 (JST)
-Version: 1.4.23
+Version: 1.4.24
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.24 (2026-06-04) 結合処理中の砂時計 ON（ファイル確定後〜完了）。Excel 書込みループで tick 再武装。
   - 1.4.23 (2026-05-05) progress の parent_hwnd を環境変数依存から引数へ統一。progress_closed_path ACK 待ちを追加し、進捗クローズ後に完了通知/再表示へ遷移。
   - 1.4.22 (2026-04-09) 結合メイン IPC と done_then_merge に excel_rect（Excel HWND の GetWindowRect）を付与。進捗と同じ送信時点矩形で中央寄せを統一。
   - 1.4.21 (2026-04-08) ジャンプ用定義名: ハイフン等を Excel 構文に合わせてサニタイズ（UTF-8 等を含むファイル名で Names.Add 失敗を防止）。失敗ログに name/ref を付与。
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.23"
+__version__ = "1.4.24"
 import os
 import re
 import threading
@@ -32,7 +33,13 @@ import time
 from pathlib import Path
 from typing import Any
 from core.core_log import get_diag_logger, get_logger
-from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.core_cursor import (
+    csv_tool_wait_cursor_off,
+    csv_tool_wait_cursor_on,
+    csv_tool_wait_cursor_tick,
+    notify_ui_ready,
+    notify_wait_form_ready,
+)
 from core import core_cst as cst
 
 try:
@@ -425,6 +432,7 @@ def _watch_result(
                 except Exception:
                     pass
                 mode = str(d.get("radio") or d.get("mode") or "mode_append").strip()
+                csv_tool_wait_cursor_on(sheet_id)
                 _merge_files_to_sheet(
                     workbook_name=workbook_name,
                     sheet_guid=sheet_id,
@@ -696,6 +704,7 @@ def _merge_files_to_sheet(
                 )
 
                 if progress_path is not None:
+                    csv_tool_wait_cursor_tick(sheet_guid)
                     pct = int(done_rows * 100 / max(total_rows, 1))
                     _progress_write_monotonic(
                         progress_path,
@@ -730,6 +739,7 @@ def _merge_files_to_sheet(
 
                     done_rows += len(chunk)
                     if progress_path is not None:
+                        csv_tool_wait_cursor_tick(sheet_guid)
                         pct = int(done_rows * 100 / max(total_rows, 1))
                         _progress_write_monotonic(
                             progress_path,
@@ -904,6 +914,7 @@ def _merge_files_to_sheet(
                 {"status": "ERROR", "phase_i": 4, "phase": "エラー", "detail": str(ex)},
             )
     finally:
+        csv_tool_wait_cursor_off(cancel_reason="csv_mg_done")
         if progress_path is not None:
             try:
                 _PROGRESS_SEQ.pop(_progress_key(progress_path), None)

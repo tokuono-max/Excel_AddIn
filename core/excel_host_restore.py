@@ -2,7 +2,10 @@
 """Excel ホストの UI 状態復元（データ集約キャンセル／強制終了後）。"""
 from __future__ import annotations
 
+from typing import Any
+
 from core.core_log import get_logger
+from core.excel_perf_mode import ensure_excel_events_enabled
 
 logger = get_logger(__name__)
 
@@ -66,3 +69,13 @@ def restore_excel_host_ui_state(parent_hwnd: int, sheet_id: str = "") -> bool:
             str(sheet_id or "") or "-",
         )
     return restored
+
+
+def restore_excel_host_after_operation(
+    parent_hwnd: int,
+    sheet_id: str = "",
+    app: Any = None,
+) -> None:
+    """svc 処理終了時: EnableEvents 復帰とホスト UI 復元をベストエフォートで行う。"""
+    ensure_excel_events_enabled(app)
+    restore_excel_host_ui_state(int(parent_hwnd or 0), sheet_id)

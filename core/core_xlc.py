@@ -3,8 +3,8 @@
 Python: 3.12
 Module: core/core_xlc.py
 Created: 2026-01-xx
-Updated: 2026-04-07
-Version: 2.5.6
+Updated: 2026-06-04
+Version: 2.5.9
 Purpose:
   Excel COM 操作の薄いヘルパ（UI非依存 / core から ui import 禁止）。
   - シートカスタムプロパティ（GUID 等）の読み書き
@@ -16,6 +16,9 @@ Design:
   - 失敗時に例外を投げない（Excelロック解除漏れの方が致命）
 
 History (latest 3):
+  - 2.5.9 (2026-06-04) Excel シート名: sanitize_excel_sheet_name / unique / 分割用 part 名（最大 31 文字）。
+  - 2.5.8 (2026-06-04) write_chunk: progress_notify_rows で COM 分割を細かくし progress_cb を高頻度化（chunk_rows は維持可）。
+  - 2.5.7 (2026-06-03) write_chunk: text_mode で書込前に @ 書式と ' 付き文字列化（CSV 読込の文字列保持）。
   - 2.5.6 (2026-04-07) excel_try_set_main_commandbars_enabled: SHOW.TOOLBAR を廃止（ウィンドウ違和感が大きいため）。CommandBars のみ。
   - 2.5.5 (2026-04-07) excel_try_set_main_commandbars_enabled: ExecuteExcel4Macro SHOW.TOOLBAR（後述 2.5.6 で撤回）。
   - 2.5.4 (2026-04-07) excel_try_set_main_commandbars_enabled: CommandBars は Item(name) で取得（[] は COMRetryObjectWrapper で不可）。
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import numbers
+import re
 import secrets
 import time
 from contextlib import contextmanager
@@ -40,9 +44,51 @@ from core import core_cst as cst
 
 
 # 変数: バージョン情報
-__version__ = "2.5.6"
+__version__ = "2.5.9"
+
+EXCEL_SHEET_NAME_MAX_LEN: int = 31
 
 logger = get_logger(__name__)
+
+
+def sanitize_excel_sheet_name(name: str, *, fallback: str = "Sheet1") -> str:
+    """Excel シート名に使えない文字を除去し、最大 31 文字に切り詰める。"""
+    t = re.sub(r"[\[\]:*?/\\]", "", (name or "").strip())
+    t = t[:EXCEL_SHEET_NAME_MAX_LEN]
+    fb = (fallback or "Sheet1").strip()[:EXCEL_SHEET_NAME_MAX_LEN] or "Sheet1"
+    return t if t else fb
+
+
+def unique_excel_sheet_name_in_names(
+    existing_names: set[str],
+    base: str,
+    *,
+    fallback: str = "Sheet1",
+) -> str:
+    """既存シート名と衝突しないよう、31 文字以内でユニーク名を返す。"""
+    b = sanitize_excel_sheet_name(base, fallback=fallback)
+    if b not in existing_names:
+        return b
+    for i in range(2, 10000):
+        suf = f"_{i}"
+        cand = (b[: max(1, EXCEL_SHEET_NAME_MAX_LEN - len(suf))] + suf)[
+            :EXCEL_SHEET_NAME_MAX_LEN
+        ]
+        if cand not in existing_names:
+            return cand
+    tail = "_99"
+    return (b[: max(1, EXCEL_SHEET_NAME_MAX_LEN - len(tail))] + tail)[
+        :EXCEL_SHEET_NAME_MAX_LEN
+    ]
+
+
+def excel_sheet_name_for_split_part(base: str, part_idx: int) -> str:
+    """分割読込用シート名（例: base-2）。接尾辞分を確保して base を切り詰める。"""
+    suffix = f"-{max(1, int(part_idx))}"
+    stem = sanitize_excel_sheet_name(base, fallback="CSV")[
+        : max(1, EXCEL_SHEET_NAME_MAX_LEN - len(suffix))
+    ]
+    return (stem + suffix)[:EXCEL_SHEET_NAME_MAX_LEN]
 
 
 def com_excel_scalar_int(val: Any, default: int = 0) -> int:
@@ -464,13 +510,17 @@ def write_chunk(
     progress_ui: Any = None,
     *,
     chunk_rows: Optional[int] = None,
+    progress_notify_rows: Optional[int] = None,
     progress_cb: Optional[Callable[[int], None]] = None,
+    text_mode: bool = False,
 ) -> None:
     """Excel へデータを書き込む（チャンク分割）。
 
     互換性:
         旧来の write_chunk(sheet, y, x, data, progress_ui) 呼び出しはそのまま動作する。
         chunk_rows / progress_cb は進捗を滑らかにしたい場合のみ指定する。
+        progress_notify_rows < chunk_rows のとき COM 分割を細かくし progress_cb の頻度を上げる。
+        text_mode=True のとき書込前に @ 書式を設定し、各セル値を ' 付き文字列に変換する（CSV 読込等）。
     """
     total_rows = len(data_list)
     if total_rows == 0:
@@ -478,12 +528,27 @@ def write_chunk(
     total_cols = len(data_list[0])
 
     step_unit = int(chunk_rows) if chunk_rows and int(chunk_rows) > 0 else 50000
+    if progress_cb is not None and progress_notify_rows and int(progress_notify_rows) > 0:
+        notify = max(500, int(progress_notify_rows))
+        if notify < step_unit:
+            step_unit = notify
 
     for i_offset in range(0, total_rows, step_unit):
         slice_h = min(step_unit, total_rows - i_offset)
-        sheet_pointer.range((start_y + i_offset, start_x)).resize(
+        chunk = data_list[i_offset : i_offset + slice_h]
+        if text_mode:
+            from core.core_excel_text import matrix_as_excel_forced_text
+
+            chunk = matrix_as_excel_forced_text(chunk)
+        rng = sheet_pointer.range((start_y + i_offset, start_x)).resize(
             slice_h, total_cols
-        ).value = data_list[i_offset : i_offset + slice_h]
+        )
+        if text_mode:
+            try:
+                rng.number_format = "@"
+            except Exception:
+                pass
+        rng.value = chunk
 
         if progress_cb is not None:
             try:

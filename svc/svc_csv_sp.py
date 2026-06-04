@@ -3,13 +3,15 @@
 Python: 3.10+
 Module: svc/svc_csv_sp.py
 Created: 2026-03-05
-Updated: 2026-04-09
-Version: 2.5.1
+Updated: 2026-06-04
+Version: 2.5.3
 Purpose:
   CSVファイル分割（選択行による範囲分割）。アクティブシートの選択行を境界に分割し、
   各範囲をヘッダ付きで UTF-8(BOM) CSV として保存。データ不足時は Excel 中央でワーニング通知。
 
 History (latest 3):
+  - 2.5.3 (2026-06-04) 保存: 通常 CSV 保存と同様、既定で表示文字列（Copy→クリップボード）でヘッダ・分割範囲を読込。HC_CSV_SV_USE_VALUE_READ=1 で .value 経路。
+  - 2.5.2 (2026-06-04) 分割保存処理中の砂時計 ON（出力先確定後〜完了）。保存ループで tick 再武装。
   - 2.5.1 (2026-04-09) 重複キャンセル後の分割再表示で、再フォルダ選択まで split_csv が結果 pickle を監視し続ける（再オープン後の無処理を修正）。
   - 2.5.0 (2026-04-09) 分割→重複→進捗: 進捗 UI は重複解決後に IPC のみ。重複キャンセルで分割再表示 IPC。progress pickle 書込リトライ（WinError 5 等）。
   - 2.4.8 (2026-04-08) 完了 pickle に output_dir を付与。重複キャンセル時の診断ログ。
@@ -46,13 +48,19 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger
-from core.core_cursor import notify_wait_form_ready
+from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
+from core.core_cursor import (
+    csv_tool_wait_cursor_off,
+    csv_tool_wait_cursor_on,
+    csv_tool_wait_cursor_tick,
+    notify_wait_form_ready,
+)
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
 _sp_diag = get_diag_logger("hc_csv_tool.diag.csv_sp")
-__version__ = "2.5.1"
+__version__ = "2.5.3"
 
 _SP_CFG_CACHE: dict[str, Any] | None = None
 
@@ -646,6 +654,46 @@ def _resolve_duplicate_output(
     return "apply", plans
 
 
+def _sp_read_header_row(ptr_s: Any, ncols: int, *, use_display_text: bool) -> list[str]:
+    if use_display_text:
+        rows = read_range_display_text_matrix(
+            ptr_s, row_start=1, col_start=1, n_rows=1, n_cols=ncols
+        )
+        if rows:
+            return rows[0]
+        return [""] * ncols
+    row1 = ptr_s.range((1, 1), (1, ncols)).value
+    if isinstance(row1, list):
+        return [str(x) if x is not None else "" for x in row1]
+    return [str(row1)] if row1 is not None else [""]
+
+
+def _sp_read_body_rows(
+    ptr_s: Any,
+    start_row: int,
+    end_row: int,
+    ncols: int,
+    *,
+    use_display_text: bool,
+) -> list[list[str]]:
+    n_rows = end_row - start_row + 1
+    if use_display_text:
+        return read_range_display_text_matrix(
+            ptr_s,
+            row_start=start_row,
+            col_start=1,
+            n_rows=n_rows,
+            n_cols=ncols,
+        )
+    rows_data = ptr_s.range((start_row, 1), (end_row, ncols)).value
+    if isinstance(rows_data, (list, tuple)):
+        return [
+            [str(c) if c is not None else "" for c in (list(r) if isinstance(r, (list, tuple)) else [r])]
+            for r in rows_data
+        ]
+    return [[str(rows_data) if rows_data is not None else ""]]
+
+
 def _progress_path(sheet_id: str) -> Path:
     """進捗用 pickle のパスを返す。"""
     root = Path(get_ipc_root())
@@ -721,11 +769,8 @@ def split_csv(
         _show_warning_dialog(book, parent_hwnd, sheet_id, "", "ファイル分割")
         return
 
-    row1 = ptr_s.range((1, 1), (1, ncols)).value
-    if isinstance(row1, list):
-        headers = [str(x) if x is not None else "" for x in row1]
-    else:
-        headers = [str(row1)] if row1 is not None else [""]
+    use_display_text = use_display_text_for_csv_save()
+    headers = _sp_read_header_row(ptr_s, ncols, use_display_text=use_display_text)
 
     last_data_row = nrows
     selected_rows = _get_selected_row_numbers(book)
@@ -1006,68 +1051,78 @@ def split_csv(
     success_count = 0
     done_items: List[dict[str, Any]] = []
 
+    use_display_text = use_display_text_for_csv_save()
+    csv_tool_wait_cursor_on(str(sheet_id or ""))
     t_save_loop0 = time.perf_counter()
     total_size_bytes = 0
-    for p in plans:
-        start_row = int(p["start_row"])
-        end_row = int(p["end_row"])
-        phase_i = int(p["phase_i"])
-        row_count = int(p["row_count"])
-        file_name = str(p["file_name"])
-        out_path = os.path.join(output_dir, file_name)
+    logger.info("[CSV_SP] phase=split_save_loop_enter display_text=%s files=%s", use_display_text, len(plans))
+    try:
+        for p in plans:
+            start_row = int(p["start_row"])
+            end_row = int(p["end_row"])
+            phase_i = int(p["phase_i"])
+            row_count = int(p["row_count"])
+            file_name = str(p["file_name"])
+            out_path = os.path.join(output_dir, file_name)
 
-        _progress_write({
-            "status": "RUN",
-            "phase_i": phase_i,
-            "phase_total": phase_total,
-            "phase": "保存中",
-            "current_file": file_name,
-            "done": phase_i,
-            "total": phase_total,
-            "pct": int(100 * (phase_i - 1) / phase_total) if phase_total else 0,
-        })
+            csv_tool_wait_cursor_tick(str(sheet_id or ""))
+            _progress_write({
+                "status": "RUN",
+                "phase_i": phase_i,
+                "phase_total": phase_total,
+                "phase": "保存中",
+                "current_file": file_name,
+                "done": phase_i,
+                "total": phase_total,
+                "pct": int(100 * (phase_i - 1) / phase_total) if phase_total else 0,
+            })
 
-        try:
-            rows_data = ptr_s.range((start_row, 1), (end_row, ncols)).value
-            if isinstance(rows_data, (list, tuple)):
-                rows = [list(r) if isinstance(r, (list, tuple)) else [r] for r in rows_data]
-            else:
-                rows = [[rows_data]]
-            with open(out_path, "w", encoding="utf-8-sig", newline="", errors="replace") as f:
-                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                writer.writerow(headers)
-                for row in rows:
-                    writer.writerow([str(c) if c is not None else "" for c in (row if isinstance(row, (list, tuple)) else [row])])
-            success_count += 1
             try:
-                size_bytes = int(os.path.getsize(out_path))
-            except Exception:
-                size_bytes = 0
-            total_size_bytes += max(0, size_bytes)
-            done_items.append(
-                {
-                    "no": phase_i,
-                    "name": os.path.basename(out_path),
-                    "rows": row_count,
-                    "size_bytes": size_bytes,
-                }
-            )
-            logger.info("[CSV_SP] 保存完了 file=%s rows=%s size_bytes=%s", file_name, row_count, size_bytes)
-        except Exception as e:
-            logger.warning("[CSV_SP] 書込失敗 ファイル=%s: %s", os.path.basename(out_path), e)
+                rows = _sp_read_body_rows(
+                    ptr_s,
+                    start_row,
+                    end_row,
+                    ncols,
+                    use_display_text=use_display_text,
+                )
+                with open(out_path, "w", encoding="utf-8-sig", newline="", errors="replace") as f:
+                    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+                    writer.writerow(headers)
+                    for row in rows:
+                        writer.writerow(row)
+                success_count += 1
+                try:
+                    size_bytes = int(os.path.getsize(out_path))
+                except Exception:
+                    size_bytes = 0
+                total_size_bytes += max(0, size_bytes)
+                done_items.append(
+                    {
+                        "no": phase_i,
+                        "name": os.path.basename(out_path),
+                        "rows": row_count,
+                        "size_bytes": size_bytes,
+                    }
+                )
+                logger.info("[CSV_SP] 保存完了 file=%s rows=%s size_bytes=%s", file_name, row_count, size_bytes)
+            except Exception as e:
+                logger.warning("[CSV_SP] 書込失敗 ファイル=%s: %s", os.path.basename(out_path), e)
 
-        done_accum += row_count
-        pct = min(99, int(100 * done_accum / total_rows)) if total_rows else 99
-        _progress_write({
-            "status": "RUN",
-            "phase_i": phase_i,
-            "phase_total": phase_total,
-            "phase": "保存中",
-            "current_file": file_name,
-            "done": done_accum,
-            "total": total_rows,
-            "pct": pct,
-        })
+            done_accum += row_count
+            pct = min(99, int(100 * done_accum / total_rows)) if total_rows else 99
+            csv_tool_wait_cursor_tick(str(sheet_id or ""))
+            _progress_write({
+                "status": "RUN",
+                "phase_i": phase_i,
+                "phase_total": phase_total,
+                "phase": "保存中",
+                "current_file": file_name,
+                "done": done_accum,
+                "total": total_rows,
+                "pct": pct,
+            })
+    finally:
+        csv_tool_wait_cursor_off(cancel_reason="csv_sp_done")
 
     save_loop_ms = _elapsed_ms(t_save_loop0)
     logger.info(

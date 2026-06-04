@@ -928,7 +928,7 @@ def exec_undo(
                     except Exception:
                         pass
                     try:
-                        api.EnableEvents = prev_events if prev_events is not None else True
+                        api.EnableEvents = True
                     except Exception:
                         pass
                     try:

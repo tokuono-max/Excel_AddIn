@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_dialog_progress.py
 Created: 2026-03-10
-Updated: 2026-05-05
-Version: 0.1.20
+Updated: 2026-06-04
+Version: 0.1.21
 Purpose:
   進捗表示用ダイアログ（ProgressDialog）および create_progress_dialog を提供する。
   ui_common の Progress 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -16,6 +16,7 @@ Purpose:
   - 呼び出し側は ui_common.create_progress_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.1.21 (2026-06-04) RUN 時: pickle の pct が明示されていれば done/total より優先（CSV保存等で 50% フェーズが 99% に張り付くのを防止）。
   - 0.1.20 (2026-05-05) req.progress_closed_path 指定時、進捗クローズ時に ACK pickle を書き出す。svc 側がクローズ完了を待って結果画面を出せるようにし、重なり表示を抑制。
   - 0.1.19 (2026-05-03) _teardown_progress_shared_state: excel_unlock 未指定時は parent_hwnd があれば常に True（excel_lock false でも他経路の Win32 無効取り残しを解除）。CANCEL も同様に parent があるときは解除。
   - 0.1.18 (2026-05-02) teardown に stop_front_follow_match_widget=self。プレビューが先に start_front_follow した場合は進捗 teardown でフックを潰さない。
@@ -875,10 +876,31 @@ class ProgressDialog(QDialog):
                     pass
             pct = int(d.get("pct", 0) or 0)
             pct = 0 if pct < 0 else 100 if pct > 100 else pct
+            total = d.get("total")
+            done = d.get("done")
+            # RUN: svc が pct を明示したときはそれを優先（done==total で 99% 張り付きを防ぐ）。未指定時のみ done/total から算出。
+            if status_u == "RUN":
+                raw_pct = d.get("pct")
+                svc_pct_explicit = raw_pct is not None
+                if svc_pct_explicit:
+                    try:
+                        pct = max(0, min(99, int(raw_pct)))
+                    except (TypeError, ValueError):
+                        svc_pct_explicit = False
+                if not svc_pct_explicit:
+                    try:
+                        to_i = int(total) if total is not None else 0
+                        dn_i = int(done) if done is not None else None
+                        if to_i > 0 and dn_i is not None:
+                            pct = max(0, min(99, int(dn_i * 100 / to_i)))
+                    except (TypeError, ValueError):
+                        pass
+            prev_bar = int(self._bar.value())
+            if status_u == "RUN" and pct < prev_bar:
+                pct = prev_bar
             if getattr(self, "_center_on_parent_widget", False):
-                prev = int(self._bar.value())
-                if pct < prev:
-                    pct = prev
+                if pct < prev_bar:
+                    pct = prev_bar
             creep = int(getattr(self, "_progress_bar_creep_pct", 0) or 0)
             if status_u == "RUN" and creep > 0:
                 self._progress_display_target = max(
@@ -892,8 +914,6 @@ class ProgressDialog(QDialog):
                     pct = tgt
             elif status_u == "RUN":
                 self._progress_display_target = pct
-            total = d.get("total")
-            done = d.get("done")
             phase_i = int(d.get("phase_i", 0) or 0)
             if getattr(self, "_center_on_parent_widget", False):
                 dn_i = int(done) if done is not None else None

@@ -1373,6 +1373,8 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                                 "progress_path": str(progress_path),
                                 "phase_total": 4,
                                 "no_native_window": True,
+                                "progress_poll_ms": 40,
+                                "progress_bar_creep_pct": 2,
                             }
                             excel_rect = _get_window_rect(parent_hwnd)
                             if excel_rect is not None:
