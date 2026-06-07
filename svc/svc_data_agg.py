@@ -2748,12 +2748,6 @@ def _batch_done_notify(
     run_id: str = "",
 ) -> None:
     """一括実行の完了表示。親 Qt がポーリングするファイル通知を優先し、失敗時は従来の完了 IPC にフォールバックする。"""
-    try:
-        from core.core_cursor import data_agg_batch_cursor_off  # noqa: WPS433
-
-        data_agg_batch_cursor_off()
-    except Exception:
-        pass
     wrote = False
     if use_parent_dialog:
         try:
@@ -4774,12 +4768,6 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     reset_cancel_path(cancel_path)
     cancel_check = make_cancel_check(cancel_path, min_interval_sec=0.0)
     register_batch_worker_pid(sheet_id, ipc_root)
-    try:
-        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
-
-        data_agg_batch_cursor_on(str(sheet_id or ""))
-    except Exception:
-        pass
     _finish_release = _finish
 
     def _finish(  # noqa: F811
@@ -4836,12 +4824,6 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         try:
             prog_path.parent.mkdir(parents=True, exist_ok=True)
             write_pickle(prog_path, d)
-        except Exception:
-            pass
-        try:
-            from core.core_cursor import data_agg_batch_cursor_tick  # noqa: WPS433
-
-            data_agg_batch_cursor_tick(str(sheet_id or ""))
         except Exception:
             pass
 
@@ -5422,13 +5404,6 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             use_parent_dialog=notify_parent,
             run_id=batch_run_id,
         )
-
-    try:
-        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
-
-        data_agg_batch_cursor_on(str(sheet_id or ""))
-    except Exception:
-        pass
 
     if not spill_dir_s:
         _dlog("abort reason=no_spill_dir")

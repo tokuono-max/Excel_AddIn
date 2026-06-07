@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: ui_qt/ui_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-04-07
-Version: 1.4.1
+Updated: 2026-06-06
+Version: 1.4.2
 Purpose:
   CSV保存用 UI（ファイル保存先選択・進捗表示）。機能ごとにセパレート（ui_csv_mg に依存しない）。
   - 設定は config/ui_csv_sv.json を参照（外部ファイルのみ・救済なし）。
@@ -12,6 +12,7 @@ Purpose:
   - ファイル選択はネイティブのみ。Excel を親にした QWidget を渡し、表示中は Excel 操作を無効化。
 
 History (latest 3):
+  - 1.4.2 (2026-06-06) ネイティブ保存ダイアログ直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
   - 1.4.1 (2026-04-07) 保存ダイアログ終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
   - 1.4.0 (2026-03-09) 進捗完了時に完了通知を表示。_done_cfg で SCREENS.DONE を渡す。
   - 1.3.0 (2026-03-05) 保存画面を Excel 前面・親子・アイコン対応。表示中 Excel 操作無効化。基準フォルダ(initial_dir)対応。
@@ -24,7 +25,7 @@ from typing import Any
 
 from PySide6.QtWidgets import QWidget
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 _DEFAULT_TITLE = "名前を付けてCSVを保存"
 _DEFAULT_FILTER = "CSVファイル (*.csv);;すべてのファイル (*.*)"
@@ -60,21 +61,22 @@ class _CsvSaveFileDialog:
         """保存先選択ダイアログを表示。Excel 親子・前面・表示中は Excel 操作無効。ネイティブのみ。"""
         parent_widget = None
         ph = int(self._parent_hwnd or 0)
-        if ph:
-            try:
-                from ui_qt.ui_common import _set_owner_hwnd
-                parent_widget = QWidget()
-                parent_widget.winId()
-                _set_owner_hwnd(parent_widget, ph)
-            except Exception:
-                parent_widget = None
-
-        if self._initial_dir and os.path.isdir(self._initial_dir):
-            initial_path = os.path.join(self._initial_dir, self._default_name + ".csv")
-        else:
-            initial_path = self._default_name + ".csv"
-
+        path = ""
         try:
+            if ph:
+                try:
+                    from ui_qt.ui_common import _set_owner_hwnd
+                    parent_widget = QWidget()
+                    parent_widget.winId()
+                    _set_owner_hwnd(parent_widget, ph)
+                except Exception:
+                    parent_widget = None
+
+            if self._initial_dir and os.path.isdir(self._initial_dir):
+                initial_path = os.path.join(self._initial_dir, self._default_name + ".csv")
+            else:
+                initial_path = self._default_name + ".csv"
+
             if ph:
                 try:
                     from ui_qt.ui_win import enable_excel_window

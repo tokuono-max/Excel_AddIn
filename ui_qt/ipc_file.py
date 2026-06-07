@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ipc_file.py
 Created: 2026-02-11
-Updated: 2026-04-06
-Version: 1.2.12
+Updated: 2026-06-06
+Version: 1.2.13
 Purpose:
   Qt UI サーバ (ui_qt) と svc 層の間で、ファイル(Pickle)で通信する最小 IPC。
   - req_*.pkl : svc -> ui_server
@@ -12,6 +12,7 @@ Purpose:
   - ready_*.pkl : ui_server -> svc（初回描画完了などの早期通知）
 
 History (latest 3):
+  - 1.2.13 (2026-06-06) waitform_ready_signal_path / write_waitform_ready_signal（VBA WaitForm 合図ファイル）。
   - 1.2.12 (2026-04-06) IPC ルート解決を core.core_env.ipc_dir_raw() に統一（HC_IPC_ROOT / HC_QT_IPC_DIR）。
   - 1.2.1 (2026-02-11) TEMP配下固定(%TEMP%\\csv_tool)とログパスを安定化。構文不備を修正。
   - 1.2.0 (2026-02-11) READY_UI 早期通知のため UiRequest に ready_path を追加。
@@ -43,7 +44,7 @@ _ERROR_ALREADY_EXISTS = 183
 
 # DIAG: which file is actually imported (no console needed)
 try:
-    __version__ = "1.2.12"
+    __version__ = "1.2.13"
     VERSION = __version__
     from pathlib import Path
     import os
@@ -70,6 +71,23 @@ def get_ipc_root() -> Path:
 
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def waitform_ready_signal_path(parent_hwnd: int) -> Path:
+    """VBA WaitForm 解除合図ファイル（Application.hwnd / parent_hwnd と同一キー）。"""
+    hwnd = int(parent_hwnd or 0)
+    temp = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    return Path(temp) / "csv_tool" / "waitform" / f"{hwnd}.ready"
+
+
+def write_waitform_ready_signal(parent_hwnd: int) -> None:
+    """ui_server が UI 表示直前に書く。VBA は DoEvents でこのファイルを待つ。"""
+    hwnd = int(parent_hwnd or 0)
+    if hwnd <= 0:
+        return
+    path = waitform_ready_signal_path(hwnd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("READY_UI\n", encoding="utf-8")
 
 
 # 基準フォルダ: ファイル読込/保存で直近使ったフォルダを共有（CSV読込・CSV保存で共通）

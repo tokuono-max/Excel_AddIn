@@ -43,13 +43,7 @@ from core.core_log import get_diag_logger, get_logger
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
 from core.excel_host_restore import restore_excel_host_after_operation
 from core.excel_perf_mode import set_excel_performance_mode
-from core.core_cursor import (
-    csv_tool_wait_cursor_off,
-    csv_tool_wait_cursor_on,
-    csv_tool_wait_cursor_tick,
-    notify_ui_ready,
-    notify_wait_form_ready,
-)
+from core.core_cursor import notify_ui_ready, notify_wait_form_ready
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
@@ -369,7 +363,6 @@ def _read_matrix_safe(
         list_chunk = curr_range.options(ndim=2).value
         list_total.extend(list_chunk)
         if progress_path is not None and total_rows > 0:
-            csv_tool_wait_cursor_tick(sheet_id)
             done = len(list_total)
             _progress_write_monotonic(
                 progress_path,
@@ -414,7 +407,6 @@ def _read_matrix_display_text(
             except Exception:
                 pass
         if progress_path is not None and total_rows > 0:
-            csv_tool_wait_cursor_tick(sheet_id)
             done = len(list_total)
             _progress_write_monotonic(
                 progress_path,
@@ -479,7 +471,6 @@ def _do_save_csv(
     t_do0 = time.perf_counter()
     if ptr_s is None:
         return
-    csv_tool_wait_cursor_on(sheet_id or sheet_id_for_progress)
     try:
         _do_save_csv_body(
             book,
@@ -512,7 +503,6 @@ def _do_save_csv(
             sheet_id or sheet_id_for_progress,
             getattr(book, "app", None),
         )
-        csv_tool_wait_cursor_off(cancel_reason="csv_sv_done")
 
 
 def _do_save_csv_body(
@@ -893,7 +883,7 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
     if book is None:
         logger.error("[CSV_SV] book=None のため中断（WaitForm 解除を試行）")
         try:
-            notify_wait_form_ready()
+            notify_wait_form_ready(book=book)
         except Exception:
             pass
         return
@@ -911,7 +901,7 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
     if ptr_s is None:
         logger.error("[CSV_SV] 対象シートなし（WaitForm 解除を試行）")
         try:
-            notify_wait_form_ready()
+            notify_wait_form_ready(book=book)
         except Exception:
             pass
         return

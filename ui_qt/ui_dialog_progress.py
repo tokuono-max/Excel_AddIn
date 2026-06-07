@@ -4,7 +4,7 @@ Python: 3.12
 Module: ui_qt/ui_dialog_progress.py
 Created: 2026-03-10
 Updated: 2026-06-04
-Version: 0.1.21
+Version: 0.1.24
 Purpose:
   進捗表示用ダイアログ（ProgressDialog）および create_progress_dialog を提供する。
   ui_common の Progress 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -16,6 +16,9 @@ Purpose:
   - 呼び出し側は ui_common.create_progress_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.1.25 (2026-06-06) showEvent: WaitForm 解除・砂時計 ON を excel_lock より先に実行。
+  - 0.1.24 (2026-06-06) 砂時計は showEvent で ON・teardown で OFF のみ（進捗 pickle 更新では制御しない）。
+  - 0.1.23 (2026-06-04) RUN 時: pickle seq 更新のたびに砂時計を即再武装（svc 側 OFF 後も進捗表示中は維持）。
   - 0.1.21 (2026-06-04) RUN 時: pickle の pct が明示されていれば done/total より優先（CSV保存等で 50% フェーズが 99% に張り付くのを防止）。
   - 0.1.20 (2026-05-05) req.progress_closed_path 指定時、進捗クローズ時に ACK pickle を書き出す。svc 側がクローズ完了を待って結果画面を出せるようにし、重なり表示を抑制。
   - 0.1.19 (2026-05-03) _teardown_progress_shared_state: excel_unlock 未指定時は parent_hwnd があれば常に True（excel_lock false でも他経路の Win32 無効取り残しを解除）。CANCEL も同様に parent があるときは解除。
@@ -94,7 +97,7 @@ try:
 except Exception:  # pragma: no cover
     _diag_ui = None  # type: ignore
 
-__version__ = "0.1.21"
+__version__ = "0.1.25"
 
 
 def _progress_label_min_height_for_lines(label: QLabel, lines: int = 2) -> int:
@@ -391,6 +394,7 @@ class ProgressDialog(QDialog):
             excel_lock なら Excel 操作をロック。表示直後 1 回だけオーナー→中央→前面化（ネイティブ／no_native 共通方針でちらつき抑制）。
         """
         try:
+            self._progress_wait_cursor_on()
             if getattr(self, "_excel_lock", False) and self._parent_hwnd:
                 try:
                     enable_excel_window(self._parent_hwnd, False)
@@ -489,6 +493,25 @@ class ProgressDialog(QDialog):
         except Exception:
             pass
 
+    def _progress_sheet_id(self) -> str:
+        return str(self._req.get("sheet_id") or "progress")
+
+    def _progress_wait_cursor_on(self) -> None:
+        try:
+            from core.core_cursor import progress_dialog_wait_cursor_on
+
+            progress_dialog_wait_cursor_on(self._progress_sheet_id())
+        except Exception:
+            pass
+
+    def _progress_wait_cursor_off(self) -> None:
+        try:
+            from core.core_cursor import progress_dialog_wait_cursor_off
+
+            progress_dialog_wait_cursor_off(cancel_reason="progress_dialog_done")
+        except Exception:
+            pass
+
     def _teardown_progress_shared_state(self, excel_unlock: Optional[bool] = None) -> None:
         """共有 UI 状態を片付ける。
 
@@ -502,6 +525,7 @@ class ProgressDialog(QDialog):
             modeless_widget=self,
             excel_unlock=excel_unlock,
         )
+        self._progress_wait_cursor_off()
 
     def _tick(self) -> None:
         """
@@ -1082,6 +1106,13 @@ class ProgressDialog(QDialog):
                     dlg.show()
                     # 前面化は DoneDialog.showEvent の singleShot(0) に任せ、二重 ensure_front によるちらつきを避ける
                     dlg.exec()
+                except Exception:
+                    pass
+            if ph:
+                try:
+                    from core.excel_host_restore import restore_excel_host_after_operation
+
+                    restore_excel_host_after_operation(ph, str(self._req.get("sheet_id", "") or ""))
                 except Exception:
                     pass
             # 3) csv_sp 等: 分割画面の exec を終了。次イベントで accept/close し、_close_after_done 内からの exec 再入を避ける

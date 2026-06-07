@@ -1657,7 +1657,6 @@ def check_duplicates(
             cancel_request_path=cancel_path,
             progress_closed_path=progress_closed_path,
         )
-        time.sleep(0.25)
         _perf_dupli("after_progress_ui_submit", t_flow)
         _dupli_trace("after_progress_ui_submit", t_flow)
 

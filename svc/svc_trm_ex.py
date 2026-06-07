@@ -785,7 +785,6 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             phase_total=2,
             progress_closed_path=progress_closed_path,
         )
-
         # ユーザー選択に応じて lstrip / rstrip / strip を適用し、完了通知用の件数をカウント
         n_leading_done = 0
         n_trailing_done = 0

@@ -124,14 +124,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     except Exception:
         ipc_root = None
 
-    def _batch_compute_cursor_off() -> None:
-        try:
-            from core.core_cursor import data_agg_batch_cursor_off  # noqa: WPS433
-
-            data_agg_batch_cursor_off()
-        except Exception:
-            pass
-
     def _finish_compute_only(msg: str, *, ok: bool, spill_path: Path | None = None) -> None:
         if ipc_root is not None and batch_run_id:
             try:
@@ -156,7 +148,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                         Path(scenario_snapshot_path).unlink(missing_ok=True)
                     except OSError:
                         pass
-                _batch_compute_cursor_off()
                 return
         except Exception:
             pass
@@ -170,7 +161,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     Path(scenario_snapshot_path).unlink(missing_ok=True)
                 except OSError:
                     pass
-            _batch_compute_cursor_off()
             return
 
     load_path = scenario_snapshot_path or scenario_path_user
@@ -182,17 +172,14 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     _clear_active_batch_run_if_current(sheet_id, ipc_root, batch_run_id)
             except Exception:
                 pass
-            _batch_compute_cursor_off()
             return
         if scenario_path_user:
             load_path = scenario_path_user
         else:
-            _batch_compute_cursor_off()
             return
 
     if not load_path:
         _dlog("abort reason=no_scenario_path")
-        _batch_compute_cursor_off()
         return
 
     scenario_path_log = scenario_path_user or scenario_snapshot_path
@@ -331,19 +318,12 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     if ipc_root is None:
         logger.error("[DATA_AGG] batch_compute IPC root unavailable")
-        _batch_compute_cursor_off()
         return
 
     cancel_path = cancel_request_path_data_agg_batch(sheet_id, ipc_root)
     reset_cancel_path(cancel_path)
     cancel_check = make_cancel_check(cancel_path, min_interval_sec=0.0)
     register_batch_worker_pid(sheet_id, ipc_root)
-    try:
-        from core.core_cursor import data_agg_batch_cursor_on  # noqa: WPS433
-
-        data_agg_batch_cursor_on(str(sheet_id or ""))
-    except Exception:
-        pass
 
     prog_path = ipc_root / "progress" / (
         "data_agg_batch_%s_%s.pkl" % (os.getpid(), int(time.time() * 1000))
@@ -384,12 +364,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         try:
             prog_path.parent.mkdir(parents=True, exist_ok=True)
             write_pickle(prog_path, d)
-        except Exception:
-            pass
-        try:
-            from core.core_cursor import data_agg_batch_cursor_tick  # noqa: WPS433
-
-            data_agg_batch_cursor_tick(str(sheet_id or ""))
         except Exception:
             pass
 

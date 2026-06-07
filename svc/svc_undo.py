@@ -3,7 +3,7 @@
 Python: 3.10+
 Module: svc/svc_undo
 Created: 2026-03-05
-Version: 1.7.7
+Version: 1.7.8
 Purpose:
   元に戻す（Undo）：Pickle キャッシュから直前状態を復元する（新方式: svc_server + book 渡し）。
   共通仕様（docs/共通仕様_機能.md）に準拠。復元中は ui_server 経由で進捗（config/ui_undo.json PROGRESS）。
@@ -16,6 +16,7 @@ Purpose:
   - まとめ: 「直前に実行した1つの機能」分だけ戻せる。戻すとスナップショットは消える。別の機能を実行するとスナップショットは新しい状態で上書きされる。
 
 History (latest 3):
+  - 1.7.8 (2026-06-06) 進捗表示中は excel_lock=True（復元開始から Excel 操作無効）。完了時 teardown で解除。
   - 1.7.7 exec_undo finally: 成功時も常に w32.bring_to_front(hwnd) を実行（1.7.5 のスキップを撤去）。TOPMOST 進捗後の前景を他機能（例 svc_dt_ymd）と揃え、続くモーダル前面の切り分け用。再発時はリバートまたは進捗側の TOPMOST 解除等を検討。
   - 1.7.6 Undo 成功: キャッシュ削除を進捗フェーズ（PHASE_UNDO_CACHE_DELETE）に含め、削除完了後に _undo_progress_done。進捗内の早期 DONE 呼び出しを廃止。_undo_progress_done の done_delay_ms / sleep を短縮。
   - 1.7.5 exec_undo finally: 復元成功かつ _show_undo_done_dialog を表示した直後は w32.bring_to_front(hwnd) をスキップ（完了 OK 後に Excel を強制前面にすると続く UI が背後に回る事象の緩和）。失敗・例外経路では従来どおり bring_to_front。（1.7.7 で撤去）
@@ -49,7 +50,7 @@ from core.core_log import get_diag_logger, get_logger, get_perf_logger
 logger = get_logger(__name__)
 _undo_diag = get_diag_logger("hc_csv_tool.diag.undo")
 _undo_perf = get_perf_logger("svc.svc_undo.perf")
-__version__ = "1.7.6"
+__version__ = "1.7.8"
 
 
 def _elapsed_ms(since: float) -> int:
@@ -233,7 +234,7 @@ def _submit_undo_progress_ui(
             "action": "progress",
             "progress_path": str(progress_path),
             "phase_total": int(phase_total),
-            "excel_lock": False,
+            "excel_lock": True,
             "no_native_window": True,
         }
         if er is not None:
@@ -626,7 +627,6 @@ def exec_undo(
                     },
                 )
                 _submit_undo_progress_ui(hwnd, sheet_id, prog_path_undo, 4)
-                time.sleep(0.25)
             api_st = getattr(ptr_a, "api", None) or ptr_a
             try:
                 try:
@@ -713,8 +713,6 @@ def exec_undo(
                     },
                 )
                 _submit_undo_progress_ui(hwnd, sheet_id, prog_path_undo, 9)
-                time.sleep(0.25)
-
             # シート更新・再描画を抑止。with 内で ClearContents → write_chunk → 整形 → 枠固定 → A1 選択
             api = getattr(ptr_a, "api", None) or ptr_a
             try:

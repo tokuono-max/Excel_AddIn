@@ -3,14 +3,18 @@
 Pythonバージョン: 3.12
 モジュール名: core_cursor
 作成日: 2026-02-12
-更新日: 2026-06-04
-バージョン: 0.3.1
+更新日: 2026-06-06
+バージョン: 0.3.5
 概要:
     Excelアドインの「砂時計（Application.Cursor=xlWait）」を、Python側（UI表示完了）で解除する共通モジュール。
     VBA側で起動した保険タイマ（Application.OnTime）も、VBAマクロ呼び出しにより停止する。
     ※Polling（Application.OnTimeの定周期監視）は副作用（STA占有）を招きやすいため、本方式では採用しない。
 
 改訂履歴:
+    0.3.5: 2026-06-06 notify_wait_form_ready を .ready 合図ファイル方式に変更（COM Application.Run 廃止）。notify_ui_ready から WaitForm COM 解除を削除。
+    0.3.4: 2026-06-06 data_agg/csv_tool の svc 側砂時計 API を削除（進捗は ProgressDialog のみ）。
+    0.3.3: 2026-06-06 進捗砂時計は ProgressDialog の表示開始/終了のみ（ForceCursorOnProgress・保険タイマなし）。tick 系は互換のため no-op。
+    0.3.2: 2026-06-04 progress_dialog_wait_cursor_on/tick/off（進捗ダイアログ表示中の砂時計を全機能で共通化）。
     0.3.1: 2026-06-04 csv_tool_wait_cursor_on/tick/off（CSV 保存・結合・分割・読込の処理中砂時計）。
     0.3.0: 2026-04-06 notify_wait_form_ready 追加（VBA WaitForm 解除）。notify_ui_ready 成功時も同時に呼ぶ。
     0.2.0: 2026-02-12 core.hc_log.get_logger に完全準拠（フォールバック削除）。ログ出力を統一。
@@ -21,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Optional
+from typing import Any, Optional
 
 
 # ==============================================================================
@@ -46,14 +50,9 @@ _XL_CURSOR_WAIT: int = -4112
 # ==============================================================================
 _LOG = get_logger("core.hc_cursor")
 
-# VBA: HC_WaitForm.NotifyUiReady（リボン待機 UserForm を閉じる）
-_VBA_WAITFORM_NOTIFY_MACRO: str = "HC_WaitForm.NotifyUiReady"
 _VBA_CURSOR_GUARD_START: str = "Main.StartCursorGuardTimer"
 _VBA_CURSOR_FORCE_ON: str = "Main.ForceCursorOn"
-
-_data_agg_batch_cursor_last_rearm: float = 0.0
-_csv_tool_cursor_last_rearm: float = 0.0
-
+_VBA_CURSOR_PROGRESS_ON: str = "Main.ForceCursorOnProgress"
 
 # ==============================================================================
 # Data models
@@ -126,11 +125,12 @@ def notify_excel_wait_cursor_on(
             _LOG.info("CURSOR_WAIT_ON: Cursor xlWait (COM fallback) sheet_id=%s", sid)
         except Exception as ex:
             _LOG.warning("CURSOR_WAIT_ON: Cursor ON failed: %s", str(ex))
-        try:
-            excel.Run(vba_guard_macro, sid)
-            _LOG.info("CURSOR_WAIT_ON: Run(%s) ok", vba_guard_macro)
-        except Exception as ex:
-            _LOG.warning("CURSOR_WAIT_ON: guard timer Run failed: %s", str(ex))
+        if str(vba_guard_macro or "").strip():
+            try:
+                excel.Run(vba_guard_macro, sid)
+                _LOG.info("CURSOR_WAIT_ON: Run(%s) ok", vba_guard_macro)
+            except Exception as ex:
+                _LOG.warning("CURSOR_WAIT_ON: guard timer Run failed: %s", str(ex))
     finally:
         try:
             pythoncom.CoUninitialize()
@@ -138,93 +138,63 @@ def notify_excel_wait_cursor_on(
             pass
 
 
-def data_agg_batch_cursor_on(sheet_id: str = "") -> None:
-    """本番一括: 砂時計 ON（進捗表示直前・再開時も呼ぶ）。"""
-    global _data_agg_batch_cursor_last_rearm
-    _data_agg_batch_cursor_last_rearm = time.perf_counter()
-    notify_excel_wait_cursor_on(sheet_id=sheet_id)
+def progress_dialog_wait_cursor_on(sheet_id: str = "") -> None:
+    """進捗ダイアログ表示開始: 砂時計 ON（保険タイマなし・明示指示のみ）。"""
+    notify_excel_wait_cursor_on(
+        sheet_id=sheet_id or "progress",
+        vba_force_on_macro=_VBA_CURSOR_PROGRESS_ON,
+        vba_guard_macro="",
+    )
 
 
-def data_agg_batch_cursor_tick(
+def progress_dialog_wait_cursor_tick(
     sheet_id: str = "",
     *,
     min_interval_sec: float = 7.0,
 ) -> None:
-    """本番一括: 10 秒保険タイマ切れ前に砂時計を再武装する。"""
-    global _data_agg_batch_cursor_last_rearm
-    now = time.perf_counter()
-    if now - _data_agg_batch_cursor_last_rearm < float(min_interval_sec):
-        return
-    data_agg_batch_cursor_on(sheet_id)
+    """互換用 no-op。進捗中の再武装は行わない（表示開始/終了のみ制御）。"""
+    del sheet_id, min_interval_sec
 
 
-def data_agg_batch_cursor_off(*, cancel_reason: str = "data_agg_batch_done") -> None:
-    """本番一括完了・失敗・キャンセル時: 砂時計 OFF + WaitForm 解除。"""
-    notify_ui_ready(cancel_reason=cancel_reason)
-
-
-def csv_tool_wait_cursor_on(sheet_id: str = "") -> None:
-    """CSV ツール（読込/保存/結合/分割）: 処理中の砂時計 ON + 保険タイマ再武装。"""
-    global _csv_tool_cursor_last_rearm
-    _csv_tool_cursor_last_rearm = time.perf_counter()
-    notify_excel_wait_cursor_on(sheet_id=sheet_id or "csv_tool")
-
-
-def csv_tool_wait_cursor_tick(
-    sheet_id: str = "",
-    *,
-    min_interval_sec: float = 7.0,
-) -> None:
-    """CSV ツール: 長い COM 処理中に砂時計が切れる前に再武装する。"""
-    global _csv_tool_cursor_last_rearm
-    now = time.perf_counter()
-    if now - _csv_tool_cursor_last_rearm < float(min_interval_sec):
-        return
-    csv_tool_wait_cursor_on(sheet_id)
-
-
-def csv_tool_wait_cursor_off(*, cancel_reason: str = "csv_tool_done") -> None:
-    """CSV ツール完了・失敗・キャンセル時: 砂時計 OFF + WaitForm 解除。"""
+def progress_dialog_wait_cursor_off(*, cancel_reason: str = "progress_dialog_done") -> None:
+    """進捗ダイアログ終了時: 砂時計 OFF + WaitForm 解除。"""
     notify_ui_ready(cancel_reason=cancel_reason)
 
 
 def notify_wait_form_ready(
     *,
-    vba_macro: str = _VBA_WAITFORM_NOTIFY_MACRO,
-    try_get_excel: int = 20,
-    get_excel_interval_ms: int = 50,
+    parent_hwnd: int = 0,
+    book: Any = None,
 ) -> None:
-    """Excel.Application.Run で WaitForm を閉じる VBA を実行する（ベストエフォート）。
+    """VBA WaitForUiReadySignal 向けに .ready 合図ファイルを書く（ベストエフォート）。
 
-    COM 取得・Run 失敗はログのみ。UI 表示完了など任意のタイミングから呼べる。
+    parent_hwnd / book.app.hwnd / HC_EXCEL_HWND の順で HWND を解決する。
     """
-    try:
-        import pythoncom  # noqa: WPS433
-        import win32com.client  # noqa: WPS433
-    except Exception as ex:
-        _LOG.warning("WAITFORM_NOTIFY: pywin32 import failed: %s", str(ex))
-        return
-
-    pythoncom.CoInitialize()
-    try:
-        excel = _get_excel_app(
-            win32com_client=win32com.client,
-            try_count=try_get_excel,
-            interval_ms=get_excel_interval_ms,
-        )
-        if excel is None:
-            _LOG.warning("WAITFORM_NOTIFY: GetActiveObject(Excel.Application) failed")
-            return
+    hwnd = int(parent_hwnd or 0)
+    if hwnd <= 0 and book is not None:
         try:
-            excel.Run(vba_macro)
-            _LOG.info("WAITFORM_NOTIFY: Run(%s) ok", vba_macro)
-        except Exception as ex:
-            _LOG.warning("WAITFORM_NOTIFY: Run failed: %s", str(ex))
-    finally:
-        try:
-            pythoncom.CoUninitialize()
+            hwnd = int(getattr(book.app, "hwnd", 0) or 0)
         except Exception:
-            pass
+            hwnd = 0
+    if hwnd <= 0:
+        try:
+            import os
+
+            from core import core_env
+
+            hwnd = int(os.environ.get(core_env.ENV_EXCEL_HWND, 0) or 0)
+        except Exception:
+            hwnd = 0
+    if hwnd <= 0:
+        _LOG.warning("WAITFORM_READY: skip (parent_hwnd unresolved)")
+        return
+    try:
+        from ui_qt.ipc_file import write_waitform_ready_signal
+
+        write_waitform_ready_signal(hwnd)
+        _LOG.info("WAITFORM_READY: signal written hwnd=%s", hwnd)
+    except Exception as ex:
+        _LOG.warning("WAITFORM_READY: write failed: %s", str(ex))
 
 
 def notify_ui_ready(
@@ -311,12 +281,6 @@ def notify_ui_ready(
                 _LOG.warning(
                     "UI_READY: VBA ForceCursorOff failed (ignored): %s", str(ex)
                 )
-
-        try:
-            excel.Run(_VBA_WAITFORM_NOTIFY_MACRO)
-            _LOG.info("UI_READY: WaitForm dismiss (%s)", _VBA_WAITFORM_NOTIFY_MACRO)
-        except Exception as ex:
-            _LOG.warning("UI_READY: WaitForm dismiss failed (ignored): %s", str(ex))
 
     finally:
         try:

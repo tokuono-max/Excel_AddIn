@@ -92,7 +92,8 @@
         "SHOW_IN_TASKBAR": false,
         "DEFAULT_WIDTH": 0,
         "DEFAULT_HEIGHT": 0,
-        "TOPMOST": false
+        "TOPMOST": false,
+        "EXCEL_LOCK": false
       }
     },
     "UNDO_DONE": {
@@ -110,7 +111,8 @@
         "SHOW_IN_TASKBAR": false,
         "DEFAULT_WIDTH": 0,
         "DEFAULT_HEIGHT": 0,
-        "TOPMOST": true
+        "TOPMOST": true,
+        "EXCEL_LOCK": false
       }
     }
   }

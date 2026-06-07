@@ -3,14 +3,15 @@
 Python: 3.12+
 Module: ui_qt/ui_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-04-10
-Version: 1.3.10
+Updated: 2026-06-06
+Version: 1.3.11
 Purpose:
   CSV読込用 UI（ファイル選択・進捗表示）。機能ごとにセパレート（ui_csv_mg に依存しない）。
   - 設定は config/ui_csv_ld.json を参照。ファイル選択は Qt を使わずネイティブダイアログのみ（Excel を親にした QWidget を渡す）。
   - 進捗は no_native_window で枠だけ表示を回避。
 
 History (latest 3):
+  - 1.3.11 (2026-06-06) ネイティブファイル選択直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
   - 1.3.10 (2026-04-10) 計測: ネイティブファイル選択直前に `[CSV_LD_UI] phase=native_file_dialog_open`（区間 A 終点の目安）。docs/csv_ld_perf_measurement.md 参照。
   - 1.3.9 (2026-04-07) ファイル選択終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
   - 1.3.8 (2026-03-05) ファイル選択表示中は Excel 操作を無効化し、OK/キャンセル後に有効化。進捗は close/closeEvent で deleteLater を追加（枠だけ残る対策）。
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from core.core_log import get_logger
 
-__version__ = "1.3.10"
+__version__ = "1.3.11"
 
 _logger_ld_ui = get_logger(__name__)
 
@@ -64,16 +65,16 @@ class _CsvLoadFileDialog:
         """ファイル選択ダイアログを表示。表示中は Excel 操作を無効化し、OK/キャンセル後に有効化。Qt は使わずネイティブのみ。"""
         parent_widget = None
         ph = int(self._parent_hwnd or 0)
-        if ph:
-            try:
-                from ui_qt.ui_common import _set_owner_hwnd
-                parent_widget = QWidget()
-                parent_widget.winId()
-                _set_owner_hwnd(parent_widget, ph)
-            except Exception:
-                parent_widget = None
-
+        path = ""
         try:
+            if ph:
+                try:
+                    from ui_qt.ui_common import _set_owner_hwnd
+                    parent_widget = QWidget()
+                    parent_widget.winId()
+                    _set_owner_hwnd(parent_widget, ph)
+                except Exception:
+                    parent_widget = None
             if ph:
                 try:
                     from ui_qt.ui_win import enable_excel_window

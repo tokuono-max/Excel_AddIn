@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_common.py
 Created: 2026-02-12
-Updated: 2026-05-05
-Version: 0.2.85
+Updated: 2026-06-06
+Version: 0.2.87
 Purpose:
   Qt UI サーバ側の「表示共通」を集約する。
   - owner 設定（Excel HWND）
@@ -14,6 +14,8 @@ Purpose:
   - create_dialog はハブとして action に応じ ui_dialog_* へ委譲。Done/Progress 実装は ui_dialog_done / ui_dialog_progress に移管。
 
 History (latest 3):
+  - 0.2.87 (2026-06-06) 旧 COM WaitForm 解除（dismiss_vba_wait_form / install_ribbon_startup_wait_dismiss）を削除。.ready 合図は ui_server / core_cursor 経由。
+  - 0.2.86 (2026-06-06) dismiss_vba_wait_form_best_effort: ui プロセスから VBA WaitForm を閉じる共通入口（svc 裏スレッド COM 回避）。
   - 0.2.85 (2026-05-05) prepare_dialog_excel_center_before_show: プロパティ _hc_prepare_skip_ensure_front=true のとき prepare 内 ensure_front をスキップ（画面個別のちらつき切り分け用）。
   - 0.2.84 (2026-05-05) ensure_front: 非表示ウィンドウでは SetWindowPos に SWP_SHOWWINDOW を付けない。prepare 中の先行可視化（ちらつき）を抑止。
   - 0.2.83 (2026-05-03) Excel 前景追従（EXCEL_FRONT_FOLLOW／Win32 前景フック）を廃止。apply_window_config は遅延オーナー＋ensure_front＋軽量 raise。merge_screen_cfg_window_from_root に sheet_interaction_excel_unlock。teardown_feature_ui_shared_state からフック停止を削除。
@@ -77,99 +79,7 @@ from ui_qt import ipc_file
 from core.ui_window_timing import get_ui_window_timings
 
 # 変数: バージョン情報
-__version__ = "0.2.83"
-
-
-class _RibbonWaitFormDismissOnShow(QObject):
-    """リボン経由で表示するウィンドウの初回 Show で VBA WaitForm を閉じる（別 UI 分岐でも同一フック）。"""
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if event.type() != QEvent.Type.Show:
-            return False
-        try:
-            watched.removeEventFilter(self)
-        except Exception:
-            pass
-        try:
-            self.deleteLater()
-        except Exception:
-            pass
-        try:
-            from core.core_cursor import notify_wait_form_ready
-
-            notify_wait_form_ready()
-        except Exception:
-            pass
-        return False
-
-
-def _resolve_widget_for_ribbon_wait_dismiss(target: Any) -> Optional[QWidget]:
-    if isinstance(target, QWidget):
-        return target
-    inner = getattr(target, "_dlg", None)
-    if isinstance(inner, QWidget):
-        return inner
-    return None
-
-
-def install_ribbon_startup_wait_dismiss_on_first_show(target: Any) -> None:
-    """create_dialog 直後に付与。実際に表示される QWidget の最初の Show で一度だけ notify_wait_form_ready。"""
-    w = _resolve_widget_for_ribbon_wait_dismiss(target)
-    if w is None:
-        return
-    if getattr(w, "_hc_ribbon_wait_dismiss_installed", False):
-        return
-    w._hc_ribbon_wait_dismiss_installed = True
-    filt = _RibbonWaitFormDismissOnShow(w)
-    filt.setParent(w)
-    w.installEventFilter(filt)
-
-
-class _DataAggBatchProgressCursorOnShow(QObject):
-    """本番一括進捗の初回 Show: WaitForm を閉じつつ Excel 砂時計を維持・再武装する。"""
-
-    def __init__(self, sheet_id: str, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._sheet_id = str(sheet_id or "")
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if event.type() != QEvent.Type.Show:
-            return False
-        try:
-            watched.removeEventFilter(self)
-        except Exception:
-            pass
-        try:
-            self.deleteLater()
-        except Exception:
-            pass
-        try:
-            from core.core_cursor import (
-                data_agg_batch_cursor_on,
-                notify_wait_form_ready,
-            )
-
-            notify_wait_form_ready()
-            data_agg_batch_cursor_on(self._sheet_id)
-        except Exception:
-            pass
-        return False
-
-
-def install_data_agg_batch_progress_cursor_on_show(
-    target: Any,
-    sheet_id: str,
-) -> None:
-    """本番一括 progress: 初回 Show で WaitForm 解除 + xlWait 再武装（ui_server の ribbon フックと併用可）。"""
-    w = _resolve_widget_for_ribbon_wait_dismiss(target)
-    if w is None:
-        return
-    if getattr(w, "_hc_data_agg_batch_cursor_on_show_installed", False):
-        return
-    w._hc_data_agg_batch_cursor_on_show_installed = True
-    filt = _DataAggBatchProgressCursorOnShow(str(sheet_id or ""), w)
-    filt.setParent(w)
-    w.installEventFilter(filt)
+__version__ = "0.2.87"
 
 
 # ===== ui_common trace (file based, logger independent) =====

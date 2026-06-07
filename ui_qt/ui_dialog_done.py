@@ -63,6 +63,7 @@ from ui_qt.ui_common import (
     center_on_excel,
     enable_excel_window,
     ensure_front,
+    want_excel_child_hwnd_lock_while_modal,
     _set_owner_hwnd,
 )
 
@@ -390,10 +391,13 @@ class DoneDialog(QDialog):
             play_notification_on_widget(self)
         except Exception:
             pass
-        # 表示中は Excel 操作を無効化（共通仕様）
-        if self._parent_hwnd:
+        # WINDOW.EXCEL_LOCK が true のときのみ Excel 子 HWND を無効化（完了通知中もシート操作可にする画面は false）
+        win_cfg = getattr(self, "_done_win_cfg", None) or {}
+        self._done_excel_locked = False
+        if self._parent_hwnd and want_excel_child_hwnd_lock_while_modal(win_cfg):
             try:
                 enable_excel_window(self._parent_hwnd, False)
+                self._done_excel_locked = True
             except Exception:
                 pass
         # 位置は create 済み。前面化のみ（再センタでちらつかないようにする）
@@ -406,22 +410,23 @@ class DoneDialog(QDialog):
                 pass
 
     def _on_ok_and_close(self) -> None:
-        """OK押下時: 共通仕様に従い Excel 操作を有効にしてから accept でダイアログを閉じる。"""
-        if self._parent_hwnd:
-            try:
-                enable_excel_window(self._parent_hwnd, True)
-            except Exception:
-                pass
+        """OK押下時: ロックしていた場合は Excel 操作を有効にしてから accept でダイアログを閉じる。"""
+        self._release_done_excel_lock()
         self.accept()
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        """×ボタン等で閉じた場合も Excel 操作を有効にしてから super().closeEvent で終了する。"""
+    def _release_done_excel_lock(self) -> None:
+        if not getattr(self, "_done_excel_locked", False) or not self._parent_hwnd:
+            return
         try:
-            if self._parent_hwnd:
-                try:
-                    enable_excel_window(self._parent_hwnd, True)
-                except Exception:
-                    pass
+            enable_excel_window(self._parent_hwnd, True)
+        except Exception:
+            pass
+        self._done_excel_locked = False
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """×ボタン等で閉じた場合もロック解除してから super().closeEvent で終了する。"""
+        try:
+            self._release_done_excel_lock()
         finally:
             super().closeEvent(event)
 

@@ -4,13 +4,14 @@ Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
 Updated: 2026-06-04
-Version: 1.3.24
+Version: 1.3.25
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.25 (2026-06-06) 進捗表示中は excel_lock=True（読込中 Excel 操作無効）。完了時 teardown で解除。
   - 1.3.24 (2026-06-04) 読込終了時に EnableEvents=True を保証（core.excel_perf_mode / restore_excel_host_after_operation）。シート切替でステータスバー復帰。
   - 1.3.23 (2026-06-04) シート名: ファイル名を Excel 最大 31 文字・禁止文字除去に整形。分割時は -N 分を確保して切り詰め。
   - 1.3.22 (2026-06-04) 進捗更新を細かく: 書込み notify 5k 行・stride/間隔/poll/creep 既定を強化。HC_CSV_LD_PROGRESS_WRITE_NOTIFY_ROWS。
@@ -46,11 +47,11 @@ from core import core_env
 from core.core_log import get_diag_logger, get_logger
 from core.excel_host_restore import restore_excel_host_after_operation
 from core.excel_perf_mode import set_excel_performance_mode
-from core.core_cursor import notify_excel_wait_cursor_on, notify_ui_ready, notify_wait_form_ready
+from core.core_cursor import notify_ui_ready, notify_wait_form_ready
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.24"
+__version__ = "1.3.25"
 
 
 def _log_jit_breakdown(
@@ -155,8 +156,6 @@ LARGE_FILE_PROGRESS_WRITE_NOTIFY_ROWS: int = 5000
 LARGE_FILE_ROWS_THRESHOLD: int = 500_000
 LARGE_FILE_READ_CHUNK_ROWS: int = 100_000
 LARGE_FILE_WRITE_STEP_ROWS: int = 200_000
-_CSV_LD_CURSOR_LAST_REARM: float = 0.0
-
 
 def _csv_ld_legacy_text_write() -> bool:
     """HC_CSV_LD_LEGACY_TEXT_WRITE=1 のとき従来の text_mode（' 付与 + 塊ごと @）。"""
@@ -260,22 +259,6 @@ def resolve_progress_bar_creep_pct() -> int:
         except ValueError:
             pass
     return DEFAULT_PROGRESS_BAR_CREEP_PCT
-
-
-def _csv_ld_wait_cursor_on(sheet_id: str) -> None:
-    """CSV 読込処理中の砂時計 ON（VBA ForceCursorOn + 保険タイマ）。"""
-    global _CSV_LD_CURSOR_LAST_REARM
-    _CSV_LD_CURSOR_LAST_REARM = time.perf_counter()
-    notify_excel_wait_cursor_on(sheet_id=sheet_id)
-
-
-def _csv_ld_wait_cursor_tick(sheet_id: str, min_interval_sec: float = 7.0) -> None:
-    """長い COM 書込み中に砂時計が切れるのを防ぐ（保険タイマ再武装）。"""
-    global _CSV_LD_CURSOR_LAST_REARM
-    now = time.perf_counter()
-    if now - _CSV_LD_CURSOR_LAST_REARM < float(min_interval_sec):
-        return
-    _csv_ld_wait_cursor_on(sheet_id)
 
 
 def resolve_progress_row_total(val_total: int) -> int:
@@ -507,7 +490,7 @@ def _submit_progress_ui(
             "action": "progress",
             "progress_path": str(progress_path),
             "phase_total": int(phase_total),
-            "excel_lock": False,
+            "excel_lock": True,
             "progress_poll_ms": resolve_progress_poll_ms(),
             "progress_bar_creep_pct": resolve_progress_bar_creep_pct(),
             # 枠だけ表示を避けるため Qt 描画を使用（WA_NativeWindow を付けない）
@@ -836,7 +819,6 @@ def _execute_jit_import(
     prog_row_total = resolve_progress_row_total(val_total)
     last_progress_rows = 0
     last_progress_mono = 0.0
-    _csv_ld_wait_cursor_on(sheet_id)
     logger.info(
         "[CSV_LD] phase=jit_import_config rows=%s prog_row_total=%s chunk_size=%s write_step=%s "
         "progress_stride=%s progress_min_sec=%s progress_poll_ms=%s progress_creep_pct=%s "
@@ -870,7 +852,6 @@ def _execute_jit_import(
         nonlocal progress_seq, last_progress_rows, last_progress_mono
         if progress_path is None:
             return
-        _csv_ld_wait_cursor_tick(sheet_id)
         emit_ok = False
         if time_only:
             now = time.monotonic()
@@ -1216,7 +1197,6 @@ def _do_load_csv(
         _progress_write_sheet_error(progress_path, sheet_id)
         _bring_excel_to_front(parent_hwnd)
         restore_excel_host_after_operation(parent_hwnd, sheet_id)
-        notify_ui_ready(cancel_reason="csv_ld_done")
         return
     book, sh_origin = _resolve_book_and_sheet(
         book, sheet_id, parent_hwnd, attach_keys=attach_keys
@@ -1226,10 +1206,8 @@ def _do_load_csv(
         _progress_write_sheet_error(progress_path, sheet_id)
         _bring_excel_to_front(parent_hwnd)
         restore_excel_host_after_operation(parent_hwnd, sheet_id)
-        notify_ui_ready(cancel_reason="csv_ld_done")
         return
 
-    _csv_ld_wait_cursor_on(sheet_id)
     t_rows0 = time.perf_counter()
     val_total = _get_row_count_binary(str_csv_path)
     str_readable_size = _get_formatted_size(str_csv_path)
@@ -1258,7 +1236,6 @@ def _do_load_csv(
             _progress_write(progress_path, {"status": "DONE", "seq": 1})
             _bring_excel_to_front(parent_hwnd)
             restore_excel_host_after_operation(parent_hwnd, sheet_id)
-            notify_ui_ready(cancel_reason="csv_ld_done")
             return
 
     try:
@@ -1305,7 +1282,6 @@ def _do_load_csv(
         restore_excel_host_after_operation(parent_hwnd, sheet_id, book.app)
         if xlc:
             xlc.yield_to_excel()
-        notify_ui_ready(cancel_reason="csv_ld_done")
 
 
 def _watch_result(
@@ -1359,7 +1335,6 @@ def _watch_result(
                 except Exception:
                     pass
                 _bring_excel_to_front(parent_hwnd)
-                _csv_ld_wait_cursor_on(sheet_id)
                 _do_load_csv(
                     book,
                     sheet_id,
@@ -1406,7 +1381,7 @@ def load_csv(book: Any, sheet_id: str = "") -> None:
     if book is None:
         logger.error("[CSV_LD] book=None のため中断（WaitForm 解除を試行）")
         try:
-            notify_wait_form_ready()
+            notify_wait_form_ready(book=book)
         except Exception:
             pass
         return

@@ -361,7 +361,7 @@ def _call_svc_server(action: str, book_ptr: Any, sheet_id: str = "", **kwargs: o
         try:
             from core.core_cursor import notify_wait_form_ready
 
-            notify_wait_form_ready()
+            notify_wait_form_ready(parent_hwnd=excel_hwnd)
         except Exception:
             pass
         return
@@ -493,11 +493,11 @@ def _ensure_book(target_hwnd: Optional[int]) -> Optional[Any]:
 # =============================================================================
 
 
-def _notify_wait_form_best_effort() -> None:
+def _notify_wait_form_best_effort(*, parent_hwnd: int = 0) -> None:
     try:
         from core.core_cursor import notify_wait_form_ready
 
-        notify_wait_form_ready()
+        notify_wait_form_ready(parent_hwnd=parent_hwnd)
     except Exception:
         pass
 
@@ -553,7 +553,7 @@ def _invoke_csv_family(
             logger.error(
                 "Module load/exec error (%s): %s", public_action, ex, exc_info=True
             )
-            _notify_wait_form_best_effort()
+            _notify_wait_form_best_effort(parent_hwnd=int(target_hwnd or 0))
         return
     if public_action == "load_csv":
         logger.error("Service ABORTED: Book context missing for HWND: %s", target_hwnd)
@@ -563,7 +563,7 @@ def _invoke_csv_family(
             public_action,
             target_hwnd,
         )
-    _notify_wait_form_best_effort()
+    _notify_wait_form_best_effort(parent_hwnd=int(target_hwnd or 0))
 
 
 def _invoke_impl_load_csv(target_hwnd: Optional[int], sheet_id: str, **_kw: object) -> None:
@@ -687,13 +687,13 @@ INVOKE_ACTIONS: frozenset[str] = RIBBON_INVOKE_ACTION_KEYS
 _INVOKE_NOTIFY_WAITFORM_ACTIONS: frozenset[str] = RIBBON_INVOKE_FINALLY_NOTIFY_WAITFORM
 
 
-def _notify_wait_form_after_sync_invoke(action: str) -> None:
+def _notify_wait_form_after_sync_invoke(action: str, *, parent_hwnd: int = 0) -> None:
     if action not in _INVOKE_NOTIFY_WAITFORM_ACTIONS:
         return
     try:
         from core.core_cursor import notify_wait_form_ready
 
-        notify_wait_form_ready()
+        notify_wait_form_ready(parent_hwnd=parent_hwnd)
     except Exception:
         pass
 
@@ -722,7 +722,7 @@ def invoke(
         try:
             from core.core_cursor import notify_wait_form_ready
 
-            notify_wait_form_ready()
+            notify_wait_form_ready(parent_hwnd=int(target_hwnd or 0))
         except Exception:
             pass
         allowed = ", ".join(sorted(_INVOKE_HANDLER_MAP.keys()))
@@ -735,7 +735,7 @@ def invoke(
     try:
         fn(target_hwnd=target_hwnd, sheet_id=sheet_id, **kwargs)
     finally:
-        _notify_wait_form_after_sync_invoke(a)
+        _notify_wait_form_after_sync_invoke(a, parent_hwnd=int(target_hwnd or 0))
         plog.info(
             "invoke phase=after_handler action=%r cumulative_ms=%d",
             a,

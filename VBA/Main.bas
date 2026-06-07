@@ -4,9 +4,11 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: Main (標準モジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-06-03
+' 更新日: 2026-06-06
 ' 文字コード: 本モジュールは Shift-JIS（CP932）で保存すること（日本語コメント・文字列の破損防止）。
 ' 改版番号および履歴:
+'   2.14.0 (2026-06-06) [UX] WaitForm: bridge 後 WaitForUiReadySignal（ready ファイル待ち・VBA 内 NotifyUiReady）。
+'   2.13.0 (2026-06-06) [UX] ForceCursorOnProgress: 進捗ダイアログ表示時の砂時計 ON。保険タイマなし。外部 Python から Application.Run で呼ぶ（ProgressDialog show/teardown のみ制御）。
 '   2.12.0 (2026-06-03) [終了] ShutdownExcelUiCleanup: shutdown_all_with_force_kill('excel_shutdown') を追加。
 '   2.11.0 (2026-06-01) [UX] ForceCursorOn: 本番データ集約一括の砂時計 ON。外部 Python から Application.Run で呼ぶ（COM の Cursor 直書きは不可のため）。
 '   2.10.0 (2026-05-31) [終了] ShutdownExcelUiCleanup: Python EXCEL_RESTORE 呼び出し（COM ハング救済）。
@@ -235,6 +237,7 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
     Call HC_WaitForm.BeginWaitForRibbon(control.ID, act)
     Call HC_RibbonPerf.RibbonPerfMark("before_bridge_submit")
     Call Main.SubmitSvcRequestViaBridge(act, Application.hwnd, sId, bookFullName, bookName, selAreasJson, dupliCf)
+    Call HC_WaitForm.WaitForUiReadySignal(Application.hwnd)
 
     Call HC_RibbonPerf.RibbonPerfMark("after_bridge_submit")
     Call HC_RibbonPerf.RibbonPerfEnd
@@ -473,6 +476,23 @@ Public Sub ForceCursorOn(Optional ByVal sId As String = "batch")
     Application.Cursor = xlWait
     Call HC_Log.Diag("Main", "Application.Cursor: ON (ForceCursorOn)")
     Call StartCursorGuardTimer(sId)
+    On Error GoTo 0
+End Sub
+
+' ---------------------------------------------------------------------------------------------------------------------
+' プロシージャ名: ForceCursorOnProgress
+' 改版番号および履歴:
+'   1.0.0 (2026-06-06) 進捗ダイアログ表示開始: xlWait ON（StartCursorGuardTimer は呼ばない）。
+' プロシージャの動作概要: ProgressDialog の showEvent からのみ砂時計を ON にする。
+' 呼出し例: Application.Run "Main.ForceCursorOnProgress", sheetId
+' ヘルパープロシージャの親子関係: (なし) ForceCursorOff は Python 側 notify_ui_ready で解除
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub ForceCursorOnProgress(Optional ByVal sId As String = "progress")
+    On Error Resume Next
+    If Len(sId) = 0 Then sId = "progress"
+    m_cursorReleased = False
+    Application.Cursor = xlWait
+    Call HC_Log.Diag("Main", "Application.Cursor: ON (ForceCursorOnProgress)")
     On Error GoTo 0
 End Sub
 

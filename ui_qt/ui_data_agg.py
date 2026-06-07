@@ -3608,12 +3608,6 @@ class _DataAggMainWindow(QDialog):
                     run_id=batch_run_id,
                 )
             spawn_cwd = str(install_root) if install_root is not None else str(proj_root)
-            try:
-                from core.core_cursor import data_agg_batch_cursor_on
-
-                data_agg_batch_cursor_on(str(run_sheet_id or ""))
-            except Exception:
-                pass
             subprocess.Popen(cmd, cwd=spawn_cwd, env=env)
             if show_batch_start:
                 show_info_notice(
@@ -6068,9 +6062,9 @@ def create_dialog(
         except Exception:
             pass
         try:
-            from ui_qt.ui_common import install_ribbon_startup_wait_dismiss_on_first_show
+            from ui_qt.ipc_file import write_waitform_ready_signal
 
-            install_ribbon_startup_wait_dismiss_on_first_show(dlg)
+            write_waitform_ready_signal(int(ph or 0))
         except Exception:
             pass
         dlg.show()
@@ -6110,12 +6104,6 @@ def create_dialog(
             parent_widget=main_parent,
             progress_cfg=progress_cfg,
         )
-        try:
-            from ui_qt.ui_common import install_data_agg_batch_progress_cursor_on_show
-
-            install_data_agg_batch_progress_cursor_on_show(dlg, str(sheet_id or ""))
-        except Exception:
-            pass
         return _DataAggProgressWrapper(dlg)
 
     if action == "done":

@@ -579,7 +579,6 @@ def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> N
         except Exception:
             pass
         _submit_progress_ui(ph, sid, prog_path, 3, progress_closed_path=progress_closed_path)
-        time.sleep(0.25)  # 進捗ウィンドウの表示を待つ
         _perf_dt_ymd("after_progress_ui_submit", t_flow)
         _dt_ymd_trace("after_progress_ui_submit", t_flow)
 

@@ -18,6 +18,8 @@ Purpose:
   - shutdown: QTimer で shutdown.flag をポーリングし、ネスト QEventLoop（csv_mg 結合メイン）と dlg.exec 中でもループ終了＋トップレベル close。clear_shutdown_flag は mutex 取得成功後のみ（二重起動時にフラグを消さない）。
 
 History (latest 3):
+  - 1.4.60 (2026-06-06) 旧 COM WaitForm 解除（install_ribbon_startup_wait_dismiss）を削除。.ready 合図のみ。
+  - 1.4.59 (2026-06-06) create_dialog 成功時に write_waitform_ready_signal（VBA DoEvents 待ち合図）。
   - 1.4.57 (2026-05-03) ui_qt.ui_help help_show: dlg.exec 直前に bump_front_follow_deferred_ensure_generation と HELP_BEFORE_MODAL_EXEC の QEventLoop 待ち（重複ジャンプ後のヘルプ前面化のため。ui_help.json の TOPMOST/FOLLOW は変更なし）。
   - 1.4.56 (2026-04-18) Windows: `ensure_ui_server_windows_dll_search_paths` に ``app`` ・ ``PySide6\\lib`` と ``PATH`` 先頭付与を追加（Shiboken.pyd の DLL 解決）。
   - 1.4.55 (2026-04-18) Windows: `shared_dll_bootstrap.ensure_ui_server_windows_dll_search_paths`（shared + EXE 直下 + shiboken6/PySide6）を PySide6 より前に実行。
@@ -74,7 +76,7 @@ from typing import Any
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-__version__ = "1.4.57"
+__version__ = "1.4.59"
 
 from ui_qt import ipc_file  # noqa: E402
 
@@ -797,9 +799,9 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                 pass
             logger.error("[UI_DISPATCH] create_dialog failed: %s", err_msg)
             try:
-                from core.core_cursor import notify_wait_form_ready
+                from ui_qt.ipc_file import write_waitform_ready_signal
 
-                notify_wait_form_ready()
+                write_waitform_ready_signal(int(parent_hwnd or 0))
             except Exception:
                 pass
             try:
@@ -811,9 +813,9 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
             return _error_result(err_msg, config_exc)
 
         try:
-            from ui_qt.ui_common import install_ribbon_startup_wait_dismiss_on_first_show
+            from ui_qt.ipc_file import write_waitform_ready_signal
 
-            install_ribbon_startup_wait_dismiss_on_first_show(dlg)
+            write_waitform_ready_signal(int(parent_hwnd or 0))
         except Exception:
             pass
 
@@ -1372,6 +1374,7 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                                 "action": "progress",
                                 "progress_path": str(progress_path),
                                 "phase_total": 4,
+                                "excel_lock": True,
                                 "no_native_window": True,
                                 "progress_poll_ms": 40,
                                 "progress_bar_creep_pct": 2,
@@ -1382,16 +1385,6 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                             progress_dlg = mod.create_dialog(
                                 progress_req_dict, parent_hwnd, sheet_id
                             )
-                            try:
-                                from ui_qt.ui_common import (
-                                    install_ribbon_startup_wait_dismiss_on_first_show,
-                                )
-
-                                install_ribbon_startup_wait_dismiss_on_first_show(
-                                    progress_dlg
-                                )
-                            except Exception:
-                                pass
                             if hasattr(progress_dlg, "show"):
                                 progress_dlg.show()
                                 logger.debug(

@@ -503,6 +503,7 @@ def _process_one(req_path: Path) -> None:
     res_path = _new_res_path(req_path)
     action = ""
     handler_ok = False
+    excel_hwnd = 0
     try:
         req = _read_pickle(req_path)
         action = str(req.get("action", "")).strip()
@@ -573,11 +574,11 @@ def _process_one(req_path: Path) -> None:
             if action in SVC_ACTIONS_NOTIFY_WAITFORM_AFTER_HANDLER:
                 from core.core_cursor import notify_wait_form_ready
 
-                notify_wait_form_ready()
+                notify_wait_form_ready(parent_hwnd=excel_hwnd)
             elif action == "data_agg" and not handler_ok:
                 from core.core_cursor import notify_wait_form_ready
 
-                notify_wait_form_ready()
+                notify_wait_form_ready(parent_hwnd=excel_hwnd)
         except Exception:
             pass
         try:

@@ -240,7 +240,8 @@
         "DEFAULT_HEIGHT": 0,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
-        "TOPMOST": false
+        "TOPMOST": false,
+        "EXCEL_LOCK": false
       }
     },
     "WARNING": {

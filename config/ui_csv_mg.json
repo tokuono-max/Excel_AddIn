@@ -318,7 +318,8 @@
           "DEFAULT_WIDTH": 0,
           "DEFAULT_HEIGHT": 0,
           "SHOW_IN_TASKBAR": false,
-          "TOPMOST": true
+          "TOPMOST": true,
+          "EXCEL_LOCK": false
         },
         "ICON": "Information",
         "ICON_SIZE": "M",
