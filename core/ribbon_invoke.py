@@ -3,14 +3,15 @@
 Python: 3.12+
 Module: core.ribbon_invoke
 Created: 2025-11-28 (logic from ルート hc_main / hc_invoke)
-Updated: 2026-04-11 (JST)
-Version: 1.12.0
+Updated: 2026-06-07
+Version: 1.12.1
 Purpose:
     xlwings 短寿命プロセスからの invoke / register_book / clear_registry（司令塔）。
     フェーズ C で `core/` に移設。ルート `hc_main.py` は常駐ブリッジ専用。
     VBA からの公開入口は **core.excel_session** 経由。リボン tag と action は同一文字列。
 
 History (latest 3):
+  - 1.12.1 (2026-06-07): xlwings 先行 import（起動時スレッド prewarm）を追加。
   - 1.12.0 (2026-04-11) `hc_invoke.py` から `core/ribbon_invoke.py` へ移設。診断ロガー `hc_csv_tool.diag.ribbon_invoke`。
   - 1.11.9 (2026-04-11) ルート hc_invoke.py。_invoke_simple_svc / _invoke_csv_family 集約。
   - 1.11.8 (2026-04-11) invoke finally の WaitForm 通知対象を ribbon_public_to_svc に集約。
@@ -43,7 +44,7 @@ from core.ribbon_public_to_svc import (
     RIBBON_TARGET_SVC_ACTION_KEYS,
 )
 
-__version__ = "1.12.0"
+__version__ = "1.12.1"
 
 logger = get_logger(__name__)
 
@@ -429,6 +430,50 @@ def _start_excel_lifecycle_monitor(excel_hwnd: int) -> None:
 
 
 # =============================================================================
+# xlwings 先行 import（起動時: 子プロセス spawn 待ちと並行）
+# =============================================================================
+_xlwings_prewarm_lock = threading.Lock()
+_xlwings_prewarm_started = False
+_xlwings_prewarm_done = threading.Event()
+
+
+def start_xlwings_import_prewarm() -> None:
+    """import xlwings のみをバックグラウンドで実行（COM 操作は行わない）。"""
+    global _xlwings_prewarm_started
+    with _xlwings_prewarm_lock:
+        if _xlwings_prewarm_started:
+            return
+        _xlwings_prewarm_started = True
+
+        def _worker() -> None:
+            try:
+                import xlwings as xw  # noqa: F401
+            except Exception as ex:
+                logger.debug("[XLWINGS_PREWARM] import failed: %r", ex)
+            finally:
+                _xlwings_prewarm_done.set()
+
+        threading.Thread(
+            target=_worker,
+            name="xlwings-import-prewarm",
+            daemon=True,
+        ).start()
+
+
+def wait_xlwings_import_prewarm(timeout_sec: float = 120.0) -> None:
+    """prewarm 完了を待つ。未開始なら同期的 import にフォールバック。"""
+    if not _xlwings_prewarm_started:
+        import xlwings as xw  # noqa: F401
+        _xlwings_prewarm_done.set()
+        return
+    if _xlwings_prewarm_done.wait(timeout=max(0.0, float(timeout_sec))):
+        return
+    logger.warning("[XLWINGS_PREWARM] wait timeout; sync import fallback")
+    import xlwings as xw  # noqa: F401
+    _xlwings_prewarm_done.set()
+
+
+# =============================================================================
 # 内部補助：自己修復登録ロジック
 # =============================================================================
 def _ensure_book(target_hwnd: Optional[int]) -> Optional[Any]:
@@ -443,7 +488,8 @@ def _ensure_book(target_hwnd: Optional[int]) -> Optional[Any]:
         # 命令分離。
         return None
 
-    import xlwings as xw  # 遅延 import（RunPython 短寿命プロセスの起動コスト低減）
+    wait_xlwings_import_prewarm()
+    import xlwings as xw  # 遅延 import（prewarm 済みなら即 return）
 
     plog = get_perf_logger(f"{__name__}.ribbon_invoke")
     t_ensure = time.perf_counter()

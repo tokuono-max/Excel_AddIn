@@ -4,9 +4,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: Main (標準モジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-06-06
+' 更新日: 2026-06-07
 ' 文字コード: 本モジュールは Shift-JIS（CP932）で保存すること（日本語コメント・文字列の破損防止）。
 ' 改版番号および履歴:
+'   2.15.0 (2026-06-07) [終了] ShutdownExcelUiCleanup: excel_shutdown_workbook_close 1 回化（restore/shutdown/registry を 1 RunPython）。
 '   2.14.0 (2026-06-06) [UX] WaitForm: bridge 後 WaitForUiReadySignal（ready ファイル待ち・VBA 内 NotifyUiReady）。
 '   2.13.0 (2026-06-06) [UX] ForceCursorOnProgress: 進捗ダイアログ表示時の砂時計 ON。保険タイマなし。外部 Python から Application.Run で呼ぶ（ProgressDialog show/teardown のみ制御）。
 '   2.12.0 (2026-06-03) [終了] ShutdownExcelUiCleanup: shutdown_all_with_force_kill('excel_shutdown') を追加。
@@ -532,9 +533,10 @@ End Sub
 ' ---------------------------------------------------------------------------------------------------------------------
 ' プロシージャ名: ShutdownExcelUiCleanup
 ' 改版番号および履歴:
+'   1.2.0 (2026-06-07) excel_shutdown_workbook_close 1 回化（restore/shutdown/registry clear）。
 '   1.1.0 (2026-05-31) Python restore_excel_host_ui_state 呼び出し・EnableEvents 復元を追加。
 '   1.0.0 (2026-05-30) Excel 終了時: WaitForm/OnTime/Interactive/ScreenUpdating の復元。
-' プロシージャの動作概要: アドイン終了直前に VBA 側の待機 UI と OnTime を解除し、Excel 操作状態を戻す。
+' プロシージャの動作概要: アドイン終了直前に VBA 側 UI を復元し、Python 終了を 1 回の RunPython で実行。
 ' 呼出し例: Call Main.ShutdownExcelUiCleanup
 ' ヘルパープロシージャの親子関係: (子) HC_WaitForm.NotifyUiReady, CancelCursorGuardTimer, xlwings.RunPython
 ' ---------------------------------------------------------------------------------------------------------------------
@@ -554,10 +556,8 @@ Public Sub ShutdownExcelUiCleanup()
     If Not ActiveSheet Is Nothing Then
         sId = ExcelUtil.GetSheetIdSafe(ActiveSheet)
     End If
-    sCmd = "from core.excel_host_restore import restore_excel_host_ui_state; restore_excel_host_ui_state(" _
-        & CStr(hwnd) & ", '" & PyEscSq(sId) & "')"
-    RunPython sCmd
-    sCmd = "from svc.svc_host import shutdown_all_with_force_kill; shutdown_all_with_force_kill('excel_shutdown')"
+    sCmd = "from svc.svc_host import excel_shutdown_workbook_close; excel_shutdown_workbook_close(" _
+        & CStr(hwnd) & ", '" & PyEscSq(sId) & "', 'excel_shutdown')"
     RunPython sCmd
     Call HC_Log.Info("Main", "ShutdownExcelUiCleanup done")
     On Error GoTo 0

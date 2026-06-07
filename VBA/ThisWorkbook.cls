@@ -12,8 +12,9 @@ Option Explicit
 ' ---------------------------------------------------------------------------------------------------------------------
 ' モジュール名: ThisWorkbook (クラスモジュール)
 ' 作成日: 2025-11-28
-' 更新日: 2026-06-03
+' 更新日: 2026-06-07
 ' 改版番号および履歴:
+'   1.9.8 (2026-06-07) [起動] LogInstalledAddins を startup_full RunPython 後へ遅延。
 '   1.9.7 (2026-06-01) [保守] モジュールコメント・本文を CP932 正本から復旧（UTF-8 混入による文字化け修復）。
 '   1.9.6 (2026-05-30) [終了] BeforeClose で Main.ShutdownExcelUiCleanup を呼び出し（OnTime 残留・Interactive 復元）。
 '   1.9.5 (2026-02-01) [最終仕様確定] 起動時の環境情報（Ver/Path）および全アドイン走査ログ機能を完全統合。
@@ -69,11 +70,6 @@ Private Sub Workbook_Open()
     Call ThisWorkbook.LogEnvironmentInfo
     Call HC_StartupPerf.StartupPerfMark("after_log_environment_info")
     
-    ' 4. インストール済みアドインの走査。
-    ' # 【目的】起動時点での Excel 環境（有効な他アドインのリスト）を詳細を把握するため。
-    Call ThisWorkbook.LogInstalledAddins
-    Call HC_StartupPerf.StartupPerfMark("after_log_installed_addins")
-    
     ' UI_SERVERの起動 → 二重起動の可能性があるため移行コメントアウト
     ' Dim UISERVER As String
     
@@ -99,6 +95,12 @@ Private Sub Workbook_Open()
     End If
     Call HC_StartupPerf.StartupPerfMark("after_runpython_startup_full")
     
+    ' 4. インストール済みアドインの走査（RunPython 後・起動ブロック短縮）。
+    ' # 【目的】起動時点での Excel 環境（有効な他アドインのリスト）を詳細を把握するため。
+    Call ThisWorkbook.LogInstalledAddins
+    Call HC_StartupPerf.StartupPerfMark("after_log_installed_addins")
+    
+    
     ' 5. 非同期初期化シーケンスの予約。
     ' # 【目的】Excel 本体が Ready 状態（アイドル）になるのを待ってから初期化を執行するため。
     
@@ -114,6 +116,7 @@ End Sub
 ' コールバック名: Workbook_BeforeClose
 ' 作成日: 2026-02-01
 ' 改版番号および履歴:
+'   1.0.4 (2026-06-07) [終了] 終了 RunPython を ShutdownExcelUiCleanup 1 回に統合（重複 shutdown 削除）。
 '   1.0.3 (2026-06-03) shutdown_all_with_force_kill に変更。
 '   1.0.2 (2026-05-31) Main.ShutdownExcelUiCleanup 1.1.0（EnableEvents・Python 復元）に追随。本クラスは呼び出しのみ。
 '   1.0.1 (2026-05-30) ShutdownExcelUiCleanup 呼び出しを追加。
@@ -132,21 +135,10 @@ Private Sub Workbook_BeforeClose(ByRef Cancel As Boolean)
     ' # 【目的】メモリリークを防止し、アプリケーションレベルのフックを安全に解除するため。
     Set mSensor = Nothing
 
-    ' 2b. VBA 側 UI / OnTime の解除（WaitForm・CursorGuard・Interactive）。
+    ' 2b. VBA 側 UI / OnTime の解除 + Python 終了（restore / shutdown / registry clear を 1 回の RunPython）。
     Call Main.ShutdownExcelUiCleanup
 
-    ' 3．Python/Qt側へ終了要求（共通基盤）
-    Dim PYSHUT As String
-    PYSHUT = "from svc import svc_host; svc_host.shutdown_all_with_force_kill('workbook_before_close')"
-    
-    Call HC_Log.Info("ThisWorkbook", "ui_server shutdown:" & PYSHUT)
-    Call RunPython(PYSHUT)
-    
-    ' 4. Python 側資源の物理抹消。
-    ' # 【目的】Python プロセス側に残存するブック参照やキャッシュをクリアするため。
-    Call Main.TerminatePython
-    
-    ' 5. 正常終了の記録。
+    ' 3. 正常終了の記録。
     ' # 【目的】すべての終了工程が欠損なく完遂された事実を証明するため。
     Call HC_Log.Info("ThisWorkbook", "SHUTDOWN: Cleanup completed successfully.")
     

@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
-Updated: 2026-06-03
-Version: 0.4.30
+Updated: 2026-06-07
+Version: 0.4.32
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
@@ -13,6 +13,8 @@ Purpose:
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.32 (2026-06-07): 起動短縮 — svc/ui/bridge 並列 spawn、xlwings 先行 import 連携。
+  - 0.4.31 (2026-06-07): excel_shutdown_workbook_close 追加（終了 RunPython 1 回化）。shutdown 待機をポーリング化（早期終了）。
   - 0.4.30 (2026-06-03): shutdown_all_with_force_kill 追加（フラグ終了後に hc_main/svc_server/ui_server の pythonw を taskkill）。
   - 0.4.29 (2026-04-19): Packaged EXE 配置を ``HC_INSTALL_ROOT\\app\\bin\\`` に統一。子プロセス PATH は ``app\\bin`` + インストールルート。
   - 0.4.28 (2026-04-19): Packaged 子プロセスの env に ``app\\shared``・``app`` を PATH 先頭追加（python312.dll 等のローダ解決）。
@@ -46,7 +48,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.30"
+__version__ = "0.4.32"
 import os
 import shlex
 import subprocess
@@ -157,21 +159,9 @@ def _excel_startup_svc_ui_bridge_register(target_hwnd: int, perf_prefix: str) ->
                 perf_prefix,
                 int((time.perf_counter() - t0) * 1000),
             )
-        ensure_svc_server()
+        ensure_svc_ui_bridge_parallel()
         plog.info(
-            "%s phase=after_ensure_svc_server cumulative_ms=%d",
-            perf_prefix,
-            int((time.perf_counter() - t0) * 1000),
-        )
-        ensure_ui_server()
-        plog.info(
-            "%s phase=after_ensure_ui_server cumulative_ms=%d",
-            perf_prefix,
-            int((time.perf_counter() - t0) * 1000),
-        )
-        ensure_bridge()
-        plog.info(
-            "%s phase=after_ensure_bridge cumulative_ms=%d",
+            "%s phase=after_ensure_svc_ui_bridge cumulative_ms=%d",
             perf_prefix,
             int((time.perf_counter() - t0) * 1000),
         )
@@ -763,6 +753,111 @@ def ensure_bridge() -> None:
             pass
 
 
+_STARTUP_SPAWN_FLAG_TTL_SEC = 5.0
+_SVC_STARTING_FLAG = "svc_server_starting.flag"
+_UI_STARTING_FLAG = "ui_server_starting.flag"
+_BRIDGE_STARTING_FLAG = "bridge_starting.flag"
+
+
+def _control_flag_path(name: str) -> Path:
+    ipc_root = Path(str(ipc_file.get_ipc_root()))
+    return ipc_root / "control" / name
+
+
+def _clear_control_flags(*names: str) -> None:
+    for name in names:
+        try:
+            p = _control_flag_path(name)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
+
+def _spawn_server_if_needed(
+    is_running: Callable[[], bool],
+    spawn_fn: Callable[[], None],
+    flag_name: str,
+    log_label: str,
+) -> None:
+    """未起動なら spawn のみ（mutex 待ちは呼び出し側で一括）。"""
+    if is_running():
+        logger.info("%s already running (mutex exists)", log_label)
+        return
+    flag = _control_flag_path(flag_name)
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    if flag.exists() and (time.time() - flag.stat().st_mtime) < _STARTUP_SPAWN_FLAG_TTL_SEC:
+        logger.info("%s startup in progress (flag exists); skip spawn", log_label)
+        return
+    flag.write_text(str(int(time.time() * 1000)), encoding="utf-8")
+    spawn_fn()
+
+
+def _wait_until_all_running(
+    checks: list[tuple[Callable[[], bool], str]],
+    *,
+    max_wait_sec: float = _MUTEX_WAIT_SEC,
+    poll_sec: float = 0.02,
+) -> None:
+    """複数常駐プロセスの mutex を一括待ち（並列 spawn 後）。"""
+    t0 = time.time()
+    while time.time() - t0 < max_wait_sec:
+        if all(fn() for fn, _ in checks):
+            return
+        time.sleep(poll_sec)
+    time.sleep(_MUTEX_GRACE_SEC)
+    if all(fn() for fn, _ in checks):
+        for _fn, label in checks:
+            logger.info("%s mutex observed after grace wait", label)
+        return
+    missing = [label for fn, label in checks if not fn()]
+    logger.warning(
+        "[HOST_STARTUP] parallel spawn mutex not observed yet: %s",
+        ",".join(missing),
+    )
+
+
+def ensure_svc_ui_bridge_parallel() -> None:
+    """svc / ui / bridge を並列 spawn し、xlwings prewarm と並行して mutex を待つ。"""
+    from core.ribbon_invoke import start_xlwings_import_prewarm
+
+    clear_shutdown_flags("ensure_svc_ui_bridge_parallel")
+    start_xlwings_import_prewarm()
+    try:
+        _spawn_server_if_needed(
+            is_svc_server_running,
+            spawn_svc_server,
+            _SVC_STARTING_FLAG,
+            "[SVC_SERVER]",
+        )
+        _spawn_server_if_needed(
+            is_ui_server_running,
+            spawn_ui_server,
+            _UI_STARTING_FLAG,
+            "[QT_UI_SERVER]",
+        )
+        _spawn_server_if_needed(
+            is_bridge_running,
+            spawn_bridge,
+            _BRIDGE_STARTING_FLAG,
+            LOG_MAIN_PREFIX,
+        )
+        _wait_until_all_running(
+            [
+                (is_svc_server_running, "[SVC_SERVER]"),
+                (is_ui_server_running, "[QT_UI_SERVER]"),
+                (is_bridge_running, LOG_MAIN_PREFIX),
+            ],
+            poll_sec=0.02,
+        )
+    finally:
+        _clear_control_flags(
+            _SVC_STARTING_FLAG,
+            _UI_STARTING_FLAG,
+            _BRIDGE_STARTING_FLAG,
+        )
+
+
 def ensure_svc_server() -> None:
     """起動済みなら何もしない。未起動なら spawn する（別プロセス常駐）。"""
     clear_shutdown_flags("ensure_svc_server")
@@ -923,15 +1018,68 @@ def _list_hc_python_target_pids(project_root: Path) -> list[int]:
     return pids
 
 
+def excel_shutdown_workbook_close(
+    target_hwnd: int,
+    sheet_id: str = "",
+    reason: str = "excel_shutdown",
+) -> None:
+    """Workbook_BeforeClose 用: 1 回の RunPython で restore / shutdown / registry clear まで完了する。"""
+    from core.excel_host_restore import restore_excel_host_ui_state
+    from core.excel_session import clear_internal_registry
+
+    plog = get_perf_logger(f"{__name__}.excel_shutdown")
+    t0 = time.perf_counter()
+    plog.info("shutdown phase=enter cumulative_ms=0 hwnd=%s", int(target_hwnd or 0))
+    restore_excel_host_ui_state(int(target_hwnd or 0), str(sheet_id or ""))
+    plog.info(
+        "shutdown phase=after_restore cumulative_ms=%d",
+        int((time.perf_counter() - t0) * 1000),
+    )
+    shutdown_all_with_force_kill(reason)
+    plog.info(
+        "shutdown phase=after_shutdown cumulative_ms=%d",
+        int((time.perf_counter() - t0) * 1000),
+    )
+    clear_internal_registry()
+    plog.info(
+        "shutdown phase=done cumulative_ms=%d",
+        int((time.perf_counter() - t0) * 1000),
+    )
+
+
+_SHUTDOWN_GRACE_MAX_SEC: float = 1.2
+_SHUTDOWN_POLL_INTERVAL_SEC: float = 0.15
+
+
+def _shutdown_grace_wait_for_targets(
+    project_root: Path,
+    self_pid: int,
+    *,
+    max_wait_sec: float = _SHUTDOWN_GRACE_MAX_SEC,
+    poll_interval_sec: float = _SHUTDOWN_POLL_INTERVAL_SEC,
+) -> list[int]:
+    """shutdown フラグ書込後、常駐プロセスが自然終了するまで短い間隔で待つ（最大 max_wait_sec）。"""
+    deadline = time.monotonic() + max(0.0, float(max_wait_sec))
+    interval = max(0.05, float(poll_interval_sec))
+    target_pids = [
+        p for p in _list_hc_python_target_pids(project_root) if p != self_pid
+    ]
+    while target_pids and time.monotonic() < deadline:
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+        target_pids = [
+            p for p in _list_hc_python_target_pids(project_root) if p != self_pid
+        ]
+    return target_pids
+
+
 def shutdown_all_with_force_kill(reason: str = "excel_shutdown") -> None:
     """通常 shutdown 要求 + 残留 Python 常駐プロセスのフェイルセーフ終了。"""
     request_shutdown_all()
     if os.name != "nt":
         return
-    time.sleep(1.2)
     project_root = Path(__file__).resolve().parent.parent
     self_pid = os.getpid()
-    target_pids = [p for p in _list_hc_python_target_pids(project_root) if p != self_pid]
+    target_pids = _shutdown_grace_wait_for_targets(project_root, self_pid)
     killed = 0
     for pid in target_pids:
         if _safe_kill_pid_windows(pid):
