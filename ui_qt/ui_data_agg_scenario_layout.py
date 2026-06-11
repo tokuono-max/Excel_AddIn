@@ -764,6 +764,7 @@ def build_scenario_detail_cell_scroll(
         ext_opts = [
             {"tag": ".xls", "label": "xls", "default_checked": True},
             {"tag": ".xlsx", "label": "xlsx", "default_checked": True},
+            {"tag": ".xlsm", "label": "xlsm", "default_checked": True},
         ]
     for ent in ext_opts:
         if not isinstance(ent, dict):

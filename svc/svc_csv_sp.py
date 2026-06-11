@@ -4,12 +4,14 @@ Python: 3.10+
 Module: svc/svc_csv_sp.py
 Created: 2026-03-05
 Updated: 2026-06-04
-Version: 2.5.4
+Version: 2.5.5
 Purpose:
   CSVファイル分割（選択行による範囲分割）。アクティブシートの選択行を境界に分割し、
   各範囲をヘッダ付きで UTF-8(BOM) CSV として保存。データ不足時は Excel 中央でワーニング通知。
 
 History (latest 3):
+  - 2.5.6 (2026-06-06) 分割保存ループを suspend(restore_on_exit=False) 内で実行。DONE+wait も suspend 内。
+  - 2.5.5 (2026-06-06) ハング緩和: DONE 後に wait_after_progress_done（固定 sleep から置換）。
   - 2.5.4 (2026-06-06) 分割保存進捗（分割開始後）で excel_lock=True。保存中 Excel 操作無効。
   - 2.5.3 (2026-06-04) 保存: 通常 CSV 保存と同様、既定で表示文字列（Copy→クリップボード）でヘッダ・分割範囲を読込。HC_CSV_SV_USE_VALUE_READ=1 で .value 経路。
   - 2.5.2 (2026-06-04) 分割保存処理中の砂時計 ON（出力先確定後〜完了）。保存ループで tick 再武装。
@@ -40,6 +42,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -49,6 +52,7 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger
+from core.core_progress_wait import wait_after_progress_done
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
 from core.core_cursor import notify_wait_form_ready
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
@@ -56,7 +60,7 @@ from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
 _sp_diag = get_diag_logger("hc_csv_tool.diag.csv_sp")
-__version__ = "2.5.4"
+__version__ = "2.5.6"
 
 _SP_CFG_CACHE: dict[str, Any] | None = None
 
@@ -1051,68 +1055,91 @@ def split_csv(
     t_save_loop0 = time.perf_counter()
     total_size_bytes = 0
     logger.info("[CSV_SP] phase=split_save_loop_enter display_text=%s files=%s", use_display_text, len(plans))
-    for p in plans:
-        start_row = int(p["start_row"])
-        end_row = int(p["end_row"])
-        phase_i = int(p["phase_i"])
-        row_count = int(p["row_count"])
-        file_name = str(p["file_name"])
-        out_path = os.path.join(output_dir, file_name)
+    try:
+        with (xlc.suspend_sheet_updates(ptr_s, restore_on_exit=False) if xlc else nullcontext()):
+            for p in plans:
+                start_row = int(p["start_row"])
+                end_row = int(p["end_row"])
+                phase_i = int(p["phase_i"])
+                row_count = int(p["row_count"])
+                file_name = str(p["file_name"])
+                out_path = os.path.join(output_dir, file_name)
 
-        _progress_write({
-            "status": "RUN",
-            "phase_i": phase_i,
-            "phase_total": phase_total,
-            "phase": "保存中",
-            "current_file": file_name,
-            "done": phase_i,
-            "total": phase_total,
-            "pct": int(100 * (phase_i - 1) / phase_total) if phase_total else 0,
-        })
+                _progress_write({
+                    "status": "RUN",
+                    "phase_i": phase_i,
+                    "phase_total": phase_total,
+                    "phase": "保存中",
+                    "current_file": file_name,
+                    "done": phase_i,
+                    "total": phase_total,
+                    "pct": int(100 * (phase_i - 1) / phase_total) if phase_total else 0,
+                })
 
-        try:
-            rows = _sp_read_body_rows(
-                ptr_s,
-                start_row,
-                end_row,
-                ncols,
-                use_display_text=use_display_text,
-            )
-            with open(out_path, "w", encoding="utf-8-sig", newline="", errors="replace") as f:
-                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                writer.writerow(headers)
-                for row in rows:
-                    writer.writerow(row)
-            success_count += 1
+                try:
+                    rows = _sp_read_body_rows(
+                        ptr_s,
+                        start_row,
+                        end_row,
+                        ncols,
+                        use_display_text=use_display_text,
+                    )
+                    with open(out_path, "w", encoding="utf-8-sig", newline="", errors="replace") as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+                        writer.writerow(headers)
+                        for row in rows:
+                            writer.writerow(row)
+                    success_count += 1
+                    try:
+                        size_bytes = int(os.path.getsize(out_path))
+                    except Exception:
+                        size_bytes = 0
+                    total_size_bytes += max(0, size_bytes)
+                    done_items.append(
+                        {
+                            "no": phase_i,
+                            "name": os.path.basename(out_path),
+                            "rows": row_count,
+                            "size_bytes": size_bytes,
+                        }
+                    )
+                    logger.info("[CSV_SP] 保存完了 file=%s rows=%s size_bytes=%s", file_name, row_count, size_bytes)
+                except Exception as e:
+                    logger.warning("[CSV_SP] 書込失敗 ファイル=%s: %s", os.path.basename(out_path), e)
+
+                done_accum += row_count
+                pct = min(99, int(100 * done_accum / total_rows)) if total_rows else 99
+                _progress_write({
+                    "status": "RUN",
+                    "phase_i": phase_i,
+                    "phase_total": phase_total,
+                    "phase": "保存中",
+                    "current_file": file_name,
+                    "done": done_accum,
+                    "total": total_rows,
+                    "pct": pct,
+                })
+
+            _progress_write({
+                "status": "DONE",
+                "phase_i": phase_total,
+                "phase_total": phase_total,
+                "done": total_rows,
+                "total": total_rows,
+                "pct": 100,
+                "show_done_dialog": True,
+                "done_items": done_items,
+                "total_size_bytes": total_size_bytes,
+                "output_dir": output_dir,
+            })
+            wait_after_progress_done(min_sec=_DONE_DISPLAY_SEC + 0.5)
+    finally:
+        if xlc is not None:
             try:
-                size_bytes = int(os.path.getsize(out_path))
+                xlc.restore_screen_updating(ptr_s)
             except Exception:
-                size_bytes = 0
-            total_size_bytes += max(0, size_bytes)
-            done_items.append(
-                {
-                    "no": phase_i,
-                    "name": os.path.basename(out_path),
-                    "rows": row_count,
-                    "size_bytes": size_bytes,
-                }
-            )
-            logger.info("[CSV_SP] 保存完了 file=%s rows=%s size_bytes=%s", file_name, row_count, size_bytes)
-        except Exception as e:
-            logger.warning("[CSV_SP] 書込失敗 ファイル=%s: %s", os.path.basename(out_path), e)
+                pass
 
-        done_accum += row_count
-        pct = min(99, int(100 * done_accum / total_rows)) if total_rows else 99
-        _progress_write({
-            "status": "RUN",
-            "phase_i": phase_i,
-            "phase_total": phase_total,
-            "phase": "保存中",
-            "current_file": file_name,
-            "done": done_accum,
-            "total": total_rows,
-            "pct": pct,
-        })
     save_loop_ms = _elapsed_ms(t_save_loop0)
     logger.info(
         "[CSV_SP] phase=split_save_loop_done save_loop_ms=%s files=%s elapsed_ms=%s",
@@ -1126,20 +1153,6 @@ def split_csv(
         time.perf_counter(),
     )
 
-    _progress_write({
-        "status": "DONE",
-        "phase_i": phase_total,
-        "phase_total": phase_total,
-        "done": total_rows,
-        "total": total_rows,
-        "pct": 100,
-        "show_done_dialog": True,
-        "done_items": done_items,
-        "total_size_bytes": total_size_bytes,
-        "output_dir": output_dir,
-    })
-
-    time.sleep(_DONE_DISPLAY_SEC + 0.5)
     # 完了通知は ProgressDialog の DONE pickle（show_done_dialog）に統一。分割画面の exec 解放は partner_widget_after_done
 
     ranges_str = ",".join(f"{int(p['start_row'])}-{int(p['end_row'])}" for p in plans)

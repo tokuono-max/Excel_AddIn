@@ -4,12 +4,14 @@ Python: 3.10+
 Module: svc/svc_hd_nr
 Created: 2026-03-05
 Updated: 2026-04-06
-Version: 2.4.7
+Version: 2.4.8
 Purpose:
   行整形（ヘッダブロック横結合）。選択行をヘッダブロックとし、行を横列に結合してデータ領域を整形する。
   データ領域は一括読込→メモリ内で一括 reshape（numpy）→一括書込で高速化。チャンクループは行わない。  UI: ui_hd_nr + ui_common。JSON: config/ui_hd_nr.json。
 
 History (latest 3):
+  - 2.4.9 (2026-06-06) ハング緩和: clear/autofit/DONE を suspend with 内に統一（indent 修正）。
+  - 2.4.8 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
   - 2.4.7 (2026-04-06) HC_LOG_PERF: [HD_NR_PERF] phase / cumulative_ms。診断: [HD_NR_TRACE]。
   - 2.4.6 (2026-03-10) 不足セル背景: 範囲単位の range.color = (r,g,b) のみに簡略化（セル単位フォールバック削除）。
   - 2.4.5 (2026-03-10) 不足セル: ジャンプと背景色を分離。ジャンプ失敗時も背景色を実行。
@@ -33,13 +35,14 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger
+from core.core_progress_wait import wait_after_progress_done
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle
 from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
 _hd_nr_diag = get_diag_logger("hc_csv_tool.diag.hd_nr")
 _perf_hd_nr = get_perf_logger("svc.svc_hd_nr.perf")
-__version__ = "2.4.7"
+__version__ = "2.4.9"
 
 
 def _elapsed_ms_hd_nr(since: float) -> int:
@@ -580,87 +583,97 @@ def insert_header(
     _perf_nr("after_reshape", t_flow, out_rows=len(output_2d))
     _trace_hd_nr("after_reshape", t_flow, out_rows=len(output_2d))
 
-    # 一括書込（表示停止→処理→更新再開で高速化）。データはヘッダ次の行から。
+    # 一括書込（ScreenUpdating 復帰は DONE 後に遅延）。データはヘッダ次の行から。
     data_start_write_row = header_first_row + 1
-    with xlc.suspend_sheet_updates(ptr_s):
-        if output_2d and xlc:
-            try:
-                xlc.write_chunk(ptr_s, data_start_write_row, 1, output_2d)
-            except Exception as e:
-                logger.exception("[HD_NR] 書込失敗: %s", e)
-                _perf_nr("abort_chunk_write", t_flow)
-                _trace_hd_nr("abort_chunk_write", t_flow)
-                if core_stat:
-                    try:
-                        core_stat.set_status_info(ptr_s, f"ERROR: 書込失敗 Detail: {e}")
-                    except Exception:
-                        pass
-                return
-
-        # 整形後の不要行（旧データの残り）をクリア（Ctrl+End がデータ領域内に収まるよう列も最大幅でクリア）
-        clear_from = data_start_write_row + len(output_2d)
-        out_rows = header_first_row + len(output_2d)  # 有効データ最終行（ヘッダ行 + データ行数）
-        out_cols = n_header * header_max_col
-        clear_cols = max(ncols, out_cols)
-        if clear_from <= last_row:
-            try:
-                rng_old = ptr_s.range((clear_from, 1), (last_row, clear_cols))
-                _clear_range(rng_old, clear_all=True)  # Ctrl+End 対策: 内容+書式を消して UsedRange を縮める
-            except Exception:
-                pass
-        # 有効データ範囲外の空欄列をクリア（右側の未使用列を消して UsedRange を拡大させない）
-        last_data_col = -1
-        for row in output_2d:
-            for c in range(len(row) - 1, -1, -1):
-                if row[c] is not None and str(row[c]).strip():
-                    last_data_col = max(last_data_col, c)
-                    break
-        if last_data_col >= 0 and last_data_col + 1 < out_cols:
-            try:
-                _clear_range(ptr_s.range((header_first_row, last_data_col + 2), (out_rows, out_cols)), clear_all=True)
-            except Exception:
-                pass
-        fit_cols = (last_data_col + 1) if last_data_col >= 0 else out_cols
-        # オートフィット・ウィンドウ固定は with の外で実行（表示更新 ON 時にしないと列幅が反映されない）
-    # Ctrl+End / Ctrl+↓ がデータ領域外に行かないよう、有効領域外を明示的にクリア
-    out_cols = n_header * header_max_col
-    last_data_col = -1
-    for row in output_2d:
-        for c in range(len(row) - 1, -1, -1):
-            if row[c] is not None and str(row[c]).strip():
-                last_data_col = max(last_data_col, c)
-                break
-    fit_cols = (last_data_col + 1) if last_data_col >= 0 else out_cols
-    if xlc and out_rows > 0 and fit_cols > 0:
-        try:
-            xlc.clear_used_range_overflow(ptr_s, out_rows, fit_cols)
-        except Exception:
-            pass
-    # 表示更新再開後にオートフィット・結合ヘッダ行で枠固定（10万セル以下でオートフィット実行）
+    out_rows = header_first_row + len(output_2d)
     try:
-        _autofit_output_range(ptr_s, out_rows, fit_cols or out_cols, sheet_name, start_row=header_first_row)
-        _freeze_first_row(ptr_s, freeze_after_row=header_first_row)
-    except Exception:
-        pass
-    _write_progress(3, _PROGRESS_PHASES, "シート書込み中")
+        with xlc.suspend_sheet_updates(ptr_s, restore_on_exit=False):
+            if output_2d and xlc:
+                try:
+                    xlc.write_chunk(ptr_s, data_start_write_row, 1, output_2d)
+                except Exception as e:
+                    logger.exception("[HD_NR] 書込失敗: %s", e)
+                    _perf_nr("abort_chunk_write", t_flow)
+                    _trace_hd_nr("abort_chunk_write", t_flow)
+                    if core_stat:
+                        try:
+                            core_stat.set_status_info(ptr_s, f"ERROR: 書込失敗 Detail: {e}")
+                        except Exception:
+                            pass
+                    return
+
+            # 整形後の不要行（旧データの残り）をクリア
+            clear_from = data_start_write_row + len(output_2d)
+            out_cols = n_header * header_max_col
+            clear_cols = max(ncols, out_cols)
+            if clear_from <= last_row:
+                try:
+                    rng_old = ptr_s.range((clear_from, 1), (last_row, clear_cols))
+                    _clear_range(rng_old, clear_all=True)
+                except Exception:
+                    pass
+            last_data_col = -1
+            for row in output_2d:
+                for c in range(len(row) - 1, -1, -1):
+                    if row[c] is not None and str(row[c]).strip():
+                        last_data_col = max(last_data_col, c)
+                        break
+            if last_data_col >= 0 and last_data_col + 1 < out_cols:
+                try:
+                    _clear_range(ptr_s.range((header_first_row, last_data_col + 2), (out_rows, out_cols)), clear_all=True)
+                except Exception:
+                    pass
+            fit_cols = (last_data_col + 1) if last_data_col >= 0 else out_cols
+            if xlc and out_rows > 0 and fit_cols > 0:
+                try:
+                    xlc.clear_used_range_overflow(ptr_s, out_rows, fit_cols)
+                except Exception:
+                    pass
+            try:
+                _autofit_output_range(ptr_s, out_rows, fit_cols or out_cols, sheet_name, start_row=header_first_row)
+                _freeze_first_row(ptr_s, freeze_after_row=header_first_row)
+            except Exception:
+                pass
+            _write_progress(3, _PROGRESS_PHASES, "シート書込み中")
+
+            if shortage_output_rows:
+                try:
+                    write_pickle(progress_path, {
+                        "status": "DONE",
+                        "phase_i": _PROGRESS_PHASES,
+                        "phase_total": _PROGRESS_PHASES,
+                        "done": _PROGRESS_PHASES,
+                        "total": _PROGRESS_PHASES,
+                        "pct": 100,
+                        "show_done_dialog": False,
+                    })
+                except Exception:
+                    pass
+                wait_after_progress_done(min_sec=0.5)
+            else:
+                try:
+                    write_pickle(progress_path, {
+                        "status": "DONE",
+                        "phase_i": _PROGRESS_PHASES,
+                        "phase_total": _PROGRESS_PHASES,
+                        "done": _PROGRESS_PHASES,
+                        "total": _PROGRESS_PHASES,
+                        "pct": 100,
+                        "show_done_dialog": True,
+                        "done_items": [{"no": 1, "name": "行整形", "rows": total_chunks}],
+                        "done_detail_text": f"シート名：{sheet_name}\\n整形ブロック数：{total_chunks}",
+                    })
+                except Exception:
+                    pass
+                wait_after_progress_done(min_sec=1.0)
+    finally:
+        xlc.restore_screen_updating(ptr_s)
+
     _perf_nr("after_sheet_write_and_fit", t_flow, out_rows=out_rows)
     _trace_hd_nr("after_sheet_write_and_fit", t_flow, out_rows=out_rows)
 
     if shortage_output_rows:
-        # 画面推移: ヘッダ確認 → 進捗 → 不足行表示。進捗画面を先に閉じてから不足行表示する。
-        try:
-            write_pickle(progress_path, {
-                "status": "DONE",
-                "phase_i": _PROGRESS_PHASES,
-                "phase_total": _PROGRESS_PHASES,
-                "done": _PROGRESS_PHASES,
-                "total": _PROGRESS_PHASES,
-                "pct": 100,
-                "show_done_dialog": False,
-            })
-        except Exception:
-            pass
-        time.sleep(0.3)  # 進捗画面が閉じるのを待つ
+        # 進捗クローズ後に不足行表示
         # 不足先頭セルにジャンプし、不足セル全てに背景色を付与（xlwings 基本形: range.color = (r, g, b)）
         try:
             ptr_s.activate()
@@ -722,22 +735,6 @@ def insert_header(
         shortage_lines = "、".join(f"{r}行" for r in shortage_output_rows)
         msg = f"不足発生行: {first_short}行\n不足行: {shortage_lines}"
         _submit_ui_and_wait(hwnd, sheet_id, "hd_nr_data_shortage", {"msg": msg})
-    else:
-        try:
-            write_pickle(progress_path, {
-                "status": "DONE",
-                "phase_i": _PROGRESS_PHASES,
-                "phase_total": _PROGRESS_PHASES,
-                "done": _PROGRESS_PHASES,
-                "total": _PROGRESS_PHASES,
-                "pct": 100,
-                "show_done_dialog": True,
-                "done_items": [{"no": 1, "name": "行整形", "rows": total_chunks}],
-                "done_detail_text": f"シート名：{sheet_name}\\n整形ブロック数：{total_chunks}",
-            })
-        except Exception:
-            pass
-        time.sleep(1.5)
 
     if w32 and hwnd:
             try:

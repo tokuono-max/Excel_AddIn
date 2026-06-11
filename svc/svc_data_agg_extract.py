@@ -10,6 +10,7 @@ Purpose:
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.9 (2026-06-03) .xlsm を OpenXML Excel（.xlsx と同経路）として読取。is_openxml_excel_suffix ヘルパ追加。
   - 0.1.8 (2026-05-29) Phase B: 大量反復シートの事前 materialize、反復読取の行列経路、join バッチ走査の行列化。
   - 0.1.6 (2026-04-07) extract_item_values: sources 空はファイル名ではなく主値 [""]（未設定列を一括出力で空にする）。
   - 0.1.5 (2026-04-04) read_only シートを iter_rows で一度具体化し ws[ref] の都度走査を避ける（スコープ内・繰り返し抽出）。
@@ -50,7 +51,14 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.6"
+__version__ = "0.1.9"
+
+_OPENXML_EXCEL_SUFFIXES = frozenset({".xlsx", ".xlsm"})
+
+
+def is_openxml_excel_suffix(suffix: str) -> bool:
+    """OpenPyXL で read_only 読取可能な Excel 拡張子（.xlsx / .xlsm）。"""
+    return (suffix or "").lower() in _OPENXML_EXCEL_SUFFIXES
 
 
 def _poll_cancel_check(
@@ -87,7 +95,7 @@ def _add_workbook_open_seconds(path_key: str, seconds: float) -> None:
 def consume_workbook_open_ms_for_path(file_path: str) -> int:
     """
     当該ファイルパスについてスコープ内で計測した openpyxl.load_workbook 合計を ms で返し、内部を消す。
-    .xlsx 以外や未ロード時は 0。
+    OpenXML Excel（.xlsx/.xlsm）以外や未ロード時は 0。
     """
     if not _per_file_workbook_timing_enabled():
         return 0
@@ -150,7 +158,7 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
     frame = _xlsx_workbook_cache_top()
     if frame is None:
         return None
-    if path.suffix.lower() != ".xlsx":
+    if not is_openxml_excel_suffix(path.suffix):
         return None
     wbs: dict[str, Any] = frame.setdefault("wbs", {})
     key = str(path.resolve())
@@ -609,7 +617,7 @@ def extract_cell(
     cell_ref: str = "A1",
 ) -> Any:
     """
-    指定ファイルのセル値を取得する。Excel (.xlsx) は OpenPyXL、CSV は csv モジュールで読む。
+    指定ファイルのセル値を取得する。Excel (.xlsx/.xlsm) は OpenPyXL、CSV は csv モジュールで読む。
 
     【概要】
       絶対位置のセル参照（例: "B5"）で値を返す。CSV の場合は sheet_name を無視し、先頭行を 1 として行・列で解釈する
@@ -629,7 +637,7 @@ def extract_cell(
     suf = p.suffix.lower()
     if suf == ".csv":
         return _get_csv_cell(p, cell_ref)
-    if suf in (".xlsx", ".xls"):
+    if is_openxml_excel_suffix(suf) or suf == ".xls":
         return _get_excel_cell(p, sheet_name, cell_ref)
     return None
 
@@ -695,7 +703,7 @@ def _get_excel_cell(
     sheet_name: Optional[str],
     cell_ref: str,
 ) -> Any:
-    """Excel ファイル（.xlsx）からセル値を取得する。.xls は未対応の場合は None。"""
+    """Excel ファイル（.xlsx/.xlsm）からセル値を取得する。.xls は未対応の場合は None。"""
     if path.suffix.lower() == ".xls":
         logger.debug("[DATA_AGG_EXTRACT] .xls は未対応: %s", path)
         return None
@@ -835,7 +843,7 @@ def precache_xlsx_workbook_sheets_for_items(
     if _xlsx_workbook_cache_top() is None:
         return
     p_abs = Path(file_path).resolve()
-    if p_abs.suffix.lower() != ".xlsx":
+    if not is_openxml_excel_suffix(p_abs.suffix):
         return
     sheets = _collect_xlsx_sheets_for_precache(items)
     if not sheets:
@@ -999,7 +1007,7 @@ def _xlsx_read_repeated_series_open_workbook(
     cancel_check: Optional[Callable[..., None]] = None,
 ) -> Optional[list[Any]]:
     """
-    反復セル抽出の高速経路（.xlsx/read_only）。
+    反復セル抽出の高速経路（OpenXML Excel / read_only）。
     xlsx_workbook_scope 内では materialize 済み行列から読む。
     それ以外は対象1列/1行の iter_rows で直接読み出す。
     非対応パターンは None を返し、呼び出し側で従来経路へフォールバックする。
@@ -1303,7 +1311,7 @@ def extract_item_values(
                 wb_ctx: Any = None
                 wb_owned = False
                 try:
-                    if p_abs.suffix.lower() == ".xlsx":
+                    if is_openxml_excel_suffix(p_abs.suffix):
                         wb_ctx = _xlsx_workbook_from_cache(p_abs)
                         if wb_ctx is None:
                             try:
@@ -1516,7 +1524,7 @@ def _extract_cell_rule_series_fast(
     cancel_check: Optional[Callable[..., None]] = None,
 ) -> Optional[list[Any]]:
     """
-    link/join ルールの反復値を高速取得する（.xlsx の典型セル座標パターン）。
+    link/join ルールの反復値を高速取得する（OpenXML Excel の典型セル座標パターン）。
     非対応時は None を返し、呼び出し側で既存の 1セルずつ取得へフォールバックする。
     """
     if n_src < 1:
@@ -1525,7 +1533,7 @@ def _extract_cell_rule_series_fast(
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
         return [postprocess_link_rule_value(rule.get("cell"), rule)] * n_src
     p_abs = Path(file_path).resolve()
-    if p_abs.suffix.lower() != ".xlsx":
+    if not is_openxml_excel_suffix(p_abs.suffix):
         return None
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
     c0, r0 = _parse_cell_ref(base_cell)
@@ -1589,7 +1597,7 @@ def _extract_cell_rules_series_fast_map(
     """
     複数 link/join ルールを 1 回の列範囲走査でまとめて取得する高速経路。
     対応条件（厳しめ）:
-      - .xlsx
+      - OpenXML Excel（.xlsx / .xlsm）
       - 非固定値ルールはすべて row=1,col=0（縦反復）
       - 非固定値ルールの基準行が同一
     非対応時は None（呼び出し側で既存経路へフォールバック）。
@@ -1602,7 +1610,7 @@ def _extract_cell_rules_series_fast_map(
     if n_src < 8:
         return None
     p_abs = Path(file_path).resolve()
-    if p_abs.suffix.lower() != ".xlsx":
+    if not is_openxml_excel_suffix(p_abs.suffix):
         return None
     if not isinstance(rules, list) or not rules:
         return {}

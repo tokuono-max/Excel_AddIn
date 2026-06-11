@@ -3,14 +3,15 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-06-04
-Version: 1.3.25
+Updated: 2026-06-06
+Version: 1.3.26
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.26 (2026-06-06) ハング緩和: DONE を ScreenUpdating 復帰前に書込・1秒待機。suspend restore_on_exit=False。
   - 1.3.25 (2026-06-06) 進捗表示中は excel_lock=True（読込中 Excel 操作無効）。完了時 teardown で解除。
   - 1.3.24 (2026-06-04) 読込終了時に EnableEvents=True を保証（core.excel_perf_mode / restore_excel_host_after_operation）。シート切替でステータスバー復帰。
   - 1.3.23 (2026-06-04) シート名: ファイル名を Excel 最大 31 文字・禁止文字除去に整形。分割時は -N 分を確保して切り詰め。
@@ -46,12 +47,13 @@ from typing import Any
 from core import core_env
 from core.core_log import get_diag_logger, get_logger
 from core.excel_host_restore import restore_excel_host_after_operation
+from core.core_progress_wait import wait_after_progress_done
 from core.excel_perf_mode import set_excel_performance_mode
 from core.core_cursor import notify_ui_ready, notify_wait_form_ready
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.25"
+__version__ = "1.3.26"
 
 
 def _log_jit_breakdown(
@@ -925,9 +927,9 @@ def _execute_jit_import(
                 _submit_progress_ui(parent_hwnd, sheet_id, progress_path, total_steps)
                 time.sleep(core_env.progress_window_startup_wait_sec())
 
-    # 一括書込みは表示停止で高速化（シート更新禁止→処理→更新再開）
+    # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に遅延）
     t_csv_read_wait0 = time.perf_counter()
-    with xlc.suspend_sheet_updates(book):
+    with xlc.suspend_sheet_updates(book, restore_on_exit=False):
         for df_chunk in reader:
             ms_csv_read_wait += _elapsed_ms(t_csv_read_wait0)
             t_csv_read_wait0 = time.perf_counter()
@@ -1107,6 +1109,37 @@ def _execute_jit_import(
                 if xlc:
                     xlc.yield_to_excel()
 
+        if progress_path is not None:
+            logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
+            data_rows = max(0, val_total - 1)
+            done_detail_text = (
+                f"シート名：{str_base_resolved}\n"
+                f"ファイル名：{str_fname or 'loaded.csv'}\n"
+                f"容量：{val_size_lbl}\n"
+                f"文字コード：{str_enc_lbl}\n"
+                f"データ：{data_rows} 行\n"
+                f"総数(ヘッダ含)：{val_total} 行"
+            )
+            _progress_write(
+                progress_path,
+                {
+                    "status": "DONE",
+                    "phase_i": total_steps,
+                    "phase": "完了",
+                    "done": prog_row_total,
+                    "total": prog_row_total,
+                    "pct": 100,
+                    "current_file": str_fname,
+                    "show_done_dialog": True,
+                    "done_items": [
+                        {"no": 1, "name": str_fname or "loaded.csv", "rows": val_total},
+                    ],
+                    "done_detail_text": done_detail_text,
+                    "seq": progress_seq,
+                },
+            )
+            wait_after_progress_done(min_sec=1.0)
+
     jit_total_ms = _elapsed_ms(t_jit_body0)
     _log_jit_breakdown(
         csv_read_wait_ms=ms_csv_read_wait,
@@ -1118,36 +1151,6 @@ def _execute_jit_import(
         jit_total_ms=jit_total_ms,
         fast_text_write=use_fast_text_write,
     )
-
-    if progress_path is not None:
-        logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
-        data_rows = max(0, val_total - 1)
-        done_detail_text = (
-            f"シート名：{str_base_resolved}\n"
-            f"ファイル名：{str_fname or 'loaded.csv'}\n"
-            f"容量：{val_size_lbl}\n"
-            f"文字コード：{str_enc_lbl}\n"
-            f"データ：{data_rows} 行\n"
-            f"総数(ヘッダ含)：{val_total} 行"
-        )
-        _progress_write(
-            progress_path,
-            {
-                "status": "DONE",
-                "phase_i": total_steps,
-                "phase": "完了",
-                "done": prog_row_total,
-                "total": prog_row_total,
-                "pct": 100,
-                "current_file": str_fname,
-                "show_done_dialog": True,
-                "done_items": [
-                    {"no": 1, "name": str_fname or "loaded.csv", "rows": val_total},
-                ],
-                "done_detail_text": done_detail_text,
-                "seq": progress_seq,
-            },
-        )
 
 
 def _do_load_csv(

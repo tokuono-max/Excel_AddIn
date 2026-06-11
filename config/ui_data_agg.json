@@ -107,7 +107,7 @@
       "GROUP_DETECTED_FILES": "検出ファイル一覧",
       "LABEL_DETECTED_FILE_COUNT_FMT": "ファイル数：%d",
       "MSG_SCAN_DONE": "%s 件のファイルを検出しました。",
-      "MSG_SCAN_SELECT_EXT": "拡張子を1つ以上選択してください。（.xls / .xlsx / .csv）",
+      "MSG_SCAN_SELECT_EXT": "拡張子を1つ以上選択してください。（.xls / .xlsx / .xlsm / .csv）",
       "MSG_SCAN_FAILED_FMT": "検索に失敗しました: %s",
       "MSG_FOLDER_SELECT_FAILED_FMT": "フォルダ選択に失敗しました: %s",
       "DIALOG_TITLE_ITEM_CSV": "項目定義CSVを選択",
@@ -186,6 +186,7 @@
       "SCENARIO_NAME_NOT_LOADED": "（未読込）",
       "CHK_EXT_XLS": ".xls",
       "CHK_EXT_XLSX": ".xlsx",
+      "CHK_EXT_XLSM": ".xlsm",
       "CHK_EXT_CSV": ".csv",
       "LABEL_MASTER_ACTIVE_SHEET": "アクティブシート",
       "TOOLTIP_DESC_MAIN": "データ集約の概要です。項目ごとの取得ルールと一括実行の入口です。",
@@ -213,6 +214,7 @@
       "TOOLTIP_LABEL_EXTENSIONS": "検索対象とする拡張子です。",
       "TOOLTIP_CHK_EXT_XLS": ".xls を検索対象に含めます。",
       "TOOLTIP_CHK_EXT_XLSX": ".xlsx を検索対象に含めます。",
+      "TOOLTIP_CHK_EXT_XLSM": ".xlsm を検索対象に含めます。",
       "TOOLTIP_CHK_EXT_CSV": ".csv を検索対象に含めます。",
       "TOOLTIP_BTN_SEARCH_RUN": "条件に従いファイル検索を行い、下の一覧を更新します。",
       "TOOLTIP_GROUP_DETECTED_FILES": "走査で見つかったファイルパスの一覧です。デバッグの入力にも使われます。",
@@ -318,9 +320,9 @@
         "MAX_VALUE_ROWS >= MASTER_PREVIEW_READ_ROWS の関係がベスト ",
         "SCENARIO_PROGRESS_MIN_FILES … シナリオデバッグで連携(3)／結合(4)フェーズのとき、検出ファイル数がこの件数以上ならファイル単位進捗ダイアログを出す。0 で常に出す（同一フェーズ内）。省略時はコード既定 15。"
       ],
-      "MAX_VALUE_ROWS": 550,
-      "MASTER_PREVIEW_READ_ROWS": 550,
-      "MASTER_PREVIEW_DISPLAY_ROWS": 500,
+      "MAX_VALUE_ROWS": 100,
+      "MASTER_PREVIEW_READ_ROWS": 100,
+      "MASTER_PREVIEW_DISPLAY_ROWS": 100,
       "MAX_PHASE_SLOTS": 16,
       "SCENARIO_PROGRESS_MIN_FILES": 5,
       "NAME_EXTRACT_DEBUG": {
@@ -678,6 +680,11 @@
           {
             "tag": ".xlsx",
             "label": "xlsx",
+            "default_checked": true
+          },
+          {
+            "tag": ".xlsm",
+            "label": "xlsm",
             "default_checked": true
           },
           {

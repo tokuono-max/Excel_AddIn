@@ -4,13 +4,15 @@ Python: 3.12+
 Module: svc/svc_data_agg_write.py
 Created: 2026-03-18
 Updated: 2026-04-14
-Version: 0.1.3
+Version: 0.1.4
 Purpose:
   データ集約用のマスター書き込み。行追加（append）・強制上書き（overwrite）・空き上書き（fill_in）と、
   照合キーによる行マッチを提供する。一括実行時は内部メモリで組み立てた表を終了時に一括出力、
   ステップ実行時は 1 項目分を都度反映する想定。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.5 (2026-06-03) read_master: .xlsm を OpenXML Excel として .xlsx と同経路で読込。
+  - 0.1.4 (2026-06-06) suspend_sheet_updates を restore_on_exit=False に（DONE 前の ScreenUpdating 復帰を呼び出し側に委譲）。
   - 0.1.3 (2026-04-14) write_scenario_export_table: 列幅・行の AutoFit をやめ、データ・ヘッダは折り返しなし（シナリオ定義の多列エクスポート向け）。
   - 0.1.2 (2026-04-07) データ集約レポート: 記録日時の右に「処理時間」列。一括サマリ行に wall 秒を表示。
   - 0.1.1 (2026-04-04) write_master_to_sheet に replace_full_block（Excel 上書き／指定セルのブロック置換）。
@@ -32,9 +34,10 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_logger  # noqa: E402
+from svc.svc_data_agg_extract import is_openxml_excel_suffix  # noqa: E402
 
 logger = get_logger(__name__)
-__version__ = "0.1.3"
+__version__ = "0.1.5"
 
 # data_agg は出力行数が大きくなりやすく、全行を対象にした AutoFit が重い。
 # 見た目（列幅）よりも「処理完了→Excel操作復帰」を優先し、一定行数超過時はヘッダ行のみ AutoFit に縮退する。
@@ -341,7 +344,7 @@ def read_master(path: str | Path) -> tuple[list[str], list[list[Any]]]:
     マスターファイルを読み、ヘッダ行とデータ行のリストを返す。
 
     【概要】
-      Excel (.xlsx) は OpenPyXL、CSV は csv モジュールで読む。先頭行をヘッダ、2 行目以降をデータとする。
+      Excel (.xlsx/.xlsm) は OpenPyXL、CSV は csv モジュールで読む。先頭行をヘッダ、2 行目以降をデータとする。
       ファイルが存在しない場合は空のヘッダ・空の行リストを返す。
 
     【引数】
@@ -356,7 +359,7 @@ def read_master(path: str | Path) -> tuple[list[str], list[list[Any]]]:
     suf = p.suffix.lower()
     if suf == ".csv":
         return _read_csv_master(p)
-    if suf == ".xlsx":
+    if is_openxml_excel_suffix(suf):
         return _read_excel_master(p)
     return ([], [])
 
@@ -934,7 +937,7 @@ def write_master_to_sheet(
             from core import core_xlc  # noqa: E402
 
             bk = book_for_jump if book_for_jump is not None else getattr(sheet, "book", None)
-            with core_xlc.suspend_sheet_updates(sheet):
+            with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
                 core_xlc.write_chunk(sheet, tr, tc, chunk_2d)
                 full_bottom = tr + len(chunk_2d) - 1
                 n_rows_rect = len(chunk_2d)
@@ -1011,7 +1014,7 @@ def write_master_to_sheet(
             from core import core_xlc  # noqa: E402
 
             bk = book_for_jump if book_for_jump is not None else getattr(sheet, "book", None)
-            with core_xlc.suspend_sheet_updates(sheet):
+            with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
                 if include_header:
                     chunk_2d = [hdr_line] + [list(r) for r in rows]
                     core_xlc.write_chunk(sheet, tr, tc, chunk_2d)
@@ -1111,7 +1114,7 @@ def write_master_to_sheet(
                 append_count,
                 update_count,
             )
-            with core_xlc.suspend_sheet_updates(sheet):
+            with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
                 core_xlc.write_chunk(sheet, tr, tc, data_2d)
                 if tr == 1 and tc == 1:
                     core_xlc.clear_used_range_overflow(

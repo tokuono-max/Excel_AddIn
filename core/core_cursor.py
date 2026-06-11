@@ -156,9 +156,32 @@ def progress_dialog_wait_cursor_tick(
     del sheet_id, min_interval_sec
 
 
-def progress_dialog_wait_cursor_off(*, cancel_reason: str = "progress_dialog_done") -> None:
-    """進捗ダイアログ終了時: 砂時計 OFF + WaitForm 解除。"""
-    notify_ui_ready(cancel_reason=cancel_reason)
+def progress_dialog_wait_cursor_off(
+    *,
+    cancel_reason: str = "progress_dialog_done",
+    timeout_sec: float = 2.5,
+) -> None:
+    """進捗ダイアログ終了時: 砂時計 OFF + WaitForm 解除（Excel COM はタイムアウト付き）。"""
+    if timeout_sec <= 0:
+        notify_ui_ready(cancel_reason=cancel_reason)
+        return
+    import threading
+
+    finished = threading.Event()
+
+    def _run() -> None:
+        try:
+            notify_ui_ready(cancel_reason=cancel_reason)
+        finally:
+            finished.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    if not finished.wait(timeout=max(0.1, float(timeout_sec))):
+        _LOG.warning(
+            "UI_READY: progress_dialog_wait_cursor_off timed out after %.1fs reason=%s",
+            timeout_sec,
+            cancel_reason,
+        )
 
 
 def notify_wait_form_ready(

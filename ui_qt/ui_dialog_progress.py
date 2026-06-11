@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_dialog_progress.py
 Created: 2026-03-10
-Updated: 2026-06-04
-Version: 0.1.24
+Updated: 2026-06-06
+Version: 0.1.26
 Purpose:
   進捗表示用ダイアログ（ProgressDialog）および create_progress_dialog を提供する。
   ui_common の Progress 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -16,6 +16,7 @@ Purpose:
   - 呼び出し側は ui_common.create_progress_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.1.26 (2026-06-06) 工程3は creep 無効で pct 即反映。DONE クローズは UI 先・cursor OFF はタイムアウト付き。
   - 0.1.25 (2026-06-06) showEvent: WaitForm 解除・砂時計 ON を excel_lock より先に実行。
   - 0.1.24 (2026-06-06) 砂時計は showEvent で ON・teardown で OFF のみ（進捗 pickle 更新では制御しない）。
   - 0.1.23 (2026-06-04) RUN 時: pickle seq 更新のたびに砂時計を即再武装（svc 側 OFF 後も進捗表示中は維持）。
@@ -137,6 +138,33 @@ def _format_progress_status_text(
     if cf and cf not in body:
         return "%s\n［%s］" % (body, cf)
     return body
+
+
+def compute_run_progress_bar_pct(
+    *,
+    svc_pct: int,
+    prev_bar: int,
+    creep: int,
+    phase_i: int,
+    display_target: int,
+    center_on_parent: bool = False,
+) -> tuple[int, int]:
+    """RUN 更新時の進捗バー pct と display_target。工程3以降は creep を使わず svc pct を即反映。"""
+    pct = max(0, min(99, int(svc_pct)))
+    if center_on_parent and pct < prev_bar:
+        pct = prev_bar
+    if phase_i >= 3 or creep <= 0:
+        tgt = max(int(display_target), pct)
+        return (max(prev_bar, pct), tgt)
+    tgt = max(int(display_target), pct)
+    cur_bar = int(prev_bar)
+    if tgt > cur_bar:
+        pct = min(tgt, cur_bar + int(creep))
+    else:
+        pct = tgt
+    if pct < prev_bar:
+        pct = prev_bar
+    return (pct, tgt)
 
 
 class ProgressDialog(QDialog):
@@ -512,7 +540,9 @@ class ProgressDialog(QDialog):
         except Exception:
             pass
 
-    def _teardown_progress_shared_state(self, excel_unlock: Optional[bool] = None) -> None:
+    def _teardown_progress_shared_state(
+        self, excel_unlock: Optional[bool] = None, *, cursor_off: bool = True
+    ) -> None:
         """共有 UI 状態を片付ける。
 
         excel_unlock 未指定時: parent_hwnd があれば True（進捗がロックしていなくても、他処理の
@@ -525,7 +555,8 @@ class ProgressDialog(QDialog):
             modeless_widget=self,
             excel_unlock=excel_unlock,
         )
-        self._progress_wait_cursor_off()
+        if cursor_off:
+            self._progress_wait_cursor_off()
 
     def _tick(self) -> None:
         """
@@ -922,23 +953,18 @@ class ProgressDialog(QDialog):
             prev_bar = int(self._bar.value())
             if status_u == "RUN" and pct < prev_bar:
                 pct = prev_bar
-            if getattr(self, "_center_on_parent_widget", False):
-                if pct < prev_bar:
-                    pct = prev_bar
-            creep = int(getattr(self, "_progress_bar_creep_pct", 0) or 0)
-            if status_u == "RUN" and creep > 0:
-                self._progress_display_target = max(
-                    int(getattr(self, "_progress_display_target", 0) or 0), pct
-                )
-                cur_bar = int(self._bar.value())
-                tgt = int(self._progress_display_target)
-                if tgt > cur_bar:
-                    pct = min(tgt, cur_bar + creep)
-                else:
-                    pct = tgt
-            elif status_u == "RUN":
-                self._progress_display_target = pct
             phase_i = int(d.get("phase_i", 0) or 0)
+            creep = int(getattr(self, "_progress_bar_creep_pct", 0) or 0)
+            center_on_parent = bool(getattr(self, "_center_on_parent_widget", False))
+            if status_u == "RUN":
+                pct, self._progress_display_target = compute_run_progress_bar_pct(
+                    svc_pct=pct,
+                    prev_bar=prev_bar,
+                    creep=creep,
+                    phase_i=phase_i,
+                    display_target=int(getattr(self, "_progress_display_target", 0) or 0),
+                    center_on_parent=center_on_parent,
+                )
             if getattr(self, "_center_on_parent_widget", False):
                 dn_i = int(done) if done is not None else None
                 to_i = int(total) if total is not None else None
@@ -1064,13 +1090,12 @@ class ProgressDialog(QDialog):
             ph = int(self._parent_hwnd or 0)
             excel_rect = getattr(self, "_excel_rect", None)
 
-            # 1) 進捗画面を先に閉じる（タイマー停止・前面フック解除・Excel ロック解除・モードレス削除・hide/close/deleteLater）
+            # 1) 進捗画面を先に閉じる（Excel COM より先に UI を解放）
             if self._timer is not None:
                 try:
                     self._timer.stop()
                 except Exception:
                     pass
-            self._teardown_progress_shared_state()
             try:
                 self.hide()
             except Exception:
@@ -1090,6 +1115,12 @@ class ProgressDialog(QDialog):
                 self.deleteLater()
             except Exception:
                 pass
+            try:
+                self._write_progress_closed_ack()
+            except Exception:
+                pass
+            self._teardown_progress_shared_state(cursor_off=False)
+            self._progress_wait_cursor_off()
 
             # 2) 進捗を閉じたあとで完了通知を表示。excel_rect を渡して事前中央と一致させ、再センタは行わず前面化のみ
             if show_done and (items or detail_text):

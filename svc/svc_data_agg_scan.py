@@ -9,6 +9,7 @@ Purpose:
   データ集約用のフォルダ走査。起点パス・再帰ON/OFF・拡張子・キーワード・一時ファイル除外で対象ファイル一覧を返す。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.1 (2026-06-03) 走査既定 extensions に .xlsm を追加。
   - 0.1.0 (2026-03-18) 新規作成。scan_folder API と一時ファイル除外・拡張子フィルタ。
 """
 from __future__ import annotations
@@ -27,10 +28,10 @@ if str(_root) not in sys.path:
 from core.core_log import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # 対象拡張子（大文字小文字を区別しない）
-_DEFAULT_EXTENSIONS = (".xlsx", ".xls", ".csv")
+_DEFAULT_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".csv")
 # 一時ファイルのプレフィックス（除外する）
 _TEMP_PREFIXES = ("~$",)
 

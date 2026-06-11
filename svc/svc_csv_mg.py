@@ -4,13 +4,14 @@ Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
 Updated: 2026-05-05 (JST)
-Version: 1.4.25
+Version: 1.4.26
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.26 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
   - 1.4.25 (2026-06-06) 進捗表示中は excel_lock=True（結合実行中 Excel 操作無効）。
   - 1.4.24 (2026-06-04) 結合処理中の砂時計 ON（ファイル確定後〜完了）。Excel 書込みループで tick 再武装。
   - 1.4.23 (2026-05-05) progress の parent_hwnd を環境変数依存から引数へ統一。progress_closed_path ACK 待ちを追加し、進捗クローズ後に完了通知/再表示へ遷移。
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.25"
+__version__ = "1.4.26"
 import os
 import re
 import threading
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any
 from core.core_log import get_diag_logger, get_logger
 from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.core_progress_wait import wait_after_progress_done
 from core import core_cst as cst
 
 try:
@@ -682,9 +684,17 @@ def _merge_files_to_sheet(
         max_col = 0
         sht_name = (getattr(sht, "name", None) or getattr(sht, "Name", None) or "Sheet1")
 
-        # 一括書込みは表示停止で高速化（シート更新禁止→処理→更新再開）
+        # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に遅延）
         t_excel_write0 = time.perf_counter()
-        with (xlc.suspend_sheet_updates(sht) if xlc else nullcontext()):
+        done_ser = [
+            {
+                "no": int(it.get("no", 0) or 0),
+                "name": str(it.get("name", "") or ""),
+                "rows": int(it.get("rows", 0) or 0),
+            }
+            for it in done_items
+        ]
+        with (xlc.suspend_sheet_updates(sht, restore_on_exit=False) if xlc else nullcontext()):
             for file_name, values, rows, cols in tables:
                 block_start_row = cur_row
                 max_col = max(max_col, int(cols)) if cols else max_col
@@ -788,6 +798,78 @@ def _merge_files_to_sheet(
 
                 cur_row += rows
 
+            # 有効領域外をクリア（UsedRange の拡大防止）
+            if xlc and max_col > 0 and cur_row > start_row:
+                try:
+                    xlc.clear_used_range_overflow(sht, cur_row - 1, max_col)
+                except Exception:
+                    pass
+
+            # 出力完了後: 列幅オートフィット（行数が core_cst.AUTOFIT_MAX_ROWS 超過時はスキップ）
+            if max_col > 0 and cur_row > start_row:
+                last_row = cur_row - 1
+                autofit_rows = last_row - start_row + 1
+                max_af_rows = int(getattr(cst, "AUTOFIT_MAX_ROWS", 100000) or 100000)
+                if progress_path is not None:
+                    _progress_write_monotonic(
+                        progress_path,
+                        {
+                            "status": "RUN",
+                            "phase_i": 3,
+                            "phase": "列幅調整中",
+                            "done": total_rows,
+                            "total": total_rows,
+                            "pct": 99,
+                        },
+                    )
+                if autofit_rows <= max_af_rows:
+                    try:
+                        rng = sht.range((start_row, 1), (last_row, max_col))
+                        rng.columns.autofit()
+                    except Exception:
+                        pass
+
+            # HC_STATUS_INFO とステータスバー
+            if core_stat is not None:
+                try:
+                    sht_name_stat = getattr(sht, "name", None) or getattr(sht, "Name", None) or "Sheet1"
+                    file_names_stat = [
+                        (os.path.splitext(str(it.get("name", "")).strip())[0] or str(it.get("name", "")).strip())
+                        for it in done_items
+                        if it.get("name")
+                    ]
+                    if file_names_stat:
+                        new_part = "＋".join(file_names_stat)
+                        existing = (core_stat.get_status_info(sht) or "").strip()
+                        if not existing:
+                            value = f"{sht_name_stat}：{new_part}"
+                        else:
+                            value = existing + "＋" + new_part
+                        core_stat.set_status_info(sht, value)
+                        try:
+                            app.api.StatusBar = value
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            if progress_path is not None:
+                _phase("P4-9", step="done_progress_pickle", items=len(done_ser))
+                _progress_write_monotonic(
+                    progress_path,
+                    {
+                        "status": "DONE",
+                        "phase_i": 4,
+                        "phase": "完了",
+                        "done": total_rows,
+                        "total": total_rows,
+                        "pct": 100,
+                        "show_done_dialog": True,
+                        "done_items": done_ser,
+                    },
+                )
+                wait_after_progress_done(min_sec=1.0)
+
         excel_write_ms = _elapsed_ms(t_excel_write0)
         logger.info(
             "[CSV_MG] phase=merge_excel_write_done excel_write_ms=%s tables=%s",
@@ -799,61 +881,6 @@ def _merge_files_to_sheet(
             excel_write_ms,
             time.perf_counter(),
         )
-
-        # 有効領域外をクリア（UsedRange の拡大防止）
-        if xlc and max_col > 0 and cur_row > start_row:
-            try:
-                xlc.clear_used_range_overflow(sht, cur_row - 1, max_col)
-            except Exception:
-                pass
-
-        # 出力完了後: 書き込んだ範囲の列幅をオートフィット（行数が core_cst.AUTOFIT_MAX_ROWS 超過時はスキップ）
-        if max_col > 0 and cur_row > start_row:
-            last_row = cur_row - 1
-            autofit_rows = last_row - start_row + 1
-            max_af_rows = int(getattr(cst, "AUTOFIT_MAX_ROWS", 100000) or 100000)
-            if progress_path is not None:
-                _progress_write_monotonic(
-                    progress_path,
-                    {
-                        "status": "RUN",
-                        "phase_i": 3,
-                        "phase": "列幅調整中",
-                        "done": total_rows,
-                        "total": total_rows,
-                        "pct": 99,
-                    },
-                )
-            if autofit_rows <= max_af_rows:
-                try:
-                    rng = sht.range((start_row, 1), (last_row, max_col))
-                    rng.columns.autofit()
-                except Exception:
-                    pass
-
-        # HC_STATUS_INFO とステータスバー: ファイル名は拡張子を除く。フォーマット シート名：結合ファイル名＋...
-        if core_stat is not None:
-            try:
-                sht_name = getattr(sht, "name", None) or getattr(sht, "Name", None) or "Sheet1"
-                file_names = [
-                    (os.path.splitext(str(it.get("name", "")).strip())[0] or str(it.get("name", "")).strip())
-                    for it in done_items
-                    if it.get("name")
-                ]
-                if file_names:
-                    new_part = "＋".join(file_names)
-                    existing = (core_stat.get_status_info(sht) or "").strip()
-                    if not existing:
-                        value = f"{sht_name}：{new_part}"
-                    else:
-                        value = existing + "＋" + new_part
-                    core_stat.set_status_info(sht, value)
-                    try:
-                        app.api.StatusBar = value
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
         # 運用ログ: 完了（結合ファイル名を付与。長い場合は先頭数件＋他N件に省略）
         file_names = [str(it.get("name", "")).strip() for it in done_items if it.get("name")]
@@ -869,29 +896,7 @@ def _merge_files_to_sheet(
             files_str,
         )
         parent_hwnd2 = int(parent_hwnd or 0)
-        done_ser = [
-            {
-                "no": int(it.get("no", 0) or 0),
-                "name": str(it.get("name", "") or ""),
-                "rows": int(it.get("rows", 0) or 0),
-            }
-            for it in done_items
-        ]
         if progress_path is not None:
-            _phase("P4-9", step="done_progress_pickle", items=len(done_ser))
-            _progress_write_monotonic(
-                progress_path,
-                {
-                    "status": "DONE",
-                    "phase_i": 4,
-                    "phase": "完了",
-                    "done": total_rows,
-                    "total": total_rows,
-                    "pct": 100,
-                    "show_done_dialog": True,
-                    "done_items": done_ser,
-                },
-            )
             _wait_progress_closed_ack(progress_closed_path)
         elif parent_hwnd2:
             _phase("P4-9", step="done_popup_fallback", items=len(done_ser))
@@ -907,6 +912,16 @@ def _merge_files_to_sheet(
                 {"status": "ERROR", "phase_i": 4, "phase": "エラー", "detail": str(ex)},
             )
     finally:
+        if xlc is not None:
+            try:
+                _sht_restore = sht
+            except NameError:
+                pass
+            else:
+                try:
+                    xlc.restore_screen_updating(_sht_restore)
+                except Exception:
+                    pass
         if progress_path is not None:
             try:
                 _PROGRESS_SEQ.pop(_progress_key(progress_path), None)

@@ -9,6 +9,9 @@ Purpose:
   データ集約・クレンジング。シナリオの保存・読込、ステップ実行（動作確認）、一括実行のオーケストレーション。
   画面は ui_qt.ui_data_agg + config/ui_data_agg.json。走査・シナリオ・抽出・書き込みはサブモジュールに分離する。
 History (latest 3):
+  - 0.5.5 (2026-06-03) 走査 extensions フォールバックとノイズ判定に .xlsm を追加。
+  - 0.5.4 (2026-06-06) ステップ実行の Excel 書込も suspend(restore_on_exit=False) + restore_screen_updating。
+  - 0.5.3 (2026-06-06) ハング緩和: Excel 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
   - 0.5.2 (2026-06-01) 本番一括: compute 完了時の不変条件を診断ログ warning のみで検知（UI 不変）。
   - 0.5.1 (2026-06-01) 本番一括: 並列 extract 中の進捗（ファイル名・k/n・読込中）。「集約を実行中」を廃止。
   - 0.5.0 (2026-06-01) 本番一括性能: join write+link 1パス、進捗 IPC 256 間引き、file_pattern 先スキップ、並列 auto=6。
@@ -54,6 +57,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_data_agg_diag_logger, get_logger  # noqa: E402
+from core.core_progress_wait import wait_after_progress_done  # noqa: E402
 from svc.data_agg_path_norm import normalize_source_path, path_is_under_directory  # noqa: E402
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_cancel import DataAggCancelled  # noqa: E402
@@ -62,7 +66,7 @@ from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
 
 logger = get_logger(__name__)
 _agg_diag = get_data_agg_diag_logger()
-__version__ = "0.4.9"
+__version__ = "0.5.5"
 
 # data_agg_master_preview.MASTER_PREVIEW_DIAG_SOURCE と同一（循環 import 避け）
 _MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
@@ -2794,6 +2798,7 @@ def _batch_sparse_values_noise(vals: list[Any], headers: list[str]) -> bool:
     low_last = last_txt.lower()
     if nonempty <= 3 and (
         low_last.endswith(".xlsx")
+        or low_last.endswith(".xlsm")
         or low_last.endswith(".xls")
         or low_last.endswith(".csv")
     ):
@@ -4749,7 +4754,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     # マスタ列への集約はシナリオの items 一覧の縦並び順（上から順）に従う。
     scan_cfg = data.get("scan") or {}
     start_path = scan_cfg.get("start_path") or "."
-    ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".csv"])
+    ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
     from svc.data_agg_cancel import (  # noqa: WPS433
@@ -4837,6 +4842,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             done=1,
             total=1,
         )
+        wait_after_progress_done(min_sec=1.0)
 
     def _prog_cancel() -> None:
         _prog_write(
@@ -5232,23 +5238,25 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             replace_full_block,
             force_empty_existing,
         )
-        append_count, update_count = write_mod.write_master_to_sheet(
-            sheet_out,
-            headers,
-            table_rows,
-            mode=write_mode,
-            match_key_indices=write_key_indices,
-            column_modes=column_modes if len(column_modes) == len(headers) else None,
-            top_left_row=tr,
-            top_left_col=tc,
-            jump_register=jump_reg,
-            jump_name_base="",
-            book_for_jump=_book,
-            existing_headers=[] if force_empty_existing else None,
-            existing_rows=[] if force_empty_existing else None,
-            append_chunk_no_header=(wm_ex == "append"),
-            replace_full_block=replace_full_block,
-        )
+        with core_xlc.suspend_sheet_updates(sheet_out, restore_on_exit=False):
+            append_count, update_count = write_mod.write_master_to_sheet(
+                sheet_out,
+                headers,
+                table_rows,
+                mode=write_mode,
+                match_key_indices=write_key_indices,
+                column_modes=column_modes if len(column_modes) == len(headers) else None,
+                top_left_row=tr,
+                top_left_col=tc,
+                jump_register=jump_reg,
+                jump_name_base="",
+                book_for_jump=_book,
+                existing_headers=[] if force_empty_existing else None,
+                existing_rows=[] if force_empty_existing else None,
+                append_chunk_no_header=(wm_ex == "append"),
+                replace_full_block=replace_full_block,
+            )
+        _prog_done()
     except Exception as e:
         logger.exception("[DATA_AGG] write_master_to_sheet failed: %s", e)
         try:
@@ -5278,6 +5286,11 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         _activate_output_sheet()
         _finish("マスターへの書き込み中にエラーが発生しました: %s" % e, ok=False, elapsed_ms=_tms)
         return
+    finally:
+        try:
+            core_xlc.restore_screen_updating(sheet_out)
+        except Exception:
+            pass
     dt_write_ms = int((time.perf_counter() - t_write) * 1000)
     dt_total_ms = int((time.perf_counter() - t_batch_wall) * 1000)
     logger.info(
@@ -5337,7 +5350,6 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     )
     batch_sheet_pending_delete.clear()
     _activate_output_sheet()
-    _prog_done()
     _finish(msg, ok=True, elapsed_ms=dt_total_ms)
 
 
@@ -5547,6 +5559,7 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
 
     def _prog_done() -> None:
         _prog_write(status="DONE", pct=100, phase="完了", phase_i=4)
+        wait_after_progress_done(min_sec=1.0)
 
     def _prog_cancel() -> None:
         _prog_write(status="CANCEL", pct=95, phase="中止", phase_i=4)
@@ -5746,23 +5759,25 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
                 )
                 return
         force_empty_existing = ex_clear or new_sheet_created
-        append_count, update_count = write_mod.write_master_to_sheet(
-            sheet_out,
-            headers,
-            table_rows,
-            mode=write_mode,
-            match_key_indices=write_key_indices,
-            column_modes=column_modes if len(column_modes) == len(headers) else None,
-            top_left_row=tr,
-            top_left_col=tc,
-            jump_register=jump_reg,
-            jump_name_base="",
-            book_for_jump=_book,
-            existing_headers=[] if force_empty_existing else None,
-            existing_rows=[] if force_empty_existing else None,
-            append_chunk_no_header=(wm_ex == "append"),
-            replace_full_block=replace_full_block,
-        )
+        with core_xlc.suspend_sheet_updates(sheet_out, restore_on_exit=False):
+            append_count, update_count = write_mod.write_master_to_sheet(
+                sheet_out,
+                headers,
+                table_rows,
+                mode=write_mode,
+                match_key_indices=write_key_indices,
+                column_modes=column_modes if len(column_modes) == len(headers) else None,
+                top_left_row=tr,
+                top_left_col=tc,
+                jump_register=jump_reg,
+                jump_name_base="",
+                book_for_jump=_book,
+                existing_headers=[] if force_empty_existing else None,
+                existing_rows=[] if force_empty_existing else None,
+                append_chunk_no_header=(wm_ex == "append"),
+                replace_full_block=replace_full_block,
+            )
+        _prog_done()
     except Exception as e:
         logger.exception("[DATA_AGG] write_master_to_sheet failed: %s", e)
         dt_write_ms = int((time.perf_counter() - t_write) * 1000)
@@ -5790,6 +5805,11 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             spill_path=spill_dir,
         )
         return
+    finally:
+        try:
+            core_xlc.restore_screen_updating(sheet_out)
+        except Exception:
+            pass
 
     dt_write_ms = int((time.perf_counter() - t_write) * 1000)
     dt_total_ms = _wall_total_ms()
@@ -5821,7 +5841,6 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
     )
     batch_sheet_pending_delete.clear()
     _activate_output_sheet()
-    _prog_done()
     _finish_write(msg, ok=True, elapsed_ms=dt_total_ms, spill_path=spill_dir)
 
 
@@ -5865,7 +5884,7 @@ def _run_step(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None:
     file_paths = scan_mod.scan_folder(
         scan_cfg.get("start_path") or ".",
         recursive=bool(scan_cfg.get("recursive")),
-        extensions=tuple(scan_cfg.get("extensions") or [".xlsx", ".csv"]),
+        extensions=tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"]),
         keyword=scan_cfg.get("keyword") or "",
     )
     from svc import svc_data_agg_extract as extract_mod  # noqa: E402
@@ -5917,9 +5936,18 @@ def _run_step(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None:
             item.get("write_mode"), lineage=lin_s
         )
         cm = [mode] * len(headers) if headers else None
-        write_mod.write_master_to_sheet(
-            sheet, headers, table_rows, mode=mode, column_modes=cm
-        )
+        from core import core_xlc  # noqa: E402
+
+        try:
+            with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
+                write_mod.write_master_to_sheet(
+                    sheet, headers, table_rows, mode=mode, column_modes=cm
+                )
+        finally:
+            try:
+                core_xlc.restore_screen_updating(sheet)
+            except Exception:
+                pass
     _submit_step_popup_ui(parent_hwnd, sheet_id, step_index, item_name, ref_files, preview_values)
     logger.debug(
         "[DATA_AGG] ステップ文脈 件数=%s（file_path/iter_index）",

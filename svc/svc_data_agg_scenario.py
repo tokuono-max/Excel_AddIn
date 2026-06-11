@@ -575,7 +575,7 @@ def create_empty_scenario() -> dict[str, Any]:
         KEY_SCAN: {
             KEY_START_PATH: "",
             KEY_RECURSIVE: False,
-            KEY_EXTENSIONS: [".xlsx", ".xls", ".csv"],
+            KEY_EXTENSIONS: [".xlsx", ".xlsm", ".xls", ".csv"],
             KEY_KEYWORD: "",
         },
         KEY_MASTER_PATH: "",

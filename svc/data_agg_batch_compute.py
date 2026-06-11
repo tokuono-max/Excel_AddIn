@@ -426,7 +426,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     scan_cfg = data.get("scan") or {}
     start_path = scan_cfg.get("start_path") or "."
-    ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".csv"])
+    ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
 

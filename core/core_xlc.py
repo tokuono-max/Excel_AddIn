@@ -3,8 +3,8 @@
 Python: 3.12
 Module: core/core_xlc.py
 Created: 2026-01-xx
-Updated: 2026-06-04
-Version: 2.5.9
+Updated: 2026-06-06
+Version: 2.5.10
 Purpose:
   Excel COM 操作の薄いヘルパ（UI非依存 / core から ui import 禁止）。
   - シートカスタムプロパティ（GUID 等）の読み書き
@@ -16,9 +16,10 @@ Design:
   - 失敗時に例外を投げない（Excelロック解除漏れの方が致命）
 
 History (latest 3):
+  - 2.5.11 (2026-06-06) restore_screen_updating ヘルパを追加（restore_on_exit=False 利用後の復帰用）。
+  - 2.5.10 (2026-06-06) suspend_sheet_updates: restore_on_exit=False で ScreenUpdating 復帰を呼び出し側に委譲。
   - 2.5.9 (2026-06-04) Excel シート名: sanitize_excel_sheet_name / unique / 分割用 part 名（最大 31 文字）。
   - 2.5.8 (2026-06-04) write_chunk: progress_notify_rows で COM 分割を細かくし progress_cb を高頻度化（chunk_rows は維持可）。
-  - 2.5.7 (2026-06-03) write_chunk: text_mode で書込前に @ 書式と ' 付き文字列化（CSV 読込の文字列保持）。
   - 2.5.6 (2026-04-07) excel_try_set_main_commandbars_enabled: SHOW.TOOLBAR を廃止（ウィンドウ違和感が大きいため）。CommandBars のみ。
   - 2.5.5 (2026-04-07) excel_try_set_main_commandbars_enabled: ExecuteExcel4Macro SHOW.TOOLBAR（後述 2.5.6 で撤回）。
   - 2.5.4 (2026-04-07) excel_try_set_main_commandbars_enabled: CommandBars は Item(name) で取得（[] は COMRetryObjectWrapper で不可）。
@@ -332,10 +333,21 @@ def _get_app_api(sheet_or_book: Any) -> Any:
     return getattr(app, "api", None) if app else None
 
 
+def restore_screen_updating(sheet_or_book: Any) -> None:
+    """suspend_sheet_updates(restore_on_exit=False) 利用後に ScreenUpdating を復帰する。"""
+    api = _get_app_api(sheet_or_book)
+    if api is not None:
+        try:
+            api.ScreenUpdating = True
+        except Exception:
+            pass
+
+
 @contextmanager
-def suspend_sheet_updates(sheet_or_book: Any) -> Any:
+def suspend_sheet_updates(sheet_or_book: Any, *, restore_on_exit: bool = True) -> Any:
     """シート更新表示を停止して処理を行い、終了時に再開するコンテキストマネージャ。
     一括書込みの前に with で囲むと高速化に有効。
+    restore_on_exit=False のとき ScreenUpdating は with 終了時に戻さない（呼び出し側で復帰）。
     """
     api = _get_app_api(sheet_or_book)
     try:
@@ -343,7 +355,7 @@ def suspend_sheet_updates(sheet_or_book: Any) -> Any:
             api.ScreenUpdating = False
         yield
     finally:
-        if api is not None:
+        if restore_on_exit and api is not None:
             try:
                 api.ScreenUpdating = True
             except Exception:

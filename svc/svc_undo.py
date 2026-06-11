@@ -3,7 +3,7 @@
 Python: 3.10+
 Module: svc/svc_undo
 Created: 2026-03-05
-Version: 1.7.8
+Version: 1.7.10
 Purpose:
   元に戻す（Undo）：Pickle キャッシュから直前状態を復元する（新方式: svc_server + book 渡し）。
   共通仕様（docs/共通仕様_機能.md）に準拠。復元中は ui_server 経由で進捗（config/ui_undo.json PROGRESS）。
@@ -16,6 +16,8 @@ Purpose:
   - まとめ: 「直前に実行した1つの機能」分だけ戻せる。戻すとスナップショットは消える。別の機能を実行するとスナップショットは新しい状態で上書きされる。
 
 History (latest 3):
+  - 1.7.10 (2026-06-06) 構造復元成功時もキャッシュ削除→_undo_progress_done を実行（進捗クローズ漏れ修正）。
+  - 1.7.9 (2026-06-06) ハング緩和: DONE を ScreenUpdating 復帰前に書込。restore_on_exit=False + wait_after_progress_done。
   - 1.7.8 (2026-06-06) 進捗表示中は excel_lock=True（復元開始から Excel 操作無効）。完了時 teardown で解除。
   - 1.7.7 exec_undo finally: 成功時も常に w32.bring_to_front(hwnd) を実行（1.7.5 のスキップを撤去）。TOPMOST 進捗後の前景を他機能（例 svc_dt_ymd）と揃え、続くモーダル前面の切り分け用。再発時はリバートまたは進捗側の TOPMOST 解除等を検討。
   - 1.7.6 Undo 成功: キャッシュ削除を進捗フェーズ（PHASE_UNDO_CACHE_DELETE）に含め、削除完了後に _undo_progress_done。進捗内の早期 DONE 呼び出しを廃止。_undo_progress_done の done_delay_ms / sleep を短縮。
@@ -46,6 +48,7 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger
+from core.core_progress_wait import wait_after_progress_done
 
 logger = get_logger(__name__)
 _undo_diag = get_diag_logger("hc_csv_tool.diag.undo")
@@ -193,7 +196,7 @@ def _undo_progress_done(path: Path | None) -> None:
                 "done_delay_ms": 200,
             },
         )
-        time.sleep(0.12)
+        wait_after_progress_done(min_sec=1.0)
     except Exception:
         pass
 
@@ -655,6 +658,19 @@ def exec_undo(
                             88,
                             _undo_msg("PHASE_UNDO_STRUCTURE_FINISH", "復元後の処理を行っています..."),
                         )
+                    if prog_path_undo is not None:
+                        _undo_progress_phase(
+                            prog_path_undo,
+                            undo_seq,
+                            96,
+                            _undo_msg("PHASE_UNDO_CACHE_DELETE", "復元情報を整理しています..."),
+                        )
+                    _log_undo_perf("before_cache_delete", t_flow)
+                    _undo_trace("before_cache_delete", t_flow)
+                    hsys.CacheManager.delete(str_undo_key)
+                    _log_undo_perf("after_cache_delete", t_flow)
+                    _undo_trace("after_cache_delete", t_flow)
+                    _undo_progress_done(prog_path_undo)
                 except ImportError:
                     _undo_progress_done(prog_path_undo)
                     msg = "ERROR: 構造復元モジュールが利用できません。"
@@ -721,7 +737,7 @@ def exec_undo(
                 pass
             prev_calc = None
             prev_events = None
-            ctx = (xlc.suspend_sheet_updates(ptr_s) if xlc else nullcontext())
+            ctx = (xlc.suspend_sheet_updates(ptr_s, restore_on_exit=False) if xlc else nullcontext())
             with ctx:
                 try:
                     try:
@@ -933,22 +949,25 @@ def exec_undo(
                         api.Interactive = True
                     except Exception:
                         pass
-                    # ScreenUpdating は suspend_sheet_updates の exit で True に戻る
 
-        # 1 回だけ戻す: 進捗でキャッシュ削除フェーズ→削除→DONE で進捗を閉じてから終了通知
-        if prog_path_undo is not None:
-            _undo_progress_phase(
-                prog_path_undo,
-                undo_seq,
-                96,
-                _undo_msg("PHASE_UNDO_CACHE_DELETE", "復元情報を整理しています..."),
-            )
-        _log_undo_perf("before_cache_delete", t_flow)
-        _undo_trace("before_cache_delete", t_flow)
-        hsys.CacheManager.delete(str_undo_key)
-        _log_undo_perf("after_cache_delete", t_flow)
-        _undo_trace("after_cache_delete", t_flow)
-        _undo_progress_done(prog_path_undo)
+                # 1 回だけ戻す: キャッシュ削除→DONE（ScreenUpdating 復帰前）
+                if prog_path_undo is not None:
+                    _undo_progress_phase(
+                        prog_path_undo,
+                        undo_seq,
+                        96,
+                        _undo_msg("PHASE_UNDO_CACHE_DELETE", "復元情報を整理しています..."),
+                    )
+                _log_undo_perf("before_cache_delete", t_flow)
+                _undo_trace("before_cache_delete", t_flow)
+                hsys.CacheManager.delete(str_undo_key)
+                _log_undo_perf("after_cache_delete", t_flow)
+                _undo_trace("after_cache_delete", t_flow)
+                _undo_progress_done(prog_path_undo)
+
+            if xlc:
+                xlc.restore_screen_updating(ptr_s)
+
         logger.info("[UNDO] 復元 完了 シート=%s", sh_name)
         _show_undo_done_dialog(hwnd, sheet_id, sh_name)
         _log_undo_perf("after_done_ui", t_flow)

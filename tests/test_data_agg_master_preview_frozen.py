@@ -154,8 +154,8 @@ def test_best_frozen_rejects_paths_count_mismatch_even_with_gap() -> None:
     assert through is None
 
 
-def test_frozen_context_skipped_for_join_item_in_ui_helper() -> None:
-    """結合項目では凍結を使わない（ui 側ガードの仕様確認用スタブ）。"""
+def test_join_item_has_join_defs_for_frozen_join_path() -> None:
+    """結合項目は join_defs を持つ（凍結適用の対象になり得る）。"""
     from svc.svc_data_agg import _item_join_defs_list  # noqa: E402
 
     items = [

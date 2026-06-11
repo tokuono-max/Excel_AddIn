@@ -9,6 +9,7 @@ Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.45 (2026-06-03) 基準フォルダ走査: 拡張子チェックに .xlsm を追加（.xls/.xlsx と同形式）。
   - 0.4.44 (2026-05-03) EXCEL_LOCK false 時: _pulse_excel_unlock_if_excel_lock_off で Win32 解除に加え CommandBars 有効化・Interactive=True。showEvent で 0/130/400ms の再パルス（ensure_front 直後の無効化取りこぼし緩和）。
   - 0.4.43 (2026-05-03) EXCEL_LOCK false 時: メイン create_dialog（prepare 後）と showEvent で enable_excel_window(True)＋メニューロック解除を明示（子 HWND 無効の取り残しでリボンが効かない事象の緩和）。
   - 0.4.42 (2026-05-03) メイン showEvent: EXCEL_MENU_BAR_LOCK_ON_SHOW は want_excel_child_hwnd_lock_while_modal（WINDOW.EXCEL_LOCK）が true のときのみ適用。ルート共通の EXCEL_LOCK false を開いた直前から反映。
@@ -199,7 +200,7 @@ def _data_agg_summary_table_tooltip(display: str) -> str:
     return (display or "").replace(" | ", "\n")
 
 
-__version__ = "0.4.44"
+__version__ = "0.4.45"
 
 # メイン項目表: 連携参照行・結合参照行の背景（連携優先で灰）
 _ROW_BG_LINK = QColor("#E0E0E0")
@@ -698,6 +699,7 @@ class _DataAggMainWindow(QDialog):
         row_opts.addWidget(lbl_ext)
         self._chk_ext_xls = QCheckBox(_u("CHK_EXT_XLS", ".xls"))
         self._chk_ext_xlsx = QCheckBox(_u("CHK_EXT_XLSX", ".xlsx"))
+        self._chk_ext_xlsm = QCheckBox(_u("CHK_EXT_XLSM", ".xlsm"))
         self._chk_ext_csv = QCheckBox(_u("CHK_EXT_CSV", ".csv"))
         self._main_set_tip(
             self._chk_ext_xls,
@@ -710,15 +712,22 @@ class _DataAggMainWindow(QDialog):
             ".xlsx を検索対象に含めます。",
         )
         self._main_set_tip(
+            self._chk_ext_xlsm,
+            "TOOLTIP_CHK_EXT_XLSM",
+            ".xlsm を検索対象に含めます。",
+        )
+        self._main_set_tip(
             self._chk_ext_csv,
             "TOOLTIP_CHK_EXT_CSV",
             ".csv を検索対象に含めます。",
         )
         self._chk_ext_xls.setChecked(True)
         self._chk_ext_xlsx.setChecked(True)
+        self._chk_ext_xlsm.setChecked(True)
         self._chk_ext_csv.setChecked(True)
         row_opts.addWidget(self._chk_ext_xls)
         row_opts.addWidget(self._chk_ext_xlsx)
+        row_opts.addWidget(self._chk_ext_xlsm)
         row_opts.addWidget(self._chk_ext_csv)
         row_opts.addStretch(1)
         scan_layout.addLayout(row_opts)
@@ -1757,6 +1766,9 @@ class _DataAggMainWindow(QDialog):
         self._chk_ext_xlsx.stateChanged.connect(
             lambda _v: self._on_scan_and_mark_dirty(True)
         )
+        self._chk_ext_xlsm.stateChanged.connect(
+            lambda _v: self._on_scan_and_mark_dirty(True)
+        )
         self._chk_ext_csv.stateChanged.connect(
             lambda _v: self._on_scan_and_mark_dirty(True)
         )
@@ -2661,7 +2673,7 @@ class _DataAggMainWindow(QDialog):
 
             st = self._get_scan_state()
             sp = str(st.get("start_path") or "").strip() or "."
-            exts = st.get("extensions") or [".xlsx", ".csv"]
+            exts = st.get("extensions") or [".xlsx", ".xlsm", ".csv"]
             if not exts:
                 return list(getattr(self, "_file_list_items", None) or [])
             paths = [
@@ -2920,7 +2932,7 @@ class _DataAggMainWindow(QDialog):
                 st = self._get_scan_state()
                 sp = str(st.get("start_path") or "").strip()
                 if sp:
-                    exts = st.get("extensions") or [".xlsx", ".csv"]
+                    exts = st.get("extensions") or [".xlsx", ".xlsm", ".csv"]
                     scan_paths_hint = [
                         str(p)
                         for p in scan_mod.scan_folder(
@@ -3012,6 +3024,8 @@ class _DataAggMainWindow(QDialog):
                 ext_list.append(".xls")
             if self._chk_ext_xlsx.isChecked():
                 ext_list.append(".xlsx")
+            if self._chk_ext_xlsm.isChecked():
+                ext_list.append(".xlsm")
             if self._chk_ext_csv.isChecked():
                 ext_list.append(".csv")
             if not ext_list:
@@ -3028,7 +3042,7 @@ class _DataAggMainWindow(QDialog):
                         _ui_disp_str(
                             self._ui or {},
                             "MSG_SCAN_SELECT_EXT",
-                            "拡張子を1つ以上選択してください。（.xls / .xlsx / .csv）",
+                            "拡張子を1つ以上選択してください。（.xls / .xlsx / .xlsm / .csv）",
                         ),
                     )
                 return
@@ -3084,12 +3098,14 @@ class _DataAggMainWindow(QDialog):
             exts.append(".xls")
         if self._chk_ext_xlsx.isChecked():
             exts.append(".xlsx")
+        if self._chk_ext_xlsm.isChecked():
+            exts.append(".xlsm")
         if self._chk_ext_csv.isChecked():
             exts.append(".csv")
         return {
             "start_path": self._edit_start_path.text().strip(),
             "recursive": self._chk_recursive.isChecked(),
-            "extensions": exts if exts else [".xlsx", ".csv"],
+            "extensions": exts if exts else [".xlsx", ".xlsm", ".csv"],
             "keyword": self._edit_keyword.text().strip(),
         }
 
@@ -3157,7 +3173,7 @@ class _DataAggMainWindow(QDialog):
                     if lf:
                         self._edit_start_path.setText(lf)
                 self._chk_recursive.setChecked(bool(scan.get("recursive")))
-                exts = scan.get("extensions") or [".xlsx", ".xls", ".csv"]
+                exts = scan.get("extensions") or [".xlsx", ".xlsm", ".xls", ".csv"]
                 ext_set = set(
                     (e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower())
                     for e in (exts if isinstance(exts, list) else [exts])
@@ -3165,6 +3181,7 @@ class _DataAggMainWindow(QDialog):
                 )
                 self._chk_ext_xls.setChecked(".xls" in ext_set)
                 self._chk_ext_xlsx.setChecked(".xlsx" in ext_set)
+                self._chk_ext_xlsm.setChecked(".xlsm" in ext_set)
                 self._chk_ext_csv.setChecked(".csv" in ext_set)
                 self._edit_keyword.setText(str(scan.get("keyword") or ""))
                 # 検出ファイル一覧（タブ2）を更新（start_path 空→last_folder 補完後の入力と一致させる）
@@ -3174,10 +3191,12 @@ class _DataAggMainWindow(QDialog):
                     ext_list.append(".xls")
                 if self._chk_ext_xlsx.isChecked():
                     ext_list.append(".xlsx")
+                if self._chk_ext_xlsm.isChecked():
+                    ext_list.append(".xlsm")
                 if self._chk_ext_csv.isChecked():
                     ext_list.append(".csv")
                 if not ext_list:
-                    ext_list = [".xlsx", ".csv"]
+                    ext_list = [".xlsx", ".xlsm", ".csv"]
                 file_paths = scan_mod.scan_folder(
                     start_path,
                     recursive=self._chk_recursive.isChecked(),
@@ -3364,9 +3383,11 @@ class _DataAggMainWindow(QDialog):
             exts.append(".xls")
         if self._chk_ext_xlsx.isChecked():
             exts.append(".xlsx")
+        if self._chk_ext_xlsm.isChecked():
+            exts.append(".xlsm")
         if self._chk_ext_csv.isChecked():
             exts.append(".csv")
-        scan["extensions"] = exts if exts else [".xlsx", ".csv"]
+        scan["extensions"] = exts if exts else [".xlsx", ".xlsm", ".csv"]
         scan["keyword"] = self._edit_keyword.text().strip()
         data["scan"] = scan
         data["master_path"] = ""
@@ -5360,7 +5381,7 @@ class _ScenarioEditDialog(QDialog):
                 fn_rule = str(p.get("file_name_rule") or "含む")
                 fri = r["file_name_rule"].findText(fn_rule)
                 r["file_name_rule"].setCurrentIndex(fri if fri >= 0 else 1)
-                want = set(p.get("ext_checked") or [".xlsx", ".xls"])
+                want = set(p.get("ext_checked") or [".xlsx", ".xlsm", ".xls"])
                 valid_tags = {str(cb.property("ext_tag") or "") for cb in r["ext_checkboxes"]}
                 want = {t for t in want if t in valid_tags}
                 if not want:
