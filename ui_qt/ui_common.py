@@ -955,6 +955,7 @@ def done_dialog_show_event_on_excel(
     win_cfg = (screen_cfg or {}).get("WINDOW") or {}
     want_lock = want_excel_child_hwnd_lock_while_modal(win_cfg)
     want_front = bool(win_cfg.get("TOPMOST") or win_cfg.get("ALWAYS_IN_FRONT_OF_EXCEL"))
+    bring_excel_first = bool(want_lock)
     if ph:
         try:
             if bool(win_cfg.get("CENTER_ON_EXCEL", True)):
@@ -968,20 +969,21 @@ def done_dialog_show_event_on_excel(
         except Exception:
             pass
         if ph:
-
-            def _ensure_if_visible() -> None:
-                try:
-                    if w.isVisible():
-                        ensure_front(w, ph)
-                except Exception:
-                    pass
-
             try:
-                ensure_front(w, ph)
+                ensure_front(w, ph, bring_excel_first=bring_excel_first)
             except Exception:
                 pass
             for _ms in get_ui_window_timings().done_dialog_show_on_excel_ensure_front_extra_delays_ms:
-                QTimer.singleShot(int(_ms), _ensure_if_visible)
+                _delay = int(_ms)
+
+                def _ensure_if_visible(_d: int = _delay) -> None:
+                    try:
+                        if w.isVisible():
+                            ensure_front(w, ph, bring_excel_first=bring_excel_first)
+                    except Exception:
+                        pass
+
+                QTimer.singleShot(_delay, _ensure_if_visible)
     elif ph and not want_front:
         try:
             w.raise_()
@@ -989,19 +991,21 @@ def done_dialog_show_event_on_excel(
         except Exception:
             pass
 
-        def _ensure_follow_if_visible() -> None:
-            try:
-                if w.isVisible():
-                    ensure_front(w, ph)
-            except Exception:
-                pass
-
         try:
-            ensure_front(w, ph)
+            ensure_front(w, ph, bring_excel_first=bring_excel_first)
         except Exception:
             pass
         for _ms in get_ui_window_timings().done_dialog_show_on_excel_ensure_front_extra_delays_ms:
-            QTimer.singleShot(int(_ms), _ensure_follow_if_visible)
+            _delay = int(_ms)
+
+            def _ensure_follow_if_visible(_d: int = _delay) -> None:
+                try:
+                    if w.isVisible():
+                        ensure_front(w, ph, bring_excel_first=bring_excel_first)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(_delay, _ensure_follow_if_visible)
     if ph and want_lock:
         try:
             enable_excel_window(ph, False)
@@ -1086,12 +1090,19 @@ def _reapply_win32_owner_if_missing(w: QWidget, owner_hwnd: int) -> None:
         pass
 
 
-def ensure_front(w: QWidget, parent_hwnd: int, *, _ff_retry: int = 0) -> None:
+def ensure_front(
+    w: QWidget,
+    parent_hwnd: int,
+    *,
+    bring_excel_first: bool = True,
+    _ff_retry: int = 0,
+) -> None:
     """
     Method Name : ensure_front
-    Arguments   : w (QWidget), parent_hwnd (int)
+    Arguments   : w (QWidget), parent_hwnd (int), bring_excel_first (bool)
     Return      : None
-    機能概要    : 常にExcel前面→ダイアログ前面の順で最前面化する（ダイアログがExcelの手前に見えるように）。
+    機能概要    : 既定では Excel 前面→ダイアログ前面の順で最前面化する。
+    bring_excel_first=False のときは Excel を前面に引き上げずダイアログのみ前面化（完了通知・他アプリ前面時の緩和）。
     GW_OWNER が欠ける環境では set_owner を再適用する。SetForegroundWindow が失敗した場合は短い遅延で数回まで再試行する。
     """
     _trace(f"[ensure_front:enter] parent_hwnd={parent_hwnd}")
@@ -1125,17 +1136,18 @@ def ensure_front(w: QWidget, parent_hwnd: int, *, _ff_retry: int = 0) -> None:
         except Exception:
             pass
     _reapply_win32_owner_if_missing(w, owner)
-    try:
-        # 【目的】先にExcelを前面化し、その上にダイアログを表示するため
-        if owner and _w32 is not None:
-            _w32.bring_to_front(owner)
-    except Exception:
-        pass
-    _reapply_win32_owner_if_missing(w, owner)
-    log_ui_fg_phase("ensure_front:after_bring_excel", owner, w)
-    _ff_diag_ensure_front_snapshot(
-        "ensure_front:after_bring_excel", owner, _dlg_hwnd_for_fg_diag(w)
-    )
+    if bring_excel_first:
+        try:
+            # 【目的】先にExcelを前面化し、その上にダイアログを表示するため
+            if owner and _w32 is not None:
+                _w32.bring_to_front(owner)
+        except Exception:
+            pass
+        _reapply_win32_owner_if_missing(w, owner)
+        log_ui_fg_phase("ensure_front:after_bring_excel", owner, w)
+        _ff_diag_ensure_front_snapshot(
+            "ensure_front:after_bring_excel", owner, _dlg_hwnd_for_fg_diag(w)
+        )
     try:
         # 【目的】Qtネイティブ機能での前面化を試行するため
         w.raise_()
@@ -1223,7 +1235,12 @@ def ensure_front(w: QWidget, parent_hwnd: int, *, _ff_retry: int = 0) -> None:
 
                     def _retry_ef() -> None:
                         try:
-                            ensure_front(w, ph_snap, _ff_retry=rr)
+                            ensure_front(
+                                w,
+                                ph_snap,
+                                bring_excel_first=bring_excel_first,
+                                _ff_retry=rr,
+                            )
                         except Exception:
                             pass
 
@@ -1253,8 +1270,8 @@ def ensure_dialog_front_of_excel(
     rect_override: Optional[Tuple[int, int, int, int]] = None,
 ) -> None:
     """
-    ダイアログを Excel のオーナーにし、Excel 中央・前面に表示する。
-    完了通知が本番でモニタ中央になる事象対策（テストスクリプトと同様の set_owner + 再配置）。
+    ダイアログを Excel のオーナーにし、Excel 中央に配置してダイアログを前面化する。
+    Excel 本体を先に前面化しない（完了通知が Excel 背後に回る事象の緩和）。
     """
     ph = int(parent_hwnd or 0)
     try:
@@ -1265,23 +1282,10 @@ def ensure_dialog_front_of_excel(
         try:
             root = _w32.get_root_window(ph)
             _w32.set_owner(hwnd, root)
-            _w32.bring_to_front(root)
             center_on_excel(w, ph, rect_override)
         except Exception:
             pass
-    try:
-        w.raise_()
-        w.activateWindow()
-    except Exception:
-        pass
-    if hwnd:
-        try:
-            import ctypes
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            if _w32 is not None and hasattr(_w32, "nudge_to_front"):
-                _w32.nudge_to_front(hwnd)
-        except Exception:
-            pass
+    ensure_front(w, ph, bring_excel_first=False)
 
 
 # ------------------------------------------------------------------------------
@@ -2056,6 +2060,36 @@ def _close_all_modeless() -> None:
             _MODELLESS_DIALOGS[:] = remaining
         except Exception:
             _MODELLESS_DIALOGS.clear()
+    except Exception:
+        return
+
+
+def close_stale_done_dialogs(*, parent_hwnd: int = 0) -> None:
+    """表示中の完了通知（DoneDialog）を閉じる。
+
+    ProgressDialog._close_after_done の exec() 待ちや、モデルレス完了通知の残存で
+    ui_server が次の csv_ld req を処理できない事象の緩和用。
+    """
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        from ui_qt.ui_dialog_done import DoneDialog
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        ph = int(parent_hwnd or 0)
+        for w in list(app.topLevelWidgets()):
+            if not isinstance(w, DoneDialog):
+                continue
+            try:
+                if ph > 0 and int(getattr(w, "_parent_hwnd", 0) or 0) != ph:
+                    continue
+                if hasattr(w, "close"):
+                    w.close()
+                _remove_from_modeless(w)
+            except Exception:
+                pass
     except Exception:
         return
 

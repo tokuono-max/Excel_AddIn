@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_csv_sv.py
 Created: 2026-03-05
 Updated: 2026-06-04
-Version: 1.3.9
+Version: 1.3.10
 Purpose:
   CSV保存（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_csv_sv（ファイル「名前を付けて保存」ダイアログ）で行う。
@@ -13,9 +13,9 @@ Purpose:
   - 完了時は csv_ld と同様の完了通知（シート名・ファイル名・容量・行数）を表示。
 
 History (latest 3):
+  - 1.3.10 (2026-06-13) 進捗 UI 共通設定（poll/creep）と即時表示連携。保存先確定直後の砂時計 ON。
   - 1.3.9 (2026-06-04) 保存: 既定で画面上の表示文字列をチャンク Copy→クリップボードで読込。文字列行列を csv.writer で直接出力（日付正規化不要）。HC_CSV_SV_USE_VALUE_READ=1 で従来 .value 経路。
   - 1.3.8 (2026-06-04) 性能: 保存前チェックを先頭行サンプルのみに変更（全 UsedRange 読込廃止）。大容量は日付正規化スキップ。保存計測ログ分割。
-  - 1.3.7 (2026-06-04) 進捗: 単調 seq・明示 pct（読込0–49/保存50–75/DONE100）・例外時 ERROR。UI の pct 優先と整合。
   - 1.3.6 (2026-06-04) 保存終了時に EnableEvents=True を保証（restore_excel_host_after_operation）。シート切替イベント復帰。
   - 1.3.5 (2026-06-04) 保存処理中の砂時計 ON（保存先確定後〜完了）。長いシート読込中は tick で再武装。
   - 1.3.4 (2026-04-09) 進捗 IPC に excel_rect（Excel HWND の GetWindowRect）を付与。svc_csv_ld / svc_csv_sp / svc_csv_mg と同様の中央寄せ基準に統一。
@@ -43,7 +43,12 @@ from core.core_log import get_diag_logger, get_logger
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
 from core.excel_host_restore import restore_excel_host_after_operation
 from core.excel_perf_mode import set_excel_performance_mode
-from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.core_cursor import (
+    notify_ui_ready,
+    notify_wait_form_ready,
+    progress_dialog_wait_cursor_on,
+)
+from core.csv_tool_progress_ui import enrich_progress_req_dict
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
@@ -166,12 +171,16 @@ def _submit_progress_ui(
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_progress_sv_{ts_ms}_{os.getpid()}.pkl")
-        req_inner: dict[str, Any] = {
-            "action": "progress",
-            "progress_path": str(progress_path),
-            "phase_total": int(phase_total),
-            "excel_lock": True,
-        }
+        req_inner: dict[str, Any] = enrich_progress_req_dict(
+            {
+                "action": "progress",
+                "progress_path": str(progress_path),
+                "phase_total": int(phase_total),
+                "excel_lock": True,
+            },
+            done_delay_ms=400,
+            no_native_window=True,
+        )
         if excel_rect is not None:
             req_inner["excel_rect"] = list(excel_rect)
         payload = {
@@ -466,6 +475,7 @@ def _do_save_csv(
     parent_hwnd: int = 0,
     sheet_id_for_progress: str = "",
     t_load0: float = 0.0,
+    progress_ui_already_shown: bool = False,
 ) -> None:
     """保存パス確定後の実行（Excel読込・CSV書込・通知）。進捗表示ありの場合は progress_path を渡す。分母は総行数で統一。"""
     t_do0 = time.perf_counter()
@@ -482,6 +492,7 @@ def _do_save_csv(
             sheet_id_for_progress=sheet_id_for_progress,
             t_load0=t_load0,
             t_do0=t_do0,
+            progress_ui_already_shown=progress_ui_already_shown,
         )
     except Exception as ex_save:
         logger.error("[CSV_SV] 保存処理失敗: %s", ex_save, exc_info=True)
@@ -516,6 +527,7 @@ def _do_save_csv_body(
     sheet_id_for_progress: str = "",
     t_load0: float = 0.0,
     t_do0: float = 0.0,
+    progress_ui_already_shown: bool = False,
 ) -> None:
     logger.info(
         "[CSV_SV] phase=do_save_enter file=%s sheet_id=%s elapsed_since_enter_ms=%s",
@@ -533,6 +545,9 @@ def _do_save_csv_body(
     api_range = ptr_s.used_range
     val_row_count = api_range.rows.count
     val_total = max(1, val_row_count)
+
+    if progress_path is not None and not progress_ui_already_shown and parent_hwnd:
+        _submit_progress_ui(parent_hwnd, sheet_id or sheet_id_for_progress or "_", progress_path, total_steps)
 
     if progress_path is not None:
         _progress_write_monotonic(
@@ -815,10 +830,12 @@ def _watch_result(
                     set_last_folder(os.path.dirname(path))
                 except Exception:
                     pass
+                try:
+                    progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
+                except Exception:
+                    pass
                 _bring_excel_to_front(parent_hwnd)
                 progress_path = _progress_path(sheet_id or "_")
-                if parent_hwnd:
-                    _submit_progress_ui(parent_hwnd, sheet_id or "_", progress_path, 2)
                 _do_save_csv(
                     book,
                     sheet_id,
@@ -828,6 +845,7 @@ def _watch_result(
                     parent_hwnd=parent_hwnd,
                     sheet_id_for_progress=sheet_id or "",
                     t_load0=t_load0,
+                    progress_ui_already_shown=True,
                 )
             else:
                 if dialog_wait_ms is not None:

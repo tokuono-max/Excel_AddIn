@@ -3,15 +3,17 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-06-06
-Version: 1.3.26
+Updated: 2026-06-13
+Version: 1.3.30
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
-  - 1.3.26 (2026-06-06) ハング緩和: DONE を ScreenUpdating 復帰前に書込・1秒待機。suspend restore_on_exit=False。
+  - 1.3.30 (2026-06-13) 進捗 UI 共通設定を core.csv_tool_progress_ui に委譲（保存・結合・分割と共有）。
+  - 1.3.29 (2026-06-13) ファイル確定直後に progress_dialog_wait_cursor_on（Excel 砂時計の即時反映）。
+  - 1.3.28 (2026-06-13) UI責務整理: progress_closed_path ACK 待ち後に restore。bring_to_front 廃止。DONE 後 sleep を ACK に置換。
   - 1.3.25 (2026-06-06) 進捗表示中は excel_lock=True（読込中 Excel 操作無効）。完了時 teardown で解除。
   - 1.3.24 (2026-06-04) 読込終了時に EnableEvents=True を保証（core.excel_perf_mode / restore_excel_host_after_operation）。シート切替でステータスバー復帰。
   - 1.3.23 (2026-06-04) シート名: ファイル名を Excel 最大 31 文字・禁止文字除去に整形。分割時は -N 分を確保して切り詰め。
@@ -46,14 +48,29 @@ from typing import Any
 
 from core import core_env
 from core.core_log import get_diag_logger, get_logger
+from core.csv_ld_progress_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_ack,
+)
+from core.csv_tool_progress_ui import (
+    DEFAULT_PROGRESS_BAR_CREEP_PCT,
+    DEFAULT_PROGRESS_POLL_MS,
+    enrich_progress_req_dict,
+    resolve_progress_bar_creep_pct as _shared_resolve_progress_bar_creep_pct,
+    resolve_progress_poll_ms as _shared_resolve_progress_poll_ms,
+)
 from core.excel_host_restore import restore_excel_host_after_operation
-from core.core_progress_wait import wait_after_progress_done
 from core.excel_perf_mode import set_excel_performance_mode
-from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.core_cursor import (
+    notify_ui_ready,
+    notify_wait_form_ready,
+    progress_dialog_wait_cursor_on,
+)
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.26"
+__version__ = "1.3.28"
 
 
 def _log_jit_breakdown(
@@ -124,14 +141,8 @@ def _elapsed_ms(since: float) -> int:
 
 
 def _bring_excel_to_front(hwnd: int) -> None:
-    """ネイティブ UI や別プロセス表示のあと Excel が背面に回る事象の緩和（ベストエフォート）。"""
-    if not int(hwnd or 0) or _w32 is None or os.name != "nt":
-        return
-    try:
-        _w32.bring_to_front(int(hwnd))
-    except Exception:
-        pass
-
+    """非推奨: CSV読込 UI ライフサイクル整理後は呼ばない（完了通知 Z 順・他アプリ前面の退行防止）。"""
+    return
 
 def _ld_trace(fmt: str, *args: object) -> None:
     """診断ログ有効時のみ hc_csv_diag に [CSV_LD_TRACE] を出す。"""
@@ -152,12 +163,39 @@ DEFAULT_PROGRESS_BAR_CREEP_PCT: int = 2
 DEFAULT_EXCEL_WRITE_STEP_ROWS: int = 50000
 DEFAULT_PROGRESS_MIN_INTERVAL_SEC: float = 0.12
 DEFAULT_PROGRESS_WRITE_NOTIFY_ROWS: int = 5000
+CSV_LD_PROGRESS_PHASE_TOTAL: int = 4
+CSV_LD_DONE_DELAY_MS: int = 400
 LARGE_FILE_PROGRESS_MIN_INTERVAL_SEC: float = 0.08
 LARGE_FILE_PROGRESS_STRIDE_ROWS: int = 2000
 LARGE_FILE_PROGRESS_WRITE_NOTIFY_ROWS: int = 5000
 LARGE_FILE_ROWS_THRESHOLD: int = 500_000
 LARGE_FILE_READ_CHUNK_ROWS: int = 100_000
 LARGE_FILE_WRITE_STEP_ROWS: int = 200_000
+
+def _csv_ld_progress_phase_label(phase_i: int, label: str) -> str:
+    """進捗ラベル用: 「N/4 工程名」形式。"""
+    pi = max(0, int(phase_i))
+    return f"{pi}/{CSV_LD_PROGRESS_PHASE_TOTAL} {str(label or '').strip()}"
+
+
+def _csv_ld_progress_detail(
+    *,
+    done: int | None = None,
+    total: int | None = None,
+    pct: int | None = None,
+    extra: str = "",
+) -> str:
+    """進捗ラベル2行目用の詳細テキスト（行数・割合・補足）。"""
+    parts: list[str] = []
+    if done is not None and total is not None:
+        parts.append(f"{int(done):,} / {int(total):,} 行")
+    if pct is not None:
+        parts.append(f"({max(0, min(100, int(pct)))}%)")
+    ex = str(extra or "").strip()
+    if ex:
+        parts.append(ex)
+    return " ".join(parts).strip()
+
 
 def _csv_ld_legacy_text_write() -> bool:
     """HC_CSV_LD_LEGACY_TEXT_WRITE=1 のとき従来の text_mode（' 付与 + 塊ごと @）。"""
@@ -242,25 +280,13 @@ def resolve_progress_write_notify_rows(val_total: int) -> int:
 
 
 def resolve_progress_poll_ms() -> int:
-    """進捗 UI のポーリング間隔（ms）。HC_CSV_LD_PROGRESS_POLL_MS。"""
-    raw = core_env.get("HC_CSV_LD_PROGRESS_POLL_MS")
-    if raw is not None:
-        try:
-            return max(50, min(500, int(str(raw).strip())))
-        except ValueError:
-            pass
-    return DEFAULT_PROGRESS_POLL_MS
+    """進捗 UI のポーリング間隔（ms）。"""
+    return _shared_resolve_progress_poll_ms()
 
 
 def resolve_progress_bar_creep_pct() -> int:
-    """進捗バーの 1 ティックあたりの繰り上げ幅（%）。HC_CSV_LD_PROGRESS_BAR_CREEP_PCT。"""
-    raw = core_env.get("HC_CSV_LD_PROGRESS_BAR_CREEP_PCT")
-    if raw is not None:
-        try:
-            return max(0, min(10, int(str(raw).strip())))
-        except ValueError:
-            pass
-    return DEFAULT_PROGRESS_BAR_CREEP_PCT
+    """進捗バーの 1 ティックあたりの繰り上げ幅（%）。"""
+    return _shared_resolve_progress_bar_creep_pct()
 
 
 def resolve_progress_row_total(val_total: int) -> int:
@@ -478,7 +504,12 @@ def _normalize_row_to_strings(row: list[Any]) -> list[str]:
 
 
 def _submit_progress_ui(
-    parent_hwnd: int, sheet_id: str, progress_path: Path, phase_total: int
+    parent_hwnd: int,
+    sheet_id: str,
+    progress_path: Path,
+    phase_total: int,
+    *,
+    progress_closed_path: Path | None = None,
 ) -> None:
     """ui_server へ進捗ウィンドウ表示を要求する（モデルレス）。送信時点の Excel 矩形を渡し、UI がその位置に合わせて中央配置する。"""
     try:
@@ -488,16 +519,18 @@ def _submit_progress_ui(
         res_dir.mkdir(parents=True, exist_ok=True)
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_progress_ld_{ts_ms}_{os.getpid()}.pkl")
-        req_dict = {
-            "action": "progress",
-            "progress_path": str(progress_path),
-            "phase_total": int(phase_total),
-            "excel_lock": True,
-            "progress_poll_ms": resolve_progress_poll_ms(),
-            "progress_bar_creep_pct": resolve_progress_bar_creep_pct(),
-            # 枠だけ表示を避けるため Qt 描画を使用（WA_NativeWindow を付けない）
-            "no_native_window": True,
-        }
+        req_dict = enrich_progress_req_dict(
+            {
+                "action": "progress",
+                "progress_path": str(progress_path),
+                "phase_total": int(phase_total),
+                "excel_lock": True,
+            },
+            done_delay_ms=CSV_LD_DONE_DELAY_MS,
+            no_native_window=True,
+        )
+        if progress_closed_path is not None:
+            req_dict["progress_closed_path"] = str(progress_closed_path)
         if excel_rect is not None:
             req_dict["excel_rect"] = list(excel_rect)
         payload = {
@@ -880,7 +913,10 @@ def _execute_jit_import(
             {
                 "status": "RUN",
                 "phase_i": 2,
-                "phase": "Excelへ書き込み中",
+                "phase": _csv_ld_progress_phase_label(2, "Excelへ書き込み中"),
+                "detail": _csv_ld_progress_detail(
+                    done=done_rows, total=prog_row_total, pct=pct
+                ),
                 "done": done_rows,
                 "total": prog_row_total,
                 "pct": pct,
@@ -904,14 +940,17 @@ def _execute_jit_import(
     # 工程: 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了
     total_steps = 4
     # 準備中を _do_load_csv で既に seq=0 で出している場合は phase1 を seq=1 から開始
-    progress_seq = 1 if progress_ui_already_shown else 0
+    progress_seq = 2 if progress_ui_already_shown else 0
     if progress_path is not None:
         _progress_write(
             progress_path,
             {
                 "status": "RUN",
                 "phase_i": 1,
-                "phase": "ファイル解析中",
+                "phase": _csv_ld_progress_phase_label(1, "ファイル解析中"),
+                "detail": _csv_ld_progress_detail(
+                    done=0, total=prog_row_total, pct=0, extra="CSV読込開始"
+                ),
                 "done": 0,
                 "total": prog_row_total,
                 "pct": 0,
@@ -921,13 +960,42 @@ def _execute_jit_import(
         )
         progress_seq += 1
         if progress_ui_already_shown:
-            time.sleep(0.2)
+            time.sleep(0.05)
         else:
             if parent_hwnd:
-                _submit_progress_ui(parent_hwnd, sheet_id, progress_path, total_steps)
+                _submit_progress_ui(
+                    parent_hwnd,
+                    sheet_id,
+                    progress_path,
+                    total_steps,
+                    progress_closed_path=progress_closed_ack_path(sheet_id),
+                )
                 time.sleep(core_env.progress_window_startup_wait_sec())
 
-    # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に遅延）
+        if prog_row_total <= 50_000:
+            _pct_pre = min(30, calc_progress_pct(2, max(1, prog_row_total // 4), prog_row_total))
+            _progress_write(
+                progress_path,
+                {
+                    "status": "RUN",
+                    "phase_i": 2,
+                    "phase": _csv_ld_progress_phase_label(2, "Excelへ書き込み中"),
+                    "detail": _csv_ld_progress_detail(
+                        done=max(1, prog_row_total // 4),
+                        total=prog_row_total,
+                        pct=_pct_pre,
+                        extra="準備中",
+                    ),
+                    "done": max(1, prog_row_total // 4),
+                    "total": prog_row_total,
+                    "pct": _pct_pre,
+                    "current_file": str_fname,
+                    "seq": progress_seq,
+                },
+            )
+            progress_seq += 1
+
+    # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に ACK 待ちで遅延）
     t_csv_read_wait0 = time.perf_counter()
     with xlc.suspend_sheet_updates(book, restore_on_exit=False):
         for df_chunk in reader:
@@ -1060,15 +1128,22 @@ def _execute_jit_import(
 
         # 工程3: 列幅調整（オートフィット）。更新停止中に実行し、with 抜けで更新開始
         if progress_path is not None:
+            _af_pct = calc_progress_pct(3, prog_row_total, prog_row_total)
             _progress_write(
                 progress_path,
                 {
                     "status": "RUN",
                     "phase_i": 3,
-                    "phase": "列幅調整中",
+                    "phase": _csv_ld_progress_phase_label(3, "列幅調整中"),
+                    "detail": _csv_ld_progress_detail(
+                        done=prog_row_total,
+                        total=prog_row_total,
+                        pct=_af_pct,
+                        extra="オートフィット",
+                    ),
                     "done": prog_row_total,
                     "total": prog_row_total,
-                    "pct": calc_progress_pct(3, prog_row_total, prog_row_total),
+                    "pct": _af_pct,
                     "current_file": str_fname,
                     "seq": progress_seq,
                 },
@@ -1077,16 +1152,28 @@ def _execute_jit_import(
         if max_col > 0:
             total_parts = curr_part_idx
             for part_i in range(1, curr_part_idx + 1):
+                sheet_name = _csv_ld_target_sheet_name(
+                    str_base_resolved, part_i, is_split_mode
+                )
                 if progress_path is not None and total_parts > 1:
+                    _af_pct_p = calc_progress_pct(3, prog_row_total, prog_row_total)
                     _progress_write(
                         progress_path,
                         {
                             "status": "RUN",
                             "phase_i": 3,
-                            "phase": f"列幅調整中 ({part_i}/{total_parts} シート)",
+                            "phase": _csv_ld_progress_phase_label(
+                                3, f"列幅調整中 ({part_i}/{total_parts} シート)"
+                            ),
+                            "detail": _csv_ld_progress_detail(
+                                done=prog_row_total,
+                                total=prog_row_total,
+                                pct=_af_pct_p,
+                                extra=f"シート: {sheet_name}",
+                            ),
                             "done": prog_row_total,
                             "total": prog_row_total,
-                            "pct": calc_progress_pct(3, prog_row_total, prog_row_total),
+                            "pct": _af_pct_p,
                             "current_file": str_fname,
                             "seq": progress_seq,
                         },
@@ -1094,9 +1181,6 @@ def _execute_jit_import(
                     progress_seq += 1
                 try:
                     t_af0 = time.perf_counter()
-                    sheet_name = _csv_ld_target_sheet_name(
-                        str_base_resolved, part_i, is_split_mode
-                    )
                     last_row_i = MAX_ROWS_PER_SHEET if part_i < curr_part_idx else val_accum_in_sheet
                     for s in book.sheets:
                         if getattr(s, "name", "") != sheet_name:
@@ -1125,7 +1209,7 @@ def _execute_jit_import(
                 {
                     "status": "DONE",
                     "phase_i": total_steps,
-                    "phase": "完了",
+                    "phase": _csv_ld_progress_phase_label(total_steps, "完了"),
                     "done": prog_row_total,
                     "total": prog_row_total,
                     "pct": 100,
@@ -1135,12 +1219,12 @@ def _execute_jit_import(
                         {"no": 1, "name": str_fname or "loaded.csv", "rows": val_total},
                     ],
                     "done_detail_text": done_detail_text,
+                    "done_delay_ms": CSV_LD_DONE_DELAY_MS,
                     "seq": progress_seq,
                 },
             )
-            wait_after_progress_done(min_sec=1.0)
-
-    jit_total_ms = _elapsed_ms(t_jit_body0)
+            # UI が進捗クローズ＋完了通知表示まで終えるのを ACK で待つ（finally の restore より先に UI を完了させる）
+        jit_total_ms = _elapsed_ms(t_jit_body0)
     _log_jit_breakdown(
         csv_read_wait_ms=ms_csv_read_wait,
         matrix_tolist_ms=ms_matrix_tolist,
@@ -1177,6 +1261,9 @@ def _do_load_csv(
         time.perf_counter(),
     )
     progress_path = _progress_path(sheet_id)
+    progress_closed_path = progress_closed_ack_path(sheet_id)
+    reset_progress_closed_ack(progress_closed_path)
+    progress_ack_expected = bool(progress_ui_already_shown)
     # 進捗を早期表示（ui_server が既に表示済みでない場合のみ。csv_ld ファイル選択経路では ui_server が即表示するためスキップ）
     if not progress_ui_already_shown:
         _progress_write(
@@ -1193,12 +1280,20 @@ def _do_load_csv(
             },
         )
         if parent_hwnd:
-            _submit_progress_ui(parent_hwnd, sheet_id, progress_path, 4)
+            _submit_progress_ui(
+                parent_hwnd,
+                sheet_id,
+                progress_path,
+                4,
+                progress_closed_path=progress_closed_path,
+            )
+            progress_ack_expected = True
 
     if xlc is None:
         logger.error("[CSV_LD] core_xlc not available")
         _progress_write_sheet_error(progress_path, sheet_id)
-        _bring_excel_to_front(parent_hwnd)
+        if progress_ack_expected:
+            wait_progress_closed_ack(progress_closed_path)
         restore_excel_host_after_operation(parent_hwnd, sheet_id)
         return
     book, sh_origin = _resolve_book_and_sheet(
@@ -1207,9 +1302,27 @@ def _do_load_csv(
     if sh_origin is None:
         logger.error("[CSV_LD] 対象シートなし GUID=%s", sheet_id)
         _progress_write_sheet_error(progress_path, sheet_id)
-        _bring_excel_to_front(parent_hwnd)
+        if progress_ack_expected:
+            wait_progress_closed_ack(progress_closed_path)
         restore_excel_host_after_operation(parent_hwnd, sheet_id)
         return
+
+    str_fname_early = os.path.basename(str_csv_path)
+    if progress_ui_already_shown:
+        _progress_write(
+            progress_path,
+            {
+                "status": "RUN",
+                "phase_i": 1,
+                "phase": _csv_ld_progress_phase_label(1, "ファイル解析中"),
+                "detail": _csv_ld_progress_detail(extra=f"行数確認中 — {str_fname_early}"),
+                "done": 0,
+                "total": 0,
+                "pct": 0,
+                "current_file": str_fname_early,
+                "seq": 1,
+            },
+        )
 
     t_rows0 = time.perf_counter()
     val_total = _get_row_count_binary(str_csv_path)
@@ -1237,7 +1350,8 @@ def _do_load_csv(
         if not _message_yesno(parent_hwnd, msg, "CSV読込"):
             logger.info("[CSV_LD] 分割読込ユーザー拒否")
             _progress_write(progress_path, {"status": "DONE", "seq": 1})
-            _bring_excel_to_front(parent_hwnd)
+            if progress_ack_expected:
+                wait_progress_closed_ack(progress_closed_path)
             restore_excel_host_after_operation(parent_hwnd, sheet_id)
             return
 
@@ -1282,6 +1396,8 @@ def _do_load_csv(
             pass
     finally:
         set_excel_performance_mode(book.app, False)
+        if progress_ack_expected:
+            wait_progress_closed_ack(progress_closed_path)
         restore_excel_host_after_operation(parent_hwnd, sheet_id, book.app)
         if xlc:
             xlc.yield_to_excel()
@@ -1334,10 +1450,13 @@ def _watch_result(
                     sheet_id or "",
                 )
                 try:
+                    progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
+                except Exception:
+                    pass
+                try:
                     set_last_folder(os.path.dirname(path))
                 except Exception:
                     pass
-                _bring_excel_to_front(parent_hwnd)
                 _do_load_csv(
                     book,
                     sheet_id,
@@ -1359,7 +1478,6 @@ def _watch_result(
                     _elapsed_ms(t_load0),
                     time.perf_counter(),
                 )
-            _bring_excel_to_front(parent_hwnd)
             return
         time.sleep(0.05)
 

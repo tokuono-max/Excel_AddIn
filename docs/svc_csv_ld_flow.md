@@ -18,6 +18,32 @@ CSV読込機能の、ユーザーから見える画面・通知の流れを時�
 
 ---
 
+---
+
+## UI 責務（2026-06-13 整理）
+
+| 処理 | 担当（1回だけ） | 備考 |
+|------|----------------|------|
+| Excel COM 復元 | **svc** `finally` の `restore_excel_host_after_operation` | UI 側 restore は行わない |
+| 進捗 pickle 更新 | **svc** `_progress_write` | |
+| 進捗画面の開閉 | **ProgressDialog** | |
+| 進捗バー表示 | **ProgressDialog** `_bar_creep_timer` | pickle は target のみ更新 |
+| 完了通知の表示 | **ProgressDialog** → **DoneDialog** | 非モーダル `show()` |
+| 完了通知の Z順 | **DoneDialog** `done_dialog_show_event_on_excel` | `EXCEL_LOCK=false` 時は Excel を先に前面化しない |
+| svc↔UI 順序保証 | **progress_closed_path** ACK | UI が完了通知表示後に ACK、svc が restore 前に待機 |
+
+### ACK 付きの終了シーケンス
+
+```
+svc: DONE pickle 書込
+  → UI: バー creep → 進捗閉じる → DoneDialog show
+  → UI: progress_closed_path に ACK 書込
+  → svc: wait_progress_closed_ack()
+  → svc: restore_excel_host_after_operation()（1回）
+```
+
+---
+
 ## 時系列（詳細）
 
 | 時刻 | 発生場所 | 画面・処理 | 補足 |
@@ -36,9 +62,10 @@ CSV読込機能の、ユーザーから見える画面・通知の流れを時�
 | **T11** | svc_server | CSV 読込・Excel 書込ループ。progress_path を phase 2 で更新 | 「2/4 Excelへ書き込み中」と done/total・pct |
 | **T12** | svc_server | 書込完了後、phase 3 を書き **列幅調整（オートフィット）** 実行 | 「3/4 列幅調整中」95% |
 | **T13** | svc_server | progress_path に **DONE** を書き込み | |
-| **T14** | ui_server | 進捗画面が DONE を検知。「**完了**」100% 表示 → **1.5 秒後に進捗画面を閉じる** | ui_common.ProgressDialog の仕様 |
-| **T15** | svc_server | HC_STATUS_INFO / HC_NOTIFY_RETV を設定。ステータスバーに「CSV読込終了｜…」を表示 | 完了通知（ポップアップは VBA 側で制御） |
-| **T16** | Excel | load_csv から制御が戻る。必要に応じて VBA が完了メッセージを表示 | |
+| **T14** | ui_server | 進捗画面が DONE を検知。バーを creep で 100% へ → **done_delay_ms 後に進捗を閉じる** | 既定 400ms |
+| **T14b** | ui_server | **完了通知（DoneDialog）** を表示。`progress_closed_path` に ACK | svc はまだ restore しない |
+| **T15** | svc_server | **ACK 待ち**のあと `restore_excel_host_after_operation`（1回） | 二重 restore 廃止 |
+| **T16** | svc_server | HC_STATUS_INFO / ステータスバー更新 | |
 
 ---
 

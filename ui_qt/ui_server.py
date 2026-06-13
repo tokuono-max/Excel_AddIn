@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_server.py
 Created: 2026-02-09
-Updated: 2026-05-03
-Version: 1.4.57
+Updated: 2026-06-13
+Version: 1.4.61
 Purpose:
   svc層からの要求(req_*.pkl)を監視し、Qtダイアログを生成・実行して結果(res_*.pkl)を返す。
   - IPC: ui_qt.ipc_file を使用（req/res/ready/shutdown）
@@ -18,6 +18,7 @@ Purpose:
   - shutdown: QTimer で shutdown.flag をポーリングし、ネスト QEventLoop（csv_mg 結合メイン）と dlg.exec 中でもループ終了＋トップレベル close。clear_shutdown_flag は mutex 取得成功後のみ（二重起動時にフラグを消さない）。
 
 History (latest 3):
+  - 1.4.61 (2026-06-13) csv_ld: 完了通知の自動 close は行わない（ui_dialog_progress 側で非モーダル show に変更済み）。
   - 1.4.60 (2026-06-06) 旧 COM WaitForm 解除（install_ribbon_startup_wait_dismiss）を削除。.ready 合図のみ。
   - 1.4.59 (2026-06-06) create_dialog 成功時に write_waitform_ready_signal（VBA DoEvents 待ち合図）。
   - 1.4.57 (2026-05-03) ui_qt.ui_help help_show: dlg.exec 直前に bump_front_follow_deferred_ensure_generation と HELP_BEFORE_MODAL_EXEC の QEventLoop 待ち（重複ジャンプ後のヘルプ前面化のため。ui_help.json の TOPMOST/FOLLOW は変更なし）。
@@ -1333,7 +1334,8 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
             try:
                 got = _csv_sp_conflict_got
                 got.setdefault("rc", int(rc))
-                if int(rc) != accepted:
+                ch = str(got.get("choice", "")).strip().lower()
+                if int(rc) != accepted and ch not in ("apply", "overwrite", "rename"):
                     got["status"] = "CANCEL"
                     got["files"] = []
                 else:
@@ -1351,50 +1353,48 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                         got["files"] = []
                     else:
                         got.setdefault("status", "OK")
-                    # csv_ld でファイル選択OK時: 無表示時間を1秒未満にするため、同一プロセスで進捗を即表示
-                    if action == "csv_ld" and got.get("status") == "OK":
-                        try:
-                            root = Path(str(ipc_file.get_ipc_root()))
-                            progress_path = root / "progress" / f"progress_ld_{sheet_id}.pkl"
-                            progress_path.parent.mkdir(parents=True, exist_ok=True)
-                            ipc_file.write_pickle(
-                                progress_path,
-                                {
-                                    "status": "RUN",
-                                    "phase_i": 0,
-                                    "phase": "準備中...",
-                                    "done": 0,
-                                    "total": 0,
-                                    "pct": 0,
-                                    "current_file": "",
-                                    "seq": 0,
-                                },
-                            )
-                            progress_req_dict = {
-                                "action": "progress",
-                                "progress_path": str(progress_path),
-                                "phase_total": 4,
-                                "excel_lock": True,
-                                "no_native_window": True,
-                                "progress_poll_ms": 40,
-                                "progress_bar_creep_pct": 2,
-                            }
-                            excel_rect = _get_window_rect(parent_hwnd)
-                            if excel_rect is not None:
-                                progress_req_dict["excel_rect"] = excel_rect
-                            progress_dlg = mod.create_dialog(
-                                progress_req_dict, parent_hwnd, sheet_id
-                            )
-                            if hasattr(progress_dlg, "show"):
-                                progress_dlg.show()
-                                logger.debug(
-                                    "[CSV_LD_FLOW] ui_server: progress shown immediately after file picker OK t=%.3f",
-                                    time.time(),
+                    # ファイル確定直後: 無表示時間を短くするため同一プロセスで進捗を即表示
+                    if got.get("status") == "OK":
+                        if action == "csv_ld":
+                            try:
+                                from core.csv_ld_progress_ack import (
+                                    progress_closed_ack_path,
+                                    reset_progress_closed_ack,
                                 )
-                        except Exception as prog_exc:
-                            logger.warning(
-                                "[CSV_LD_FLOW] ui_server: immediate progress show failed: %s",
-                                prog_exc,
+
+                                _closed = progress_closed_ack_path(str(sheet_id or "_"))
+                                reset_progress_closed_ack(_closed)
+                                closed_path = str(_closed)
+                            except Exception:
+                                closed_path = None
+                            from ui_qt.ui_immediate_progress import try_show_immediate_progress_after_pick
+
+                            try_show_immediate_progress_after_pick(
+                                feature="ld",
+                                mod=mod,
+                                parent_hwnd=parent_hwnd,
+                                sheet_id=str(sheet_id or "_"),
+                                phase_total=4,
+                                phase_label="0/4 準備中...",
+                                detail="ファイルを読み込みます",
+                                done_delay_ms=400,
+                                progress_closed_path=closed_path,
+                                get_window_rect=_get_window_rect,
+                            )
+                        elif action == "csv_sv":
+                            from ui_qt.ui_immediate_progress import try_show_immediate_progress_after_pick
+
+                            try_show_immediate_progress_after_pick(
+                                feature="sv",
+                                mod=mod,
+                                parent_hwnd=parent_hwnd,
+                                sheet_id=str(sheet_id or "_"),
+                                phase_total=2,
+                                phase_label="0/2 準備中...",
+                                detail="CSVを保存します",
+                                done_delay_ms=400,
+                                progress_closed_path=None,
+                                get_window_rect=_get_window_rect,
                             )
                     return got
             except Exception:

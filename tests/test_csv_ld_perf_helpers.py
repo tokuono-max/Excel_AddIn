@@ -53,6 +53,13 @@ def test_resolve_progress_poll_and_creep_defaults() -> None:
     assert ld.resolve_progress_bar_creep_pct() == ld.DEFAULT_PROGRESS_BAR_CREEP_PCT
 
 
+def test_csv_ld_progress_labels_and_detail() -> None:
+    assert ld._csv_ld_progress_phase_label(2, "Excelへ書き込み中") == "2/4 Excelへ書き込み中"
+    assert ld._csv_ld_progress_detail(done=100, total=200, pct=50) == "100 / 200 行 (50%)"
+    assert ld._csv_ld_progress_detail(extra="行数確認中 — foo.csv") == "行数確認中 — foo.csv"
+    assert ld.CSV_LD_DONE_DELAY_MS == 400
+
+
 def test_resolve_progress_min_interval_large_file() -> None:
     assert ld.resolve_progress_min_interval_sec(870_247) == ld.LARGE_FILE_PROGRESS_MIN_INTERVAL_SEC
     assert ld.resolve_progress_min_interval_sec(1000) == ld.DEFAULT_PROGRESS_MIN_INTERVAL_SEC

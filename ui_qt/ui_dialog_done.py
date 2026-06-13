@@ -4,7 +4,7 @@ Python: 3.12
 Module: ui_qt/ui_dialog_done.py
 Created: 2026-03-10
 Updated: 2026-04-08
-Version: 0.2.4
+Version: 0.2.5
 Purpose:
   共通完了通知ダイアログ（DoneDialog）および create_done_dialog を提供する。
   ui_common の Done 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -17,6 +17,7 @@ Purpose:
   - 呼び出し側は ui_common.create_done_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.2.5 (2026-06-13) showEvent: done_dialog_show_event_on_excel に一本化（EXCEL_LOCK=false 時は Excel を先に前面化しない）。
   - 0.2.4 (2026-04-08) 名前列幅を実ファイル名長＋上限で算出（短い名前での過剰幅を抑制）。req.output_dir を MSG_OUTPUT_DIR_PREFIX で表示。
   - 0.2.3 (2026-04-08) DEFAULT_WIDTH=0 時、一覧幅に合わせダイアログ幅を確保（行数・容量列の見切れ抑制）。items の rows/row_count・size_bytes フォールバック。
   - 0.2.2 (2026-04-08) LIST_TRUNCATE_NAMES / LIST_HORIZONTAL_SCROLL: 一覧の横見切れ対策（省略解除・横スクロール可）。
@@ -382,6 +383,7 @@ class DoneDialog(QDialog):
             apply_common_window_style(self, int(parent_hwnd or 0))
         win_cfg = _cfg.get("WINDOW") or {}
         self._done_win_cfg = win_cfg
+        self._done_screen_cfg = _cfg
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -400,12 +402,21 @@ class DoneDialog(QDialog):
                 self._done_excel_locked = True
             except Exception:
                 pass
-        # 位置は create 済み。前面化のみ（再センタでちらつかないようにする）
+        # 位置は create 済み。前面化は done_dialog_show_event_on_excel に一本化
         if self._parent_hwnd:
             try:
-                _ph = int(self._parent_hwnd)
-                QTimer.singleShot(0, lambda: ensure_front(self, _ph))
-                QTimer.singleShot(150, lambda: ensure_front(self, _ph))
+                from ui_qt.ui_common import done_dialog_show_event_on_excel
+
+                req_show: dict = {}
+                _er = getattr(self, "_excel_rect", None)
+                if _er is not None:
+                    req_show["excel_rect"] = list(_er)
+                done_dialog_show_event_on_excel(
+                    self,
+                    int(self._parent_hwnd),
+                    req_show,
+                    getattr(self, "_done_screen_cfg", None) or {},
+                )
             except Exception:
                 pass
 

@@ -4,15 +4,16 @@ Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
 Updated: 2026-05-05 (JST)
-Version: 1.4.26
+Version: 1.4.28
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.28 (2026-06-13) 進捗表示: Excel書き込み→CSVファイル結合中。
+  - 1.4.27 (2026-06-13) 進捗 UI 共通設定（poll/creep）とファイル確定直後の砂時計 ON。
   - 1.4.26 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
-  - 1.4.25 (2026-06-06) 進捗表示中は excel_lock=True（結合実行中 Excel 操作無効）。
   - 1.4.24 (2026-06-04) 結合処理中の砂時計 ON（ファイル確定後〜完了）。Excel 書込みループで tick 再武装。
   - 1.4.23 (2026-05-05) progress の parent_hwnd を環境変数依存から引数へ統一。progress_closed_path ACK 待ちを追加し、進捗クローズ後に完了通知/再表示へ遷移。
   - 1.4.22 (2026-04-09) 結合メイン IPC と done_then_merge に excel_rect（Excel HWND の GetWindowRect）を付与。進捗と同じ送信時点矩形で中央寄せを統一。
@@ -35,8 +36,13 @@ import time
 from pathlib import Path
 from typing import Any
 from core.core_log import get_diag_logger, get_logger
-from core.core_cursor import notify_ui_ready, notify_wait_form_ready
+from core.core_cursor import (
+    notify_ui_ready,
+    notify_wait_form_ready,
+    progress_dialog_wait_cursor_on,
+)
 from core.core_progress_wait import wait_after_progress_done
+from core.csv_tool_progress_ui import enrich_progress_req_dict
 from core import core_cst as cst
 
 try:
@@ -197,14 +203,16 @@ def _submit_progress_ui(
             pass
         ts_ms = int(time.time() * 1000)
         result_path = str(res_dir / f"res_progress_{ts_ms}_{os.getpid()}.pkl")
-        req_inner: dict[str, Any] = {
-            "action": "progress",
-            "progress_path": str(progress_path),
-            "phase_total": int(phase_total),
-            "excel_lock": True,
-            # 進捗が一瞬で消えないよう完了表示前の滞留（ms）。ProgressDialog の req で上書き可。
-            "done_delay_ms": 1400,
-        }
+        req_inner: dict[str, Any] = enrich_progress_req_dict(
+            {
+                "action": "progress",
+                "progress_path": str(progress_path),
+                "phase_total": int(phase_total),
+                "excel_lock": True,
+            },
+            done_delay_ms=1400,
+            no_native_window=True,
+        )
         if progress_closed_path is not None:
             cp = str(progress_closed_path).strip()
             if cp:
@@ -405,6 +413,10 @@ def _watch_result(
                 progress_closed_path = _progress_closed_ack_path(sheet_id or "csv_mg")
                 try:
                     progress_closed_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
                 except Exception:
                     pass
                 _progress_write_monotonic(
@@ -715,7 +727,7 @@ def _merge_files_to_sheet(
                         {
                             "status": "RUN",
                             "phase_i": 3,
-                            "phase": "Excel書き込み",
+                            "phase": "CSVファイル結合中",
                             "done": done_rows,
                             "total": total_rows,
                             "pct": pct,
@@ -731,7 +743,7 @@ def _merge_files_to_sheet(
                                 {
                                     "status": "CANCEL",
                                     "phase_i": 3,
-                                    "phase": "Excel書き込み",
+                                    "phase": "CSVファイル結合中",
                                     "done": done_rows,
                                     "total": total_rows,
                                 },
@@ -749,7 +761,7 @@ def _merge_files_to_sheet(
                             {
                                 "status": "RUN",
                                 "phase_i": 3,
-                                "phase": "Excel書き込み",
+                                "phase": "CSVファイル結合中",
                                 "done": done_rows,
                                 "total": total_rows,
                                 "pct": pct,

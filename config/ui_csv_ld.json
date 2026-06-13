@@ -90,7 +90,7 @@
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
         "SHOW_CLOSE_BUTTON": false,
-        "TOPMOST": true
+        "TOPMOST": false
       }
     }
   }

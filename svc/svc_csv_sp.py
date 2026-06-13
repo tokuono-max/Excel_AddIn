@@ -4,15 +4,15 @@ Python: 3.10+
 Module: svc/svc_csv_sp.py
 Created: 2026-03-05
 Updated: 2026-06-04
-Version: 2.5.5
+Version: 2.5.8
 Purpose:
   CSVファイル分割（選択行による範囲分割）。アクティブシートの選択行を境界に分割し、
   各範囲をヘッダ付きで UTF-8(BOM) CSV として保存。データ不足時は Excel 中央でワーニング通知。
 
 History (latest 3):
+  - 2.5.8 (2026-06-13) 進捗表示: 保存中→分割保存中。同名確認「分割実施」後に保存されない不具合を修正。
+  - 2.5.7 (2026-06-13) 進捗 UI 共通設定（poll/creep）と分割保存開始直前の砂時計 ON。
   - 2.5.6 (2026-06-06) 分割保存ループを suspend(restore_on_exit=False) 内で実行。DONE+wait も suspend 内。
-  - 2.5.5 (2026-06-06) ハング緩和: DONE 後に wait_after_progress_done（固定 sleep から置換）。
-  - 2.5.4 (2026-06-06) 分割保存進捗（分割開始後）で excel_lock=True。保存中 Excel 操作無効。
   - 2.5.3 (2026-06-04) 保存: 通常 CSV 保存と同様、既定で表示文字列（Copy→クリップボード）でヘッダ・分割範囲を読込。HC_CSV_SV_USE_VALUE_READ=1 で .value 経路。
   - 2.5.2 (2026-06-04) 分割保存処理中の砂時計 ON（出力先確定後〜完了）。保存ループで tick 再武装。
   - 2.5.1 (2026-04-09) 重複キャンセル後の分割再表示で、再フォルダ選択まで split_csv が結果 pickle を監視し続ける（再オープン後の無処理を修正）。
@@ -54,7 +54,8 @@ if _path_root not in sys.path:
 from core.core_log import get_diag_logger, get_logger
 from core.core_progress_wait import wait_after_progress_done
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
-from core.core_cursor import notify_wait_form_ready
+from core.core_cursor import notify_wait_form_ready, progress_dialog_wait_cursor_on
+from core.csv_tool_progress_ui import enrich_progress_req_dict
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
@@ -321,14 +322,18 @@ def _submit_csv_sp_progress_modeless_ui(
     except Exception:
         pass
     ph = int(parent_hwnd or 0)
-    req_inner: dict[str, Any] = {
-        "action": "progress",
-        "progress_path": str(progress_path),
-        "phase_total": int(phase_total or 0),
-        "no_native_window": True,
-        "excel_lock": True,
-        "partner_csv_sp_reopen_template": reopen_template,
-    }
+    req_inner: dict[str, Any] = enrich_progress_req_dict(
+        {
+            "action": "progress",
+            "progress_path": str(progress_path),
+            "phase_total": int(phase_total or 0),
+            "no_native_window": True,
+            "excel_lock": True,
+            "partner_csv_sp_reopen_template": reopen_template,
+        },
+        done_delay_ms=400,
+        no_native_window=True,
+    )
     if w32 is not None and ph:
         try:
             er = w32.get_window_rect(ph)
@@ -547,6 +552,32 @@ def _rename_map_get(rm: dict[str, Any], k_idx: str | None) -> str:
     return str(v).strip()
 
 
+def _plans_after_conflict_drop_rows(
+    plans: List[dict[str, Any]],
+    drop_rows: List[int],
+    dup_names: set[str],
+) -> List[dict[str, Any]]:
+    """重複確認テーブルで削除した行（dup_names インデックス）に対応する plan を除外する。"""
+    if not drop_rows or not dup_names:
+        return plans
+    dup_list = sorted(dup_names)
+    drop_low: set[str] = set()
+    for idx in drop_rows:
+        try:
+            i = int(idx)
+            if 0 <= i < len(dup_list):
+                drop_low.add(dup_list[i].lower())
+        except (TypeError, ValueError):
+            continue
+    if not drop_low:
+        return plans
+    return [
+        p
+        for p in plans
+        if str(p.get("file_name", "")).strip().lower() not in drop_low
+    ]
+
+
 def _resolve_duplicate_output(
     plans: List[dict[str, Any]],
     output_dir: str,
@@ -610,14 +641,9 @@ def _resolve_duplicate_output(
     if choice == "overwrite":
         return "overwrite", plans
 
-    # apply/rename: drop_rows を先に除外
+    # apply/rename: drop_rows は重複テーブル行インデックス（plan インデックスではない）
     if drop_rows:
-        drop_set = {int(x) for x in drop_rows if int(x) >= 0}
-        kept: List[dict[str, Any]] = []
-        for idx, p in enumerate(plans):
-            if idx not in drop_set:
-                kept.append(p)
-        plans = kept
+        plans = _plans_after_conflict_drop_rows(plans, drop_rows, dup_names)
     if not plans:
         return "cancel", plans
 
@@ -1015,6 +1041,10 @@ def split_csv(
     total_rows = sum(int(p["row_count"]) for p in plans)
 
     try:
+        progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
+    except Exception:
+        pass
+    try:
         _submit_csv_sp_progress_modeless_ui(
             parent_hwnd,
             str(sheet_id or "_"),
@@ -1069,7 +1099,7 @@ def split_csv(
                     "status": "RUN",
                     "phase_i": phase_i,
                     "phase_total": phase_total,
-                    "phase": "保存中",
+                    "phase": "分割保存中",
                     "current_file": file_name,
                     "done": phase_i,
                     "total": phase_total,
@@ -1113,7 +1143,7 @@ def split_csv(
                     "status": "RUN",
                     "phase_i": phase_i,
                     "phase_total": phase_total,
-                    "phase": "保存中",
+                    "phase": "分割保存中",
                     "current_file": file_name,
                     "done": done_accum,
                     "total": total_rows,
