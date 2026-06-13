@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_data_agg_scenario.py
 Created: 2026-03-18
 Updated: 2026-03-18
-Version: 0.1.0
+Version: 0.2.2
 Purpose:
   データ集約用シナリオの JSON 形式定義・読込・検証・保存 API。
   項目一覧、項目ごとの取得ソース・抽出ルール・書き込みモード、照合キー、走査条件を格納する。

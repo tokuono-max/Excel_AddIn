@@ -53,7 +53,7 @@ from core.core_progress_wait import wait_after_progress_done
 logger = get_logger(__name__)
 _undo_diag = get_diag_logger("hc_csv_tool.diag.undo")
 _undo_perf = get_perf_logger("svc.svc_undo.perf")
-__version__ = "1.7.8"
+__version__ = "1.7.10"
 
 
 def _elapsed_ms(since: float) -> int:

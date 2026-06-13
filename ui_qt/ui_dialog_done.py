@@ -71,7 +71,7 @@ from ui_qt.ui_common import (
 # 定数: アイコン既定ピクセル（ui_common の _ICON_SIZE_M と揃える。ICON_SIZE 未指定時のフォールバック）
 _ICON_SIZE_M = 24
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 
 def _fmt_size_bytes(n: int, unit: str = "auto", decimals: int = 1) -> str:

@@ -61,7 +61,7 @@ from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
 _sp_diag = get_diag_logger("hc_csv_tool.diag.csv_sp")
-__version__ = "2.5.6"
+__version__ = "2.5.8"
 
 _SP_CFG_CACHE: dict[str, Any] | None = None
 

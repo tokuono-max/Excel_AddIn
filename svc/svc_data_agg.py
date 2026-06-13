@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_data_agg.py
 Created: 2026-03-18
 Updated: 2026-05-13
-Version: 0.4.7
+Version: 0.5.5
 Purpose:
   データ集約・クレンジング。シナリオの保存・読込、ステップ実行（動作確認）、一括実行のオーケストレーション。
   画面は ui_qt.ui_data_agg + config/ui_data_agg.json。走査・シナリオ・抽出・書き込みはサブモジュールに分離する。

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.26"
+__version__ = "1.4.28"
 import os
 import re
 import threading

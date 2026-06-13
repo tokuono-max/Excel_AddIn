@@ -4,7 +4,7 @@ Python: 3.12
 Module: core/core_xlc.py
 Created: 2026-01-xx
 Updated: 2026-06-06
-Version: 2.5.10
+Version: 2.5.11
 Purpose:
   Excel COM 操作の薄いヘルパ（UI非依存 / core から ui import 禁止）。
   - シートカスタムプロパティ（GUID 等）の読み書き
@@ -45,7 +45,7 @@ from core import core_cst as cst
 
 
 # 変数: バージョン情報
-__version__ = "2.5.9"
+__version__ = "2.5.11"
 
 EXCEL_SHEET_NAME_MAX_LEN: int = 31
 

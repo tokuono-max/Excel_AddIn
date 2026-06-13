@@ -4,13 +4,14 @@ Python: 3.12+
 Module: core.ribbon_invoke
 Created: 2025-11-28 (logic from ルート hc_main / hc_invoke)
 Updated: 2026-06-07
-Version: 1.12.1
+Version: 1.12.2
 Purpose:
     xlwings 短寿命プロセスからの invoke / register_book / clear_registry（司令塔）。
     フェーズ C で `core/` に移設。ルート `hc_main.py` は常駐ブリッジ専用。
     VBA からの公開入口は **core.excel_session** 経由。リボン tag と action は同一文字列。
 
 History (latest 3):
+  - 1.12.2 (2026-06-13): _ensure_book を HWND 直結（apps.active 廃止）。マルチ Excel 対応。
   - 1.12.1 (2026-06-07): xlwings 先行 import（起動時スレッド prewarm）を追加。
   - 1.12.0 (2026-04-11) `hc_invoke.py` から `core/ribbon_invoke.py` へ移設。診断ロガー `hc_csv_tool.diag.ribbon_invoke`。
   - 1.11.9 (2026-04-11) ルート hc_invoke.py。_invoke_simple_svc / _invoke_csv_family 集約。
@@ -44,7 +45,7 @@ from core.ribbon_public_to_svc import (
     RIBBON_TARGET_SVC_ACTION_KEYS,
 )
 
-__version__ = "1.12.1"
+__version__ = "1.12.2"
 
 logger = get_logger(__name__)
 
@@ -378,57 +379,6 @@ _active_books: Dict[int, Any] = {}
 _registry_lock: threading.Lock = threading.Lock()
 
 
-# ==============================================================================
-# Excel & Python 完全終了化（バックグラウンド残留対策）
-# ==============================================================================
-_EXCEL_MONITOR_STARTED: bool = False
-_EXCEL_MONITOR_PID: int = 0
-
-
-def _start_excel_lifecycle_monitor(excel_hwnd: int) -> None:
-    # Excelが閉じられたらPythonも終了する監視（daemon）
-    global _EXCEL_MONITOR_STARTED, _EXCEL_MONITOR_PID
-    try:
-        if _EXCEL_MONITOR_STARTED:
-            return
-        if not excel_hwnd:
-            return
-        from core import hc_w32 as w32
-
-        pid = w32.get_pid_from_hwnd(int(excel_hwnd))
-        if pid <= 0:
-            return
-        _EXCEL_MONITOR_PID = pid
-
-        def _worker():
-
-            try:
-                while True:
-                    time.sleep(1.0)
-                    if not w32.is_process_alive(_EXCEL_MONITOR_PID):
-                        try:
-                            logger.info(
-                                f"[LIFECYCLE] Excel process ended (pid={_EXCEL_MONITOR_PID}). Exiting python."
-                            )
-                        except Exception:
-                            pass
-                        os._exit(0)
-            except Exception:
-                return
-
-        th = threading.Thread(target=_worker, name="ExcelLifecycleMonitor", daemon=True)
-        th.start()
-        _EXCEL_MONITOR_STARTED = True
-        try:
-            logger.info(
-                f"[LIFECYCLE] Monitor started for Excel pid={_EXCEL_MONITOR_PID} hwnd={excel_hwnd}"
-            )
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
 # =============================================================================
 # xlwings 先行 import（起動時: 子プロセス spawn 待ちと並行）
 # =============================================================================
@@ -503,12 +453,20 @@ def _ensure_book(target_hwnd: Optional[int]) -> Optional[Any]:
             # 判定: 未登録、またはブック参照が物理的に失われている場合。
             if book_inst is None:
                 try:
-                    # 【目的】不整合を強制解消するため、この瞬間にアクティブな Excel を物理捕捉。
-                    # 命令分離: アプリケーションへの物理接続。
-                    app_active = xw.apps.active
-                    # 命令分離: ブックの原子捕捉。
-                    book_inst = app_active.books.active
-                    # 命令分離: レジストリへの物理保存を執行。
+                    from core.core_xlc import get_excel_context_from_hwnd
+
+                    ctx = get_excel_context_from_hwnd(int(target_hwnd), "")
+                    if ctx is not None:
+                        _app, book_inst, _sheet, _hwnd = ctx
+                    else:
+                        from xlwings._xlwindows import App as WinApp
+
+                        app_bound = xw.App(impl=WinApp(xl=int(target_hwnd)))
+                        book_inst = app_bound.books.active
+                    if book_inst is None:
+                        raise RuntimeError(
+                            f"No active workbook for HWND: {target_hwnd}"
+                        )
                     _active_books[target_hwnd] = book_inst
                     # 命令分離: 正常登録のログ記録。
                     logger.info(

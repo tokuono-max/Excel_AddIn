@@ -491,6 +491,12 @@ def main() -> int:
         run_bridge_startup_sweeps(_get_ipc_root())
     except Exception:
         pass
+    try:
+        from core.excel_lifecycle_monitor import ensure_excel_lifecycle_monitor
+
+        ensure_excel_lifecycle_monitor()
+    except Exception:
+        pass
     idle_sec = core_env.hc_main_poll_sec()
     while True:
         if _shutdown_requested():

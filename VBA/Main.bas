@@ -2,65 +2,100 @@ Attribute VB_Name = "Main"
 Option Explicit
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒ‚ƒWƒ…[ƒ‹–¼: Main (•W€ƒ‚ƒWƒ…[ƒ‹)
-' ì¬“ú: 2025-11-28
-' XV“ú: 2026-06-07
-' •¶ŽšƒR[ƒh: –{ƒ‚ƒWƒ…[ƒ‹‚Í Shift-JISiCP932j‚Å•Û‘¶‚·‚é‚±‚Æi“ú–{ŒêƒRƒƒ“ƒgE•¶Žš—ñ‚Ì”j‘¹–hŽ~jB
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   2.15.0 (2026-06-07) [I—¹] ShutdownExcelUiCleanup: excel_shutdown_workbook_close 1 ‰ñ‰»irestore/shutdown/registry ‚ð 1 RunPythonjB
-'   2.14.0 (2026-06-06) [UX] WaitForm: bridge Œã WaitForUiReadySignaliready ƒtƒ@ƒCƒ‹‘Ò‚¿EVBA “à NotifyUiReadyjB
-'   2.13.0 (2026-06-06) [UX] ForceCursorOnProgress: i’»ƒ_ƒCƒAƒƒO•\Ž¦Žž‚Ì»ŽžŒv ONB•ÛŒ¯ƒ^ƒCƒ}‚È‚µBŠO•” Python ‚©‚ç Application.Run ‚ÅŒÄ‚ÔiProgressDialog show/teardown ‚Ì‚Ý§ŒäjB
-'   2.12.0 (2026-06-03) [I—¹] ShutdownExcelUiCleanup: shutdown_all_with_force_kill('excel_shutdown') ‚ð’Ç‰ÁB
-'   2.11.0 (2026-06-01) [UX] ForceCursorOn: –{”Ôƒf[ƒ^W–ñˆêŠ‡‚Ì»ŽžŒv ONBŠO•” Python ‚©‚ç Application.Run ‚ÅŒÄ‚ÔiCOM ‚Ì Cursor ’¼‘‚«‚Í•s‰Â‚Ì‚½‚ßjB
-'   2.10.0 (2026-05-31) [I—¹] ShutdownExcelUiCleanup: Python EXCEL_RESTORE ŒÄ‚Ño‚µiCOM ƒnƒ“ƒO‹~ÏjB
-'   2.9.0 (2026-05-30) [I—¹] ShutdownExcelUiCleanup: WaitForm/OnTime/Cursor/Interactive •œŒ³iExcel Žc—¯‘ÎôjB
-'   2.6.0 (2026-04-11) [®—] TerminatePython / RunPythonSafe ‚Ì RunPython •¶Žš—ñ‚©‚ç hc_main ‚ðœ‹ŽBcore.excel_sessioniclear_internal_registry / invoke_actionjŒo—RB
-'   2.7.0 (2026-04-11) [d•¡] check_duplicates: bridge JSON ‚É selection_areasiŠe Area ‚Ì External ƒAƒhƒŒƒXj‚ð•t—^B
+' ï¿½ï¿½ï¿½Wï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½ï¿½: Main (ï¿½Wï¿½ï¿½ï¿½ï¿½ï¿½Wï¿½ï¿½ï¿½[ï¿½ï¿½)
+' ï¿½ì¬ï¿½ï¿½: 2025-11-28
+' ï¿½Xï¿½Vï¿½ï¿½: 2026-06-13
+' ï¿½ï¿½ï¿½ï¿½ï¿½Rï¿½[ï¿½h: ï¿½{ï¿½ï¿½ï¿½Wï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½ï¿½ Shift-JISï¿½iCP932ï¿½jï¿½Å•Û‘ï¿½ï¿½ï¿½ï¿½é‚±ï¿½Æiï¿½ï¿½ï¿½{ï¿½ï¿½Rï¿½ï¿½ï¿½ï¿½ï¿½gï¿½Eï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì”jï¿½ï¿½ï¿½hï¿½~ï¿½jï¿½B
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   2.20.0 (2026-06-13) [ï¿½Nï¿½ï¿½] startup_full ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½Íƒï¿½ï¿½{ï¿½ï¿½ï¿½ï¿½ï¿½Xï¿½Lï¿½bï¿½vï¿½iRunPython ï¿½ï¿½ï¿½ï¿½ï¿½hï¿½~ï¿½jï¿½B
+'   2.19.0 (2026-06-13) [ï¿½Nï¿½ï¿½] EnsurePythonHostsReady ï¿½ï¿½ hwnd ï¿½nï¿½ï¿½ï¿½EWaitForm ï¿½ï¿½ RunPython ï¿½Oï¿½ÖˆÚ“ï¿½ï¿½B
+'   2.18.0 (2026-06-13) [ï¿½Nï¿½ï¿½] ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Oï¿½ï¿½ EnsurePythonHostsReadyï¿½iPython ï¿½ï¿½ï¿½ï¿½ï¿½mï¿½Fï¿½jï¿½B
+'   2.17.0 (2026-06-13) [ï¿½Iï¿½ï¿½] B+A: BeforeClose ï¿½ï¿½ ShutdownExcelUiVbaOnly ï¿½Ì‚ÝiPython ï¿½ï¿½ lifecycle monitorï¿½jï¿½B
+'   2.15.0 (2026-06-07) [ï¿½Iï¿½ï¿½] ShutdownExcelUiCleanup: excel_shutdown_workbook_close 1 ï¿½ñ‰»irestore/shutdown/registry ï¿½ï¿½ 1 RunPythonï¿½jï¿½B
+'   2.14.0 (2026-06-06) [UX] WaitForm: bridge ï¿½ï¿½ WaitForUiReadySignalï¿½iready ï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½Ò‚ï¿½ï¿½EVBA ï¿½ï¿½ NotifyUiReadyï¿½jï¿½B
+'   2.13.0 (2026-06-06) [UX] ForceCursorOnProgress: ï¿½iï¿½ï¿½ï¿½_ï¿½Cï¿½Aï¿½ï¿½ï¿½Oï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½Ìï¿½ï¿½ï¿½ï¿½v ONï¿½Bï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}ï¿½È‚ï¿½ï¿½Bï¿½Oï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ Application.Run ï¿½ÅŒÄ‚ÔiProgressDialog show/teardown ï¿½Ì‚Ýï¿½ï¿½ï¿½jï¿½B
+'   2.12.0 (2026-06-03) [ï¿½Iï¿½ï¿½] ShutdownExcelUiCleanup: shutdown_all_with_force_kill('excel_shutdown') ï¿½ï¿½Ç‰ï¿½ï¿½B
+'   2.11.0 (2026-06-01) [UX] ForceCursorOn: ï¿½{ï¿½Ôƒfï¿½[ï¿½^ï¿½Wï¿½ï¿½êŠ‡ï¿½Ìï¿½ï¿½ï¿½ï¿½v ONï¿½Bï¿½Oï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ Application.Run ï¿½ÅŒÄ‚ÔiCOM ï¿½ï¿½ Cursor ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í•sï¿½Â‚Ì‚ï¿½ï¿½ßjï¿½B
+'   2.10.0 (2026-05-31) [ï¿½Iï¿½ï¿½] ShutdownExcelUiCleanup: Python EXCEL_RESTORE ï¿½Ä‚Ñoï¿½ï¿½ï¿½iCOM ï¿½nï¿½ï¿½ï¿½Oï¿½~ï¿½Ïjï¿½B
+'   2.9.0 (2026-05-30) [ï¿½Iï¿½ï¿½] ShutdownExcelUiCleanup: WaitForm/OnTime/Cursor/Interactive ï¿½ï¿½ï¿½ï¿½ï¿½iExcel ï¿½cï¿½ï¿½ï¿½Îï¿½jï¿½B
+'   2.6.0 (2026-04-11) [ï¿½ï¿½ï¿½ï¿½] TerminatePython / RunPythonSafe ï¿½ï¿½ RunPython ï¿½ï¿½ï¿½ï¿½ï¿½ñ‚©‚ï¿½ hc_main ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Bcore.excel_sessionï¿½iclear_internal_registry / invoke_actionï¿½jï¿½oï¿½Rï¿½B
+'   2.7.0 (2026-04-11) [ï¿½dï¿½ï¿½] check_duplicates: bridge JSON ï¿½ï¿½ selection_areasï¿½iï¿½e Area ï¿½ï¿½ External ï¿½Aï¿½hï¿½ï¿½ï¿½Xï¿½jï¿½ï¿½tï¿½^ï¿½B
 '   2.8.0 (2026-04-11) check_duplicates: bridge JSON CountLarge (selection_count_large / sheet_cells_count_large).
-'   2.5.0 (2026-04-10) [Œo˜H] ƒŠƒ{ƒ“‘S action ‚ð SubmitSvcRequestViaBridgeibridge JSON UTF-8j¨ bridge_runner ¨ svc_serverBRunPythonSafe ‚Í”ñƒŠƒ{ƒ“—p‚ÉŽc‚·B
-'   2.4.1 (2026-04-07) [•¶ŽšƒR[ƒh] SubmitLoadCsvViaBridge ‚Ì JSON o—Í‚ð ADODB.Stream + Windows-31J(CP932) –¾Ž¦‚Ö•ÏXB
-'   2.4.0 (2026-04-06) [UX] HC_WaitForm: ƒŠƒ{ƒ“`RunPython ‘O‚É‘Ò‹@ UserFormBPython ‚©‚ç HC_WaitForm.NotifyUiReady ‚Å•Â‚¶‚éB
-'   2.3.0 (2026-04-06) [Œv‘ª] HC_RibbonPerf: ƒŠƒ{ƒ“`RunPython ‹æŠÔ‚ð hc_csv_perf.log ‚ÖiHC_LOG_PERFjB
-'   2.2.0 (2026-04-06) [‹N“®] Workbook_Open ‚Å excel_startup_workbook_open_full ‚ð 1 ‰ñ‚Ì‚Ý RunPythonB
-'                          InitPythonServer ‚Í¬Œ÷ŽžƒXƒLƒbƒvBManual_Init Žž‚Í Reset Œã‚É]—ˆ‚Ç‚¨‚è RunPythonB
-'   2.1.0 (2026-04-06) [®—] ƒŠƒ{ƒ“‚Í Main.RibbonCallback_hc_main ‚Ì‚ÝBcustomUI ‚ÌŠe button ‚É tagiactionj•K{B
-'                          Call* Œn‚¨‚æ‚Ñ Id¨action ƒtƒH[ƒ‹ƒoƒbƒN‚ðíœBhc_main ‚Í invoke ‚Ì‚ÝŒöŠJ“üŒûB
-'   2.0.0 (2026-04-05) [ÝŒv] ƒŠƒ{ƒ“‚Í tag ‚Ü‚½‚Í control.Id ‚©‚ç hc_main.invoke(action=...) ‚ÖW–ñB
-'                          CSV “Çž‚à‘¼‹@”\‚Æ“¯ˆêŒo˜HiRunPythonSafejBRibbonCallback_hc_main ‚ð’Ç‰ÁB
-'   1.9.9 (2026-02-03) [•s‹ï‡C³] ƒtƒ@ƒCƒ‹Œ‹‡Žž‚Ì Python ŒÄo–¼‚ð "merge_csv" ‚É“¯ŠúB
-'                          ‘S‚Ä‚ÌƒvƒƒV[ƒWƒƒƒwƒbƒ_‚ð‹K’è‚ÌuÚ×”Åv‚ÖŠ®‘S•œŒ³B
-'                          ‘S‚Ä‚ÌƒR[ƒ‹ƒoƒbƒN‚É•¨—ƒƒO“o˜^—p‚ÌƒGƒ‰[•ß‘¨ƒƒWƒbƒN‚ðŽÀ‘•B
-'   1.9.8 (2026-02-02) [ÅIŽd—lŠm’è] ’Ê’mê—pƒL[ (HC_NOTIFY_RETV) ‚ÆƒXƒe[ƒ^ƒX‚Ì–ðŠ„•ª—£‚ðŠ®‹B
-'   1.9.6 (2026-02-01) VBA Žå“±‚Ì’Ê’m•ûŽ® (CheckAndNotifyVBA) ‚ðŽÀ‘•B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: ƒŠƒ{ƒ“ customUI ¨ RibbonCallback_hc_main ¨ SubmitSvcRequestViaBridgeibridge ˆË—Š JSON ‚Í UTF-8j¨ bridge_runner ¨ svc_serverBRunPythonSafe ‚Í”ñƒŠƒ{ƒ“Œo˜H—pB
-' ’ˆÓŽ–€: Comm ƒNƒ‰ƒX‚ÌŽg—p‚ÍŒµ‹ÖB’Ê’m‚Í MsgBoxAƒƒO‚Í HC_Log ‚ðŽg—p‚·‚é‚±‚ÆB
-'           ƒ}ƒ‹ƒ`ƒXƒe[ƒgƒƒ“ƒgi:j‚ð‹ÖŽ~‚µA‘S‚Ä‚Ì˜_—‚Éu# y–Ú“IzvƒRƒƒ“ƒg‚ð•t‘Ñ‚³‚¹‚éB
+'   2.5.0 (2026-04-10) [ï¿½oï¿½H] ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½S action ï¿½ï¿½ SubmitSvcRequestViaBridgeï¿½ibridge JSON UTF-8ï¿½jï¿½ï¿½ bridge_runner ï¿½ï¿½ svc_serverï¿½BRunPythonSafe ï¿½Í”ñƒŠƒ{ï¿½ï¿½ï¿½pï¿½ÉŽcï¿½ï¿½ï¿½B
+'   2.4.1 (2026-04-07) [ï¿½ï¿½ï¿½ï¿½ï¿½Rï¿½[ï¿½h] SubmitLoadCsvViaBridge ï¿½ï¿½ JSON ï¿½oï¿½Í‚ï¿½ ADODB.Stream + Windows-31J(CP932) ï¿½ï¿½ï¿½ï¿½ï¿½Ö•ÏXï¿½B
+'   2.4.0 (2026-04-06) [UX] HC_WaitForm: ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½`RunPython ï¿½Oï¿½É‘Ò‹@ UserFormï¿½BPython ï¿½ï¿½ï¿½ï¿½ HC_WaitForm.NotifyUiReady ï¿½Å•Â‚ï¿½ï¿½ï¿½B
+'   2.3.0 (2026-04-06) [ï¿½vï¿½ï¿½] HC_RibbonPerf: ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½`RunPython ï¿½ï¿½Ô‚ï¿½ hc_csv_perf.log ï¿½ÖiHC_LOG_PERFï¿½jï¿½B
+'   2.2.0 (2026-04-06) [ï¿½Nï¿½ï¿½] Workbook_Open ï¿½ï¿½ excel_startup_workbook_open_full ï¿½ï¿½ 1 ï¿½ï¿½Ì‚ï¿½ RunPythonï¿½B
+'                          InitPythonServer ï¿½Íï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Xï¿½Lï¿½bï¿½vï¿½BManual_Init ï¿½ï¿½ï¿½ï¿½ Reset ï¿½ï¿½É]ï¿½ï¿½ï¿½Ç‚ï¿½ï¿½ï¿½ RunPythonï¿½B
+'   2.1.0 (2026-04-06) [ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½ï¿½ Main.RibbonCallback_hc_main ï¿½Ì‚ÝBcustomUI ï¿½ÌŠe button ï¿½ï¿½ tagï¿½iactionï¿½jï¿½Kï¿½{ï¿½B
+'                          Call* ï¿½nï¿½ï¿½ï¿½ï¿½ï¿½ Idï¿½ï¿½action ï¿½tï¿½Hï¿½[ï¿½ï¿½ï¿½oï¿½bï¿½Nï¿½ï¿½ï¿½íœï¿½Bhc_main ï¿½ï¿½ invoke ï¿½Ì‚ÝŒï¿½ï¿½Jï¿½ï¿½ï¿½ï¿½ï¿½B
+'   2.0.0 (2026-04-05) [ï¿½ÝŒv] ï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½ï¿½ tag ï¿½Ü‚ï¿½ï¿½ï¿½ control.Id ï¿½ï¿½ï¿½ï¿½ hc_main.invoke(action=...) ï¿½ÖWï¿½ï¿½B
+'                          CSV ï¿½Çï¿½ï¿½ï¿½ï¿½ï¿½ï¿½@ï¿½\ï¿½Æ“ï¿½ï¿½ï¿½oï¿½Hï¿½iRunPythonSafeï¿½jï¿½BRibbonCallback_hc_main ï¿½ï¿½Ç‰ï¿½ï¿½B
+'   1.9.9 (2026-02-03) [ï¿½sï¿½ï‡ï¿½Cï¿½ï¿½] ï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Python ï¿½Äoï¿½ï¿½ï¿½ï¿½ "merge_csv" ï¿½É“ï¿½ï¿½ï¿½ï¿½B
+'                          ï¿½Sï¿½Ä‚Ìƒvï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½wï¿½bï¿½_ï¿½ï¿½ï¿½Kï¿½ï¿½Ìuï¿½Ú×”Åvï¿½ÖŠï¿½ï¿½Sï¿½ï¿½ï¿½ï¿½ï¿½B
+'                          ï¿½Sï¿½Ä‚ÌƒRï¿½[ï¿½ï¿½ï¿½oï¿½bï¿½Nï¿½É•ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Oï¿½oï¿½^ï¿½pï¿½ÌƒGï¿½ï¿½ï¿½[ï¿½ß‘ï¿½ï¿½ï¿½ï¿½Wï¿½bï¿½Nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+'   1.9.8 (2026-02-02) [ï¿½ÅIï¿½dï¿½lï¿½mï¿½ï¿½] ï¿½Ê’mï¿½ï¿½pï¿½Lï¿½[ (HC_NOTIFY_RETV) ï¿½ÆƒXï¿½eï¿½[ï¿½^ï¿½Xï¿½Ì–ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+'   1.9.6 (2026-02-01) VBA ï¿½å“±ï¿½Ì’Ê’mï¿½ï¿½ï¿½ï¿½ (CheckAndNotifyVBA) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ï¿½ï¿½ï¿½{ï¿½ï¿½ customUI ï¿½ï¿½ RibbonCallback_hc_main ï¿½ï¿½ SubmitSvcRequestViaBridgeï¿½ibridge ï¿½Ë—ï¿½ JSON ï¿½ï¿½ UTF-8ï¿½jï¿½ï¿½ bridge_runner ï¿½ï¿½ svc_serverï¿½BRunPythonSafe ï¿½Í”ñƒŠƒ{ï¿½ï¿½ï¿½oï¿½Hï¿½pï¿½B
+' ï¿½ï¿½ï¿½ÓŽï¿½ï¿½ï¿½: Comm ï¿½Nï¿½ï¿½ï¿½Xï¿½ÌŽgï¿½pï¿½ÍŒï¿½ï¿½ÖBï¿½Ê’mï¿½ï¿½ MsgBoxï¿½Aï¿½ï¿½ï¿½Oï¿½ï¿½ HC_Log ï¿½ï¿½ï¿½gï¿½pï¿½ï¿½ï¿½é‚±ï¿½ÆB
+'           ï¿½}ï¿½ï¿½ï¿½`ï¿½Xï¿½eï¿½[ï¿½gï¿½ï¿½ï¿½ï¿½ï¿½gï¿½i:ï¿½jï¿½ï¿½ï¿½ÖŽ~ï¿½ï¿½ï¿½Aï¿½Sï¿½Ä‚Ì˜_ï¿½ï¿½ï¿½Éu# ï¿½yï¿½Ú“Iï¿½zï¿½vï¿½Rï¿½ï¿½ï¿½ï¿½ï¿½gï¿½ï¿½tï¿½Ñ‚ï¿½ï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 
-' --- ‹¤’Ê’è” ---
-' •Ï”: Python ‘¤ihc_stat.pyj‚Æ•¨—“¯Šú‚³‚¹‚é’Ê’mƒL[–¼
-' # y–Ú“Izˆ—Œ‹‰Ê‚ÌƒƒbƒZ[ƒW‚ðŠi”[‚·‚éƒvƒƒpƒeƒB–¼‚ð’è‹`‚·‚é‚½‚ßB
+' --- ï¿½ï¿½ï¿½Ê’è” ---
+' ï¿½Ïï¿½: Python ï¿½ï¿½ï¿½ihc_stat.pyï¿½jï¿½Æ•ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê’mï¿½Lï¿½[ï¿½ï¿½
+' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê‚Ìƒï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½ï¿½ï¿½iï¿½[ï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ï¿½ï¿½ï¿½ï¿½`ï¿½ï¿½ï¿½é‚½ï¿½ßB
 Private Const RET_NAME As String = "HC_NOTIFY_RETV"
 
-' »ŽžŒvŠÄŽ‹ƒ^ƒCƒ}ƒAƒEƒgi•bj
+' ï¿½ï¿½ï¿½ï¿½ï¿½vï¿½ÄŽï¿½ï¿½^ï¿½Cï¿½}ï¿½Aï¿½Eï¿½gï¿½iï¿½bï¿½j
 Private Const CURSOR_GUARD_SEC As Long = 10
 
-' WaitAndInit: Application.OnTime ‚Ü‚Å‚Ì‘Ò‚¿•bi•b¸“xj
+' WaitAndInit: Application.OnTime ï¿½Ü‚Å‚Ì‘Ò‚ï¿½ï¿½bï¿½iï¿½bï¿½ï¿½ï¿½xï¿½j
 Private Const WAIT_INIT_SEC As Long = 1
 
 Private m_cursorGuardTime As Date
 Private m_cursorGuardActive As Boolean
 Private m_cursorReleased As Boolean
 
-' Workbook_Open ‚Å excel_startup_workbook_open_full ‚ª¬Œ÷‚µ‚½‚ç Truei’x‰„ InitPythonServer ‚Ì 2 ‰ñ–Ú RunPython ‚ðÈ—ªj
+' Workbook_Open ï¿½ï¿½ excel_startup_workbook_open_full ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Trueï¿½iï¿½xï¿½ï¿½ InitPythonServer ï¿½ï¿½ 2 ï¿½ï¿½ï¿½ RunPython ï¿½ï¿½ï¿½È—ï¿½ï¿½j
 Private mWorkbookOpenFullPythonDone As Boolean
 
-' Workbook_Open ‚Å startup_full ‚Ì RunPython ‚ð“Š‚°‚½’¼Œã Truei–ß‚è‘O‚Ì OnTime “ñdŽÀs‚ð—}Ž~j
+' Workbook_Open ï¿½ï¿½ startup_full ï¿½ï¿½ RunPython ï¿½ð“Š‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Trueï¿½iï¿½ß‚ï¿½Oï¿½ï¿½ OnTime ï¿½ï¿½dï¿½ï¿½ï¿½sï¿½ï¿½}ï¿½~ï¿½j
 Private mWorkbookOpenStartupFullStarted As Boolean
 
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' Python ’Pˆêˆø—p•„ƒŠƒeƒ‰ƒ‹—pƒGƒXƒP[ƒvisheet_id / action ‚É \ ‚â ' ‚ªŠÜ‚Ü‚ê‚Ä‚à RunPython 1 s‚ð‰ó‚³‚È‚¢j
+' ---------------------------------------------------------------------------------------------------------------------
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: ShutdownExcelUiVbaOnly
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.0.0 (2026-06-13) BeforeClose ï¿½p VBA ï¿½Ì‚Ý•Ð•tï¿½ï¿½ï¿½iPython ï¿½Iï¿½ï¿½ï¿½ï¿½ lifecycle monitor ï¿½ÉˆÏï¿½ï¿½jï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: WaitForm / OnTime / Cursor / Interactive ï¿½ð•œŒï¿½ï¿½ï¿½ï¿½ï¿½BRunPython ï¿½ÍŒÄ‚Î‚È‚ï¿½ï¿½B
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Call Main.ShutdownExcelUiVbaOnly
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub ShutdownExcelUiVbaOnly()
+    On Error Resume Next
+    Call HC_WaitForm.NotifyUiReady
+    Call CancelCursorGuardTimer("shutdown")
+    Application.Cursor = xlDefault
+    Application.Interactive = True
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    Call HC_Log.Info("Main", "ShutdownExcelUiVbaOnly done")
+    On Error GoTo 0
+End Sub
+
+
+' ---------------------------------------------------------------------------------------------------------------------
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: EnsurePythonHostsReady
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.1.0 (2026-06-13) hwnd ï¿½ï¿½nï¿½ï¿½ï¿½ï¿½ register_bookï¿½Bï¿½}ï¿½ï¿½ï¿½` Excel ï¿½ï¿½ï¿½ñƒŠƒ{ï¿½ï¿½ï¿½Îï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ensure_python_hosts_ready(hwnd) ï¿½ï¿½ 1 ï¿½ï¿½ RunPython ï¿½ÅŒÄ‚ÔB
+' ---------------------------------------------------------------------------------------------------------------------
+Public Sub EnsurePythonHostsReady()
+    On Error Resume Next
+    RunPython "from svc.svc_host import ensure_python_hosts_ready; ensure_python_hosts_ready(" & CStr(Application.hwnd) & ")"
+    On Error GoTo 0
+End Sub
+
+
+' Python ï¿½Pï¿½ï¿½ï¿½ï¿½pï¿½ï¿½ï¿½ï¿½ï¿½eï¿½ï¿½ï¿½ï¿½ï¿½pï¿½Gï¿½Xï¿½Pï¿½[ï¿½vï¿½isheet_id / action ï¿½ï¿½ \ ï¿½ï¿½ ' ï¿½ï¿½ï¿½Ü‚Ü‚ï¿½Ä‚ï¿½ RunPython 1 ï¿½sï¿½ï¿½ï¿½ó‚³‚È‚ï¿½ï¿½j
 ' ---------------------------------------------------------------------------------------------------------------------
 Private Function PyEscSq(ByVal s As String) As String
     Dim t As String
@@ -71,9 +106,9 @@ End Function
 
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: EscapeJsonStringForBridge
-' ŒöŠJ: Private
-' ŠT—v: bridge JSON ‚Ì selection_areas —pBƒoƒbƒNƒXƒ‰ƒbƒVƒ…Eƒ_ƒuƒ‹ƒNƒH[ƒgE§Œä•¶Žš‚ðƒGƒXƒP[ƒv‚·‚éB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: EscapeJsonStringForBridge
+' ï¿½ï¿½ï¿½J: Private
+' ï¿½Tï¿½v: bridge JSON ï¿½ï¿½ selection_areas ï¿½pï¿½Bï¿½oï¿½bï¿½Nï¿½Xï¿½ï¿½ï¿½bï¿½Vï¿½ï¿½ï¿½Eï¿½_ï¿½uï¿½ï¿½ï¿½Nï¿½Hï¿½[ï¿½gï¿½Eï¿½ï¿½ï¿½ä•¶ï¿½ï¿½ï¿½ï¿½ï¿½Gï¿½Xï¿½Pï¿½[ï¿½vï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Private Function EscapeJsonStringForBridge(ByVal s As String) As String
     Dim t As String
@@ -88,9 +123,9 @@ Private Function EscapeJsonStringForBridge(ByVal s As String) As String
 End Function
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: BuildCheckDuplicatesSelectionAreasJson
-' ŒöŠJ: Private
-' ŠT—v: check_duplicates ê—pBSelection ‚ª Range ‚Ì‚Æ‚«AŠe Area ‚Ì Address(External:=True) ‚ð JSON ”z—ñƒŠƒeƒ‰ƒ‹i’†gj‚Å•Ô‚·B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: BuildCheckDuplicatesSelectionAreasJson
+' ï¿½ï¿½ï¿½J: Private
+' ï¿½Tï¿½v: check_duplicates ï¿½ï¿½pï¿½BSelection ï¿½ï¿½ Range ï¿½Ì‚Æ‚ï¿½ï¿½Aï¿½e Area ï¿½ï¿½ Address(External:=True) ï¿½ï¿½ JSON ï¿½zï¿½ñƒŠƒeï¿½ï¿½ï¿½ï¿½ï¿½iï¿½ï¿½ï¿½gï¿½jï¿½Å•Ô‚ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Private Function BuildCheckDuplicatesSelectionAreasJson() As String
     On Error GoTo Fail
@@ -138,11 +173,11 @@ Fail:
 End Function
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: RibbonCallback_hc_main
-' ŒöŠJ: PublicicustomUI ‚Ì onAction="Main.RibbonCallback_hc_main" ‚©‚ç‚Ì‚ÝŒÄ‚Î‚ê‚éj
-' ˆø”: controliIRibbonControl ‘Š“–j? control.Tag ‚É hc_main.invoke ‚Ì action ‚ð•K{‚ÅÝ’è‚·‚éiCSV_Tool_xml.txtjB
-' ˆ—: ƒAƒNƒeƒBƒuƒV[ƒg‚Ì sheet_id ‚ðŽæ“¾‚µARunPythonSafe(act, sId) ‚Å Python ‚ÖˆÏ÷‚·‚éB
-' ”õl: tag ‚ª‹ó‚Ì‚Æ‚«‚ÍƒƒO‚É‹L˜^‚µ‚ÄI—¹‚·‚éBcustomUI ‚ðC³‚·‚é‚±‚ÆB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: RibbonCallback_hc_main
+' ï¿½ï¿½ï¿½J: Publicï¿½icustomUI ï¿½ï¿½ onAction="Main.RibbonCallback_hc_main" ï¿½ï¿½ï¿½ï¿½Ì‚ÝŒÄ‚Î‚ï¿½ï¿½j
+' ï¿½ï¿½ï¿½ï¿½: controlï¿½iIRibbonControl ï¿½ï¿½ï¿½ï¿½ï¿½j? control.Tag ï¿½ï¿½ hc_main.invoke ï¿½ï¿½ action ï¿½ï¿½Kï¿½{ï¿½ÅÝ’è‚·ï¿½ï¿½iCSV_Tool_xml.txtï¿½jï¿½B
+' ï¿½ï¿½ï¿½ï¿½: ï¿½Aï¿½Nï¿½eï¿½Bï¿½uï¿½Vï¿½[ï¿½gï¿½ï¿½ sheet_id ï¿½ï¿½ï¿½æ“¾ï¿½ï¿½ï¿½ARunPythonSafe(act, sId) ï¿½ï¿½ Python ï¿½ÖˆÏï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½l: tag ï¿½ï¿½ï¿½ï¿½Ì‚Æ‚ï¿½ï¿½Íƒï¿½ï¿½Oï¿½É‹Lï¿½^ï¿½ï¿½ï¿½ÄIï¿½ï¿½ï¿½ï¿½ï¿½ï¿½BcustomUI ï¿½ï¿½ï¿½Cï¿½ï¿½ï¿½ï¿½ï¿½é‚±ï¿½ÆB
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub RibbonCallback_hc_main(ByVal control As Object)
     On Error GoTo ErrorHandler
@@ -157,9 +192,9 @@ End Sub
 
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: RibbonInvokeFromControl
-' ŒöŠJ: PrivateiRibbonCallback_hc_main ‚©‚ç‚Ì‚ÝŒÄ‚Ôj
-' ˆø”: control ? Tag ƒvƒƒpƒeƒB‚ª hc_main.invoke(action=...) ‚Ì action ‚Æˆê’v‚·‚é‚±‚ÆB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: RibbonInvokeFromControl
+' ï¿½ï¿½ï¿½J: Privateï¿½iRibbonCallback_hc_main ï¿½ï¿½ï¿½ï¿½Ì‚ÝŒÄ‚Ôj
+' ï¿½ï¿½ï¿½ï¿½: control ? Tag ï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ï¿½ hc_main.invoke(action=...) ï¿½ï¿½ action ï¿½Æˆï¿½vï¿½ï¿½ï¿½é‚±ï¿½ÆB
 ' ---------------------------------------------------------------------------------------------------------------------
 
 
@@ -174,8 +209,15 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
 
     On Error GoTo ErrorHandler
     act = Trim$(control.tag)
+    ' # ï¿½yï¿½Ú“Iï¿½zWorkbook_Open ï¿½ï¿½ startup_full RunPython ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½ 2 ï¿½{ï¿½Ú‚ï¿½ RunPython ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½iï¿½}ï¿½ï¿½ï¿½` Excel ï¿½ï¿½ï¿½ñƒŠƒ{ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½jï¿½B
+    If mWorkbookOpenStartupFullStarted And Not mWorkbookOpenFullPythonDone Then
+        Call HC_Log.Info("Main", "RibbonInvoke: startup_full ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½Ì‚ï¿½ï¿½ßƒXï¿½Lï¿½bï¿½vï¿½iï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÉÄ‘ï¿½ï¿½ì‚µï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½j")
+        Call HC_RibbonPerf.RibbonPerfEnd
+        Exit Sub
+    End If
+
     If Len(act) = 0 Then
-        Call HC_Log.Error("Main", "RibbonInvoke: tag ‚ª‹ó‚Å‚·BcustomUI ‚Ì button ‚É hc_main.invoke ‚Æ“¯ˆê‚Ì action ‚ð tag ‚ÅŽw’è‚µ‚Ä‚­‚¾‚³‚¢Bcontrol.Id=" & control.ID)
+        Call HC_Log.Error("Main", "RibbonInvoke: tag ï¿½ï¿½ï¿½ï¿½Å‚ï¿½ï¿½BcustomUI ï¿½ï¿½ button ï¿½ï¿½ hc_main.invoke ï¿½Æ“ï¿½ï¿½ï¿½ï¿½ action ï¿½ï¿½ tag ï¿½ÅŽwï¿½è‚µï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Bcontrol.Id=" & control.ID)
         Call HC_RibbonPerf.RibbonPerfEnd
         Exit Sub
     End If
@@ -201,10 +243,10 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
 
     End If
 
-    ' # y–Ú“IzƒŠƒ{ƒ“‚Í‘S‚Ä bridge_runner ¨ svc_serveriRunPython ’Z–½‚ð”ð‚¯‚éjBbridge ˆË—Š JSON ‚Í UTF-8B
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½{ï¿½ï¿½ï¿½Í‘Sï¿½ï¿½ bridge_runner ï¿½ï¿½ svc_serverï¿½iRunPython ï¿½Zï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½jï¿½Bbridge ï¿½Ë—ï¿½ JSON ï¿½ï¿½ UTF-8ï¿½B
     If (Not isUpdateCheck) And ActiveWorkbook Is Nothing Then
 
-        Call HC_Log.Info("Main", "Ribbon bridge: ActiveWorkbook ‚ª Nothing ‚Ì‚½‚ßƒXƒLƒbƒv")
+        Call HC_Log.Info("Main", "Ribbon bridge: ActiveWorkbook ï¿½ï¿½ Nothing ï¿½Ì‚ï¿½ï¿½ßƒXï¿½Lï¿½bï¿½v")
         Call HC_WaitForm.NotifyUiReady
 
         Call HC_RibbonPerf.RibbonPerfEnd
@@ -236,6 +278,7 @@ Private Sub RibbonInvokeFromControl(ByVal control As Object)
         dupliCf = BuildCheckDuplicatesCountLargeFragment()
     End If
     Call HC_WaitForm.BeginWaitForRibbon(control.ID, act)
+    Call Main.EnsurePythonHostsReady
     Call HC_RibbonPerf.RibbonPerfMark("before_bridge_submit")
     Call Main.SubmitSvcRequestViaBridge(act, Application.hwnd, sId, bookFullName, bookName, selAreasJson, dupliCf)
     Call HC_WaitForm.WaitForUiReadySignal(Application.hwnd)
@@ -251,77 +294,77 @@ End Sub
 
 
 ' ==============================================================================
-' •¨—ŽÀsƒGƒ“ƒWƒ“ixlwings RunPython ¨ hc_main.invokej
+' ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½Gï¿½ï¿½ï¿½Wï¿½ï¿½ï¿½ixlwings RunPython ï¿½ï¿½ hc_main.invokeï¿½j
 ' ==============================================================================
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: RunPythonSafe
-' ì¬“ú: 2026-02-01
-' XV“ú: 2026-04-06
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   2.1.0 (2026-04-06) ˆø”–¼‚ÌˆÓ–¡‚ðuhc_main.invoke ‚Ì actionv‚É–¾Ž¦BRibbon Œo˜H‚Æ‚Ì‘Î‰ž‚ðƒwƒbƒ_‚É‹LÚB
-'   1.9.9 (2026-02-03) Ú×ƒwƒbƒ_‚Ì“K—pB—áŠOƒƒO‹L˜^‚ÌŒµŠi‰»B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: xlwings ‚Ì RunPython ‚Å 1 s‚Ì Python ‚ðŽÀs‚·‚éB\’z‚·‚é–½—ß‚Íí‚É hc_main.invoke ‚Ì‚ÝB
-' ˆø”:
-'   methodName ? ƒŠƒ{ƒ“ control.Tag ‚Æ“¯ˆêBhc_main.invoke(action=...) ‚É“n‚· action •¶Žš—ñi—á "load_csv"jB
-'   sId        ? ‘ÎÛƒV[ƒgŽ¯•ÊŽqiExcelUtil.GetSheetIdSafejBinvoke ‚Ì sheet_id ‚É“n‚·B
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: Call Main.RunPythonSafe("merge_csv", sheetIdGuid)
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: RunPythonSafe
+' ï¿½ì¬ï¿½ï¿½: 2026-02-01
+' ï¿½Xï¿½Vï¿½ï¿½: 2026-04-06
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   2.1.0 (2026-04-06) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÌˆÓ–ï¿½ï¿½ï¿½ï¿½uhc_main.invoke ï¿½ï¿½ actionï¿½vï¿½É–ï¿½ï¿½ï¿½ï¿½BRibbon ï¿½oï¿½Hï¿½Æ‚Ì‘Î‰ï¿½ï¿½ï¿½ï¿½wï¿½bï¿½_ï¿½É‹Lï¿½ÚB
+'   1.9.9 (2026-02-03) ï¿½Ú×ƒwï¿½bï¿½_ï¿½Ì“Kï¿½pï¿½Bï¿½ï¿½Oï¿½ï¿½ï¿½Oï¿½Lï¿½^ï¿½ÌŒï¿½ï¿½iï¿½ï¿½ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: xlwings ï¿½ï¿½ RunPython ï¿½ï¿½ 1 ï¿½sï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½Bï¿½\ï¿½zï¿½ï¿½ï¿½é–½ï¿½ß‚Íï¿½ï¿½ hc_main.invoke ï¿½Ì‚ÝB
+' ï¿½ï¿½ï¿½ï¿½:
+'   methodName ? ï¿½ï¿½ï¿½{ï¿½ï¿½ control.Tag ï¿½Æ“ï¿½ï¿½ï¿½Bhc_main.invoke(action=...) ï¿½É“nï¿½ï¿½ action ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½iï¿½ï¿½ "load_csv"ï¿½jï¿½B
+'   sId        ? ï¿½ÎÛƒVï¿½[ï¿½gï¿½ï¿½ï¿½ÊŽqï¿½iExcelUtil.GetSheetIdSafeï¿½jï¿½Binvoke ï¿½ï¿½ sheet_id ï¿½É“nï¿½ï¿½ï¿½B
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Call Main.RunPythonSafe("merge_csv", sheetIdGuid)
 ' RunPython: from core.excel_session import invoke_action -> hc_main.invoke (no import hc_main in VBA).
-' Ž–Œãˆ—: CheckAndNotifyVBAiHC_NOTIFY_RETVj, HC_Bridge.RestoreStatBar, ƒJ[ƒ\ƒ‹•ÛŒ¯ƒ^ƒCƒ}
-' ’ˆÓŽ–€: RunPython ŽÀs’†‚Í Excel ‚ªƒƒbƒZ[ƒWƒ‹[ƒv‚ðŽ~‚ß COM ‘Ò‚¿‚É‚È‚éBmethodName ‚É’Pˆø—p•„“™‚ªŠÜ‚Ü‚ê‚Ä‚à PyEscSq ‚ÅƒGƒXƒP[ƒvÏ‚ÝB
+' ï¿½ï¿½ï¿½ãˆï¿½ï¿½: CheckAndNotifyVBAï¿½iHC_NOTIFY_RETVï¿½j, HC_Bridge.RestoreStatBar, ï¿½Jï¿½[ï¿½\ï¿½ï¿½ï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}
+' ï¿½ï¿½ï¿½ÓŽï¿½ï¿½ï¿½: RunPython ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½ Excel ï¿½ï¿½ï¿½ï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½ï¿½ï¿½[ï¿½vï¿½ï¿½ï¿½~ï¿½ï¿½ COM ï¿½Ò‚ï¿½ï¿½É‚È‚ï¿½BmethodName ï¿½É’Pï¿½ï¿½ï¿½pï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü‚Ü‚ï¿½Ä‚ï¿½ PyEscSq ï¿½ÅƒGï¿½Xï¿½Pï¿½[ï¿½vï¿½Ï‚ÝB
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub RunPythonSafe(ByVal methodName As String, ByVal sId As String)
-    Dim sCmd As String                                      ' Python –½—ß•¶Žš—ñ
-    Dim hwnd As LongPtr                                     ' ƒEƒBƒ“ƒhƒEƒnƒ“ƒhƒ‹
+    Dim sCmd As String                                      ' Python ï¿½ï¿½ï¿½ß•ï¿½ï¿½ï¿½ï¿½ï¿½
+    Dim hwnd As LongPtr                                     ' ï¿½Eï¿½Bï¿½ï¿½ï¿½hï¿½Eï¿½nï¿½ï¿½ï¿½hï¿½ï¿½
 
     On Error GoTo ErrorHandler
 
-    ' ƒ}ƒEƒX‚ð»ŽžŒv‚ÉÝ’è
+    ' ï¿½}ï¿½Eï¿½Xï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½vï¿½ÉÝ’ï¿½
     Call HC_Log.Diag("Main", "Application.Cursor: Wait Cursor on")
     Application.Cursor = xlWait
 
-    ' [•ÏX] --- READYŠÄŽ‹‚Í”pŽ~iOnTime‚•p“xPolling‚ÅCOM‚ª‹l‚Ü‚é•›ì—p‚ð”ð‚¯‚éj---
+    ' [ï¿½ÏX] --- READYï¿½ÄŽï¿½ï¿½Í”pï¿½~ï¿½iOnTimeï¿½ï¿½ï¿½pï¿½xPollingï¿½ï¿½COMï¿½ï¿½ï¿½lï¿½Ü‚é•›ï¿½ï¿½pï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½j---
     ' Call StartQtReadyPolling
 
-    ' [’Ç‰Á] --- •ÛŒ¯F10•bŒã‚É•K‚¸»ŽžŒv‚ð–ß‚·iPython’Ê’m‚ª—ˆ‚È‚¢/COM‚ª’Ê‚ç‚È‚¢Åˆ«ƒP[ƒX‘Îôj---
+    ' [ï¿½Ç‰ï¿½] --- ï¿½ÛŒï¿½ï¿½F10ï¿½bï¿½ï¿½É•Kï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ß‚ï¿½ï¿½iPythonï¿½Ê’mï¿½ï¿½ï¿½ï¿½ï¿½È‚ï¿½/COMï¿½ï¿½ï¿½Ê‚ï¿½È‚ï¿½ï¿½Åˆï¿½ï¿½Pï¿½[ï¿½Xï¿½Îï¿½j---
     Call StartCursorGuardTimer(sId)
 
-    ' 1. ‘Oˆ—ƒV[ƒPƒ“ƒXB
-    ' # y–Ú“IzŒ»Ý‚Ì Excel eƒEƒBƒ“ƒhƒE‚ð“Á’è‚·‚é‚½‚ßB
+    ' 1. ï¿½Oï¿½ï¿½ï¿½ï¿½ï¿½Vï¿½[ï¿½Pï¿½ï¿½ï¿½Xï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½Ý‚ï¿½ Excel ï¿½eï¿½Eï¿½Bï¿½ï¿½ï¿½hï¿½Eï¿½ï¿½ï¿½ï¿½è‚·ï¿½é‚½ï¿½ßB
     hwnd = Application.hwnd
 
-    ' # y–Ú“IzŽÀsŠJŽn‚ÌŽ–ŽÀ‚ð‰ðÍØÕ‚Æ‚µ‚ÄƒƒO‚Ö‹L˜^‚·‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½sï¿½Jï¿½nï¿½ÌŽï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÍØÕ‚Æ‚ï¿½ï¿½Äƒï¿½ï¿½Oï¿½Ö‹Lï¿½^ï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call HC_Log.Diag("Main", "RunPythonSafe: Start [" & methodName & "] for HWND: " & hwnd & " ID: " & sId)
     Call HC_Log.Perf("Main", "RunPythonSafe start action=" & methodName & " hwnd=" & hwnd & " sId=" & sId)
 
-    ' # y–Ú“IzOS ‚ÌƒƒbƒZ[ƒWƒLƒ…[‚ð®—‚µA•`‰æó‘Ô‚ðˆÀ’è‚³‚¹‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zOS ï¿½Ìƒï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½Lï¿½ï¿½ï¿½[ï¿½ð®—ï¿½ï¿½ï¿½ï¿½Aï¿½`ï¿½ï¿½ï¿½Ô‚ï¿½ï¿½ï¿½ï¿½è‚³ï¿½ï¿½ï¿½é‚½ï¿½ßB
     DoEvents
 
-    ' 2. ŽÀs–½—ß‚ÌÚ×\’zB
+    ' 2. ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ß‚ÌÚ×\ï¿½zï¿½B
     ' excel_session.invoke_action -> hc_main.invoke (VBA string avoids import hc_main).
     sCmd = "from core.excel_session import invoke_action; invoke_action(action='" & PyEscSq(methodName) & "', target_hwnd=" & CStr(hwnd) & ", sheet_id='" & PyEscSq(sId) & "')"
 
-    ' 3. •¨—ŽÀs‚ÌŽ·sB
-    ' # y–Ú“IzŠO•” Python ƒvƒƒZƒX‚ð“¯ŠúŽÀs‚·‚é‚½‚ßB
+    ' 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½ÌŽï¿½ï¿½sï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½Oï¿½ï¿½ Python ï¿½vï¿½ï¿½ï¿½Zï¿½Xï¿½ð“¯Šï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call HC_RibbonPerf.RibbonPerfMark("before_xlwings_runpython")
     RunPython sCmd
     Call HC_RibbonPerf.RibbonPerfMark("after_xlwings_runpython")
 
-    ' # y–Ú“IzŽÀs’¼Œã‚Ì OS •`‰æ‚ðƒtƒ‰ƒbƒVƒ…‚³‚¹‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½ï¿½ OS ï¿½`ï¿½ï¿½ï¿½ï¿½tï¿½ï¿½ï¿½bï¿½Vï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
     DoEvents
 
-    ' 4. Ž–Œãˆ—ƒZƒNƒVƒ‡ƒ“iVBAŽå“±Œ^’Ê’mjB
-    ' # y–Ú“IzPython ‘¤‚ªƒV[ƒg‚É‘‚«Žc‚µ‚½’Ê’m—pî•ñ‚ð”»’è‚µ•\Ž¦‚·‚é‚½‚ßB
+    ' 4. ï¿½ï¿½ï¿½ãˆï¿½ï¿½ï¿½Zï¿½Nï¿½Vï¿½ï¿½ï¿½ï¿½ï¿½iVBAï¿½å“±ï¿½^ï¿½Ê’mï¿½jï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zPython ï¿½ï¿½ï¿½ï¿½ï¿½Vï¿½[ï¿½gï¿½Éï¿½ï¿½ï¿½ï¿½cï¿½ï¿½ï¿½ï¿½ï¿½Ê’mï¿½pï¿½ï¿½ï¿½ð”»’è‚µï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call Main.CheckAndNotifyVBA(sId)
 
-    ' # y–Ú“IzÅV‚ÌƒXƒe[ƒ^ƒXî•ñ (HC_STATUS_INFO) ‚ðƒXƒe[ƒ^ƒXƒo[‚Ö“¯Šú”½‰f‚·‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ÅVï¿½ÌƒXï¿½eï¿½[ï¿½^ï¿½Xï¿½ï¿½ï¿½ (HC_STATUS_INFO) ï¿½ï¿½ï¿½Xï¿½eï¿½[ï¿½^ï¿½Xï¿½oï¿½[ï¿½Ö“ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½fï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call HC_Bridge.RestoreStatBar
 
-    ' [’] »ŽžŒvOFF‚ÍA
-    '   - Python‘¤‚ªUI•`‰æŠ®—¹Žž‚É Excel‚Ö’Ê’m‚µ‚Ä’¼ÚOFF + VBA‚Ì•ÛŒ¯ƒ^ƒCƒ}’âŽ~i„§j
-    '   - ‚»‚ê‚ªŽ¸”s‚µ‚½ê‡‚ÍA•ÛŒ¯ƒ^ƒCƒ}(ForceCursorOff)‚ª10•b‚Å•K‚¸OFF
-    ' ‚Æ‚¢‚¤“ñ’i\‚¦‚É‚·‚éB
+    ' [ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½vOFFï¿½ÍA
+    '   - Pythonï¿½ï¿½ï¿½ï¿½UIï¿½`ï¿½æŠ®ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Excelï¿½Ö’Ê’mï¿½ï¿½ï¿½Ä’ï¿½ï¿½ï¿½OFF + VBAï¿½Ì•ÛŒï¿½ï¿½^ï¿½Cï¿½}ï¿½ï¿½~ï¿½iï¿½ï¿½ï¿½ï¿½ï¿½j
+    '   - ï¿½ï¿½ï¿½ê‚ªï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½ï¿½ê‡ï¿½ÍAï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}(ForceCursorOff)ï¿½ï¿½10ï¿½bï¿½Å•Kï¿½ï¿½OFF
+    ' ï¿½Æ‚ï¿½ï¿½ï¿½ï¿½ï¿½iï¿½\ï¿½ï¿½ï¿½É‚ï¿½ï¿½ï¿½B
     Call HC_RibbonPerf.RibbonPerfEnd
     Exit Sub
 
@@ -329,102 +372,102 @@ ErrorHandler:
     Call HC_WaitForm.NotifyUiReady
     Call HC_RibbonPerf.RibbonPerfMark("after_xlwings_runpython_error")
     Call HC_RibbonPerf.RibbonPerfEnd
-    ' # y–Ú“IzƒuƒŠƒbƒWŽÀsŽ¸”sŽž‚ÌÚ×‚ðƒƒO‚Ö“o˜^‚µA•ÛŽç«‚ð‚‚ß‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½uï¿½ï¿½ï¿½bï¿½Wï¿½ï¿½ï¿½sï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ÌÚ×‚ï¿½ï¿½ï¿½ï¿½Oï¿½Ö“oï¿½^ï¿½ï¿½ï¿½Aï¿½ÛŽç«ï¿½ï¿½ï¿½ï¿½ï¿½ß‚é‚½ï¿½ßB
     Call HC_Log.Error("Main", "RunPythonSafe execution Error Number: " & Hex$(Err.Number) & " FAILED: " & Err.Description)
     
-    ' ƒ}ƒEƒX‚Ì»ŽžŒv‚ð–ß‚·
+    ' ï¿½}ï¿½Eï¿½Xï¿½Ìï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ß‚ï¿½
     Call HC_Log.Diag("Main", "Application.Cursor: ErrorHandler Wait Cursor off")
     Application.Cursor = xlDefault
 
-    ' [•ÏX] READYŠÄŽ‹‚Í”pŽ~
+    ' [ï¿½ÏX] READYï¿½ÄŽï¿½ï¿½Í”pï¿½~
     ' StopQtReadyPolling
 
-    ' [’Ç‰Á] •ÛŒ¯ƒ^ƒCƒ}‚ðŠmŽÀ‚ÉŽ~‚ß‚éiOnTimeŽc—¯‚ð–h‚®j
+    ' [ï¿½Ç‰ï¿½] ï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}ï¿½ï¿½ï¿½mï¿½ï¿½ï¿½ÉŽ~ï¿½ß‚ï¿½iOnTimeï¿½cï¿½ï¿½ï¿½ï¿½hï¿½ï¿½ï¿½j
     Call CancelCursorGuardTimer("ErrorHandler:" & sId)
 
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: CheckAndNotifyVBA
-' ì¬“ú: 2026-02-01
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð: 1.1.2 (2026-02-03) Ú×ƒwƒbƒ_‚ÌŠ®‹‚ÆˆÓ}ƒRƒƒ“ƒg‹­‰»B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: ƒV[ƒg‚Ì’Ê’mê—pƒvƒƒpƒeƒB‚©‚çƒf[ƒ^‚ð‹zˆø‚µAVBA “ÆŽ©‚Ì MsgBox ‚ð•\Ž¦‚·‚éB
-' ˆø”: sId (String) - ‘ÎÛƒV[ƒg‚Ì Base64 GUID
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: Call Main.CheckAndNotifyVBA("GUID-STRING")
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) ExcelUtil.FindSheetById, ExcelUtil.GetSheetProp, ExcelUtil.DeleteSheetProp
-' ’ˆÓŽ–€: ’Ê’mŠ®—¹ŒãAƒvƒƒpƒeƒB‚ð•¨—“I‚Éíœ‚µ“ñd•\Ž¦‚ð–hŽ~‚·‚éB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: CheckAndNotifyVBA
+' ï¿½ì¬ï¿½ï¿½: 2026-02-01
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.1.2 (2026-02-03) ï¿½Ú×ƒwï¿½bï¿½_ï¿½ÌŠï¿½ï¿½ï¿½ï¿½ÆˆÓ}ï¿½Rï¿½ï¿½ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ï¿½Vï¿½[ï¿½gï¿½Ì’Ê’mï¿½ï¿½pï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ï¿½ï¿½ï¿½fï¿½[ï¿½^ï¿½ï¿½ï¿½zï¿½ï¿½ï¿½ï¿½ï¿½AVBA ï¿½ÆŽï¿½ï¿½ï¿½ MsgBox ï¿½ï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½: sId (String) - ï¿½ÎÛƒVï¿½[ï¿½gï¿½ï¿½ Base64 GUID
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Call Main.CheckAndNotifyVBA("GUID-STRING")
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) ExcelUtil.FindSheetById, ExcelUtil.GetSheetProp, ExcelUtil.DeleteSheetProp
+' ï¿½ï¿½ï¿½ÓŽï¿½ï¿½ï¿½: ï¿½Ê’mï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ð•¨—ï¿½ï¿½Iï¿½Éíœï¿½ï¿½ï¿½ï¿½dï¿½\ï¿½ï¿½ï¿½ï¿½hï¿½~ï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub CheckAndNotifyVBA(ByVal sId As String)
-    Dim ws As Worksheet                                     ' ‘ÎÛƒV[ƒgƒIƒuƒWƒFƒNƒg
-    Dim sRaw As String                                      ' ƒvƒƒpƒeƒB¶ƒf[ƒ^
-    Dim vDat As Variant                                     ' ”z—ñƒoƒbƒtƒ@
-    Dim sCap As String                                      ' ƒƒbƒZ[ƒWŒ©o‚µ
-    Dim sMsg As String                                      ' ƒƒbƒZ[ƒW–{•¶
+    Dim ws As Worksheet                                     ' ï¿½ÎÛƒVï¿½[ï¿½gï¿½Iï¿½uï¿½Wï¿½Fï¿½Nï¿½g
+    Dim sRaw As String                                      ' ï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ï¿½ï¿½fï¿½[ï¿½^
+    Dim vDat As Variant                                     ' ï¿½zï¿½ï¿½oï¿½bï¿½tï¿½@
+    Dim sCap As String                                      ' ï¿½ï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½ï¿½ï¿½oï¿½ï¿½
+    Dim sMsg As String                                      ' ï¿½ï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½{ï¿½ï¿½
     
     On Error GoTo ErrorHandler
     
-    ' 1. ‘ÎÛƒV[ƒg‚Ì“Á’èB
-    ' # y–Ú“IzGUID ‚ðŠî€‚ÉƒuƒbƒN“à‚©‚çŽÀƒIƒuƒWƒFƒNƒg‚ð•¨—“Á’è‚·‚é‚½‚ßB
+    ' 1. ï¿½ÎÛƒVï¿½[ï¿½gï¿½Ì“ï¿½ï¿½ï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zGUID ï¿½ï¿½ï¿½î€ï¿½Éƒuï¿½bï¿½Nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Iï¿½uï¿½Wï¿½Fï¿½Nï¿½gï¿½ð•¨—ï¿½ï¿½ï¿½ï¿½è‚·ï¿½é‚½ï¿½ßB
     Set ws = ExcelUtil.FindSheetById(sId)
     
-    ' # y”»’èzƒV[ƒg‚ª“Á’è•s”\‚Èê‡‚Íˆ—•s”\‚Æ‚µ‚Ä—£’EB
+    ' # ï¿½yï¿½ï¿½ï¿½ï¿½zï¿½Vï¿½[ï¿½gï¿½ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½\ï¿½Èê‡ï¿½Íï¿½ï¿½ï¿½ï¿½sï¿½\ï¿½Æ‚ï¿½ï¿½Ä—ï¿½ï¿½Eï¿½B
     If ws Is Nothing Then
         Exit Sub
     End If
     
-    ' 2. ’Ê’mî•ñ‚ÌÚ×‹zˆøB
-    ' # y–Ú“IzVBA ’Ê’mê—p‚É’è‹`‚³‚ê‚½ƒvƒƒpƒeƒB’l‚ð’Šo‚·‚é‚½‚ßB
+    ' 2. ï¿½Ê’mï¿½ï¿½ï¿½ÌÚ×‹zï¿½ï¿½ï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zVBA ï¿½Ê’mï¿½ï¿½pï¿½É’ï¿½`ï¿½ï¿½ï¿½ê‚½ï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½lï¿½ð’Šoï¿½ï¿½ï¿½é‚½ï¿½ßB
     sRaw = ExcelUtil.GetSheetProp(ws, RET_NAME)
     
-    ' # y”»’èz’Ê’m‚·‚×‚«ƒf[ƒ^‚ª‘¶Ý‚µ‚È‚¢ê‡‚ÍI—¹B
+    ' # ï¿½yï¿½ï¿½ï¿½ï¿½zï¿½Ê’mï¿½ï¿½ï¿½×‚ï¿½ï¿½fï¿½[ï¿½^ï¿½ï¿½ï¿½ï¿½ï¿½Ý‚ï¿½ï¿½È‚ï¿½ï¿½ê‡ï¿½ÍIï¿½ï¿½ï¿½B
     If sRaw = "" Then
         Exit Sub
     End If
     
-    ' 3. ƒƒbƒZ[ƒWƒpƒPƒbƒg‚Ì‰ðÍB
-    ' # y–Ú“IzPython ‘¤‚Å˜AŒ‹‚³‚ê‚½uƒ^ƒCƒgƒ‹|“à—ev‚ðÚ×•ª‰ð‚·‚é‚½‚ßB
+    ' 3. ï¿½ï¿½ï¿½bï¿½Zï¿½[ï¿½Wï¿½pï¿½Pï¿½bï¿½gï¿½Ì‰ï¿½ÍB
+    ' # ï¿½yï¿½Ú“Iï¿½zPython ï¿½ï¿½ï¿½Å˜Aï¿½ï¿½ï¿½ï¿½ï¿½ê‚½ï¿½uï¿½^ï¿½Cï¿½gï¿½ï¿½|ï¿½ï¿½ï¿½eï¿½vï¿½ï¿½ï¿½Ú×•ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
     vDat = Split(sRaw, "|")
     
-    ' # y”»’èz‹æØ‚è•¶Žš‚ÉŠî‚Ã‚¢‚½”z—ñ\‘¢‚Ì³“–«‚ðŒŸØB
+    ' # ï¿½yï¿½ï¿½ï¿½ï¿½zï¿½ï¿½Ø‚è•¶ï¿½ï¿½ï¿½ÉŠï¿½Ã‚ï¿½ï¿½ï¿½ï¿½zï¿½ï¿½\ï¿½ï¿½ï¿½Ìï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ØB
     If UBound(vDat) >= 1 Then
         sCap = vDat(0)
-        ' # y•â‘«zMsgBox ‚Å‚Ì‰üs‚ð—LŒø‚É‚·‚é‚½‚ß \n ‚ð vbCrLf ‚Ö’uŠ·B
+        ' # ï¿½yï¿½â‘«ï¿½zMsgBox ï¿½Å‚Ì‰ï¿½ï¿½sï¿½ï¿½Lï¿½ï¿½ï¿½É‚ï¿½ï¿½é‚½ï¿½ï¿½ \n ï¿½ï¿½ vbCrLf ï¿½Ö’uï¿½ï¿½ï¿½B
         sMsg = Replace(vDat(1), "\n", vbCrLf)
     Else
-        sCap = "CSV Tool ’Ê’m"
+        sCap = "CSV Tool ï¿½Ê’m"
         sMsg = sRaw
     End If
 
     
-    ' 4. ’Ê’m‚ÌŽ·sB
-    ' # y–Ú“Izƒ†[ƒU[‚ÖŽÀsŒ‹‰Ê‚ðƒ_ƒCƒAƒƒOŒ`Ž®‚Å–¾Ž¦‚·‚é‚½‚ßB
+    ' 4. ï¿½Ê’mï¿½ÌŽï¿½ï¿½sï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ï¿½ï¿½[ï¿½Uï¿½[ï¿½ÖŽï¿½ï¿½sï¿½ï¿½ï¿½Ê‚ï¿½ï¿½_ï¿½Cï¿½Aï¿½ï¿½ï¿½Oï¿½`ï¿½ï¿½ï¿½Å–ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
     On Error Resume Next
     Application.Activate
     AppActivate Application.Caption
     On Error GoTo ErrorHandler
     Call MsgBox(sMsg, vbInformation, sCap)
     
-    ' 5. Œã•Ð•t‚¯‚ÌŽ·sB
-    ' # y–Ú“IzƒvƒƒpƒeƒB‚ð•¨—–•Á‚µAŽŸ‰ñ‹N“®Žž‚ÌŒë’Ê’m‚ð–hŽ~‚·‚é‚½‚ßB
+    ' 5. ï¿½ï¿½Ð•tï¿½ï¿½ï¿½ÌŽï¿½ï¿½sï¿½B
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½vï¿½ï¿½ï¿½pï¿½eï¿½Bï¿½ð•¨—ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½ï¿½ï¿½Nï¿½ï¿½ï¿½ï¿½ï¿½ÌŒï¿½Ê’mï¿½ï¿½hï¿½~ï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call ExcelUtil.DeleteSheetProp(ws, RET_NAME)
     
     Exit Sub
 
 ErrorHandler:
-    ' # y–Ú“Iz’Ê’mˆ—’†‚ÌˆÙí‚ðƒƒO‚É•ß‘¨‚·‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½Ê’mï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÌˆÙï¿½ï¿½ï¿½ï¿½ï¿½Oï¿½É•ß‘ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call HC_Log.Error("Main", "CheckAndNotifyVBA encountered an error: " & Err.Description)
 End Sub
 
 ' ============================================================
-' Cursor Guard Timeri•ÛŒ¯ƒ^ƒCƒ}j
-'   - RunPythonSafeŠJŽnŽž‚ÉŠJŽn
-'   - Python‘¤‚ªUI•\Ž¦Š®—¹Žž‚É CancelCursorGuardTimer ‚ðŒÄ‚ÔiExcel.Runj
-'   - Ž¸”s‚µ‚Ä‚à 10•bŒã‚É ForceCursorOff ‚ª•K‚¸‘–‚é
+' Cursor Guard Timerï¿½iï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}ï¿½j
+'   - RunPythonSafeï¿½Jï¿½nï¿½ï¿½ï¿½ÉŠJï¿½n
+'   - Pythonï¿½ï¿½ï¿½ï¿½UIï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ CancelCursorGuardTimer ï¿½ï¿½ï¿½Ä‚ÔiExcel.Runï¿½j
+'   - ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½Ä‚ï¿½ 10ï¿½bï¿½ï¿½ï¿½ ForceCursorOff ï¿½ï¿½ï¿½Kï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 ' ============================================================
 Public Sub StartCursorGuardTimer(ByVal sId As String)
-    ' # y–Ú“IzUI•\Ž¦Š®—¹’Ê’m‚ª’x‰„/‘rŽ¸‚µ‚Ä‚àAˆê’èŽžŠÔ‚Å»ŽžŒv‚ð•K‚¸‰ðœ‚·‚é‚½‚ßB
-    ' # yÝŒvzOnTime‚Í•b¸“xBmsŠÄŽ‹‚Í‚µ‚È‚¢i‰ß•‰‰×‚Æ•›ì—p‚ð”ð‚¯‚éjB
+    ' # ï¿½yï¿½Ú“Iï¿½zUIï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê’mï¿½ï¿½ï¿½xï¿½ï¿½/ï¿½rï¿½ï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½Aï¿½ï¿½èŽžï¿½Ô‚Åï¿½ï¿½ï¿½ï¿½vï¿½ï¿½Kï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é‚½ï¿½ßB
+    ' # ï¿½yï¿½ÝŒvï¿½zOnTimeï¿½Í•bï¿½ï¿½ï¿½xï¿½Bmsï¿½ÄŽï¿½ï¿½Í‚ï¿½ï¿½È‚ï¿½ï¿½iï¿½ß•ï¿½ï¿½×‚Æ•ï¿½ï¿½ï¿½pï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½jï¿½B
 
     On Error Resume Next
 
@@ -443,8 +486,8 @@ Public Sub StartCursorGuardTimer(ByVal sId As String)
 End Sub
 
 Public Sub CancelCursorGuardTimer(Optional ByVal reason As String = "")
-    ' # y–Ú“IzPython‘¤‚ªUI•\Ž¦Š®—¹‚µ‚½Žž“_‚ÅA•ÛŒ¯ƒ^ƒCƒ}‚ð’âŽ~‚·‚é‚½‚ßB
-    ' # y’ˆÓzŠù‚É”­‰ÎÏ‚Ý/–¢“o˜^“™‚Å‚à—Ž‚¿‚È‚¢‚æ‚¤‚É‚·‚éiOnError Resume NextjB
+    ' # ï¿½yï¿½Ú“Iï¿½zPythonï¿½ï¿½ï¿½ï¿½UIï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½_ï¿½ÅAï¿½ÛŒï¿½ï¿½^ï¿½Cï¿½}ï¿½ï¿½ï¿½~ï¿½ï¿½ï¿½é‚½ï¿½ßB
+    ' # ï¿½yï¿½ï¿½ï¿½Ózï¿½ï¿½ï¿½É”ï¿½ï¿½ÎÏ‚ï¿½/ï¿½ï¿½ï¿½oï¿½^ï¿½ï¿½ï¿½Å‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È‚ï¿½ï¿½æ‚¤ï¿½É‚ï¿½ï¿½ï¿½iOnError Resume Nextï¿½jï¿½B
 
     On Error Resume Next
 
@@ -463,12 +506,12 @@ Public Sub CancelCursorGuardTimer(Optional ByVal reason As String = "")
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: ForceCursorOn
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   1.0.0 (2026-06-01) –{”ÔˆêŠ‡ compute “™: xlWait ON + CursorGuard ƒ^ƒCƒ}Ä•‘•B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: RunPythonSafe ”ñŒo—R‚Ì’·ŽžŠÔˆ—‚Å Excel »ŽžŒv‚ð•\Ž¦‚·‚éB
-' ŒÄo‚µ—á: Application.Run "Main.ForceCursorOn", sheetId
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) StartCursorGuardTimer
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: ForceCursorOn
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   1.0.0 (2026-06-01) ï¿½{ï¿½ÔˆêŠ‡ compute ï¿½ï¿½: xlWait ON + CursorGuard ï¿½^ï¿½Cï¿½}ï¿½Ä•ï¿½ï¿½ï¿½ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: RunPythonSafe ï¿½ï¿½oï¿½Rï¿½Ì’ï¿½ï¿½ï¿½ï¿½Ôï¿½ï¿½ï¿½ï¿½ï¿½ Excel ï¿½ï¿½ï¿½ï¿½ï¿½vï¿½ï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Application.Run "Main.ForceCursorOn", sheetId
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) StartCursorGuardTimer
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub ForceCursorOn(Optional ByVal sId As String = "batch")
     On Error Resume Next
@@ -481,12 +524,12 @@ Public Sub ForceCursorOn(Optional ByVal sId As String = "batch")
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: ForceCursorOnProgress
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   1.0.0 (2026-06-06) i’»ƒ_ƒCƒAƒƒO•\Ž¦ŠJŽn: xlWait ONiStartCursorGuardTimer ‚ÍŒÄ‚Î‚È‚¢jB
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: ProgressDialog ‚Ì showEvent ‚©‚ç‚Ì‚Ý»ŽžŒv‚ð ON ‚É‚·‚éB
-' ŒÄo‚µ—á: Application.Run "Main.ForceCursorOnProgress", sheetId
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (‚È‚µ) ForceCursorOff ‚Í Python ‘¤ notify_ui_ready ‚Å‰ðœ
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: ForceCursorOnProgress
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   1.0.0 (2026-06-06) ï¿½iï¿½ï¿½ï¿½_ï¿½Cï¿½Aï¿½ï¿½ï¿½Oï¿½\ï¿½ï¿½ï¿½Jï¿½n: xlWait ONï¿½iStartCursorGuardTimer ï¿½ÍŒÄ‚Î‚È‚ï¿½ï¿½jï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ProgressDialog ï¿½ï¿½ showEvent ï¿½ï¿½ï¿½ï¿½Ì‚Ýï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ ON ï¿½É‚ï¿½ï¿½ï¿½B
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Application.Run "Main.ForceCursorOnProgress", sheetId
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½È‚ï¿½) ForceCursorOff ï¿½ï¿½ Python ï¿½ï¿½ notify_ui_ready ï¿½Å‰ï¿½ï¿½ï¿½
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub ForceCursorOnProgress(Optional ByVal sId As String = "progress")
     On Error Resume Next
@@ -498,8 +541,8 @@ Public Sub ForceCursorOnProgress(Optional ByVal sId As String = "progress")
 End Sub
 
 Public Sub ForceCursorOff()
-    ' # y–Ú“IzÅI•ÛŒ¯‚Æ‚µ‚Ä»ŽžŒv‚ð‰ðœ‚·‚éB
-    ' # y’ˆÓz‘½dŽÀs‚³‚ê‚Ä‚àˆÀ‘Si™p“™j‚É‚·‚éB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½ÅIï¿½ÛŒï¿½ï¿½Æ‚ï¿½ï¿½Äï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+    ' # ï¿½yï¿½ï¿½ï¿½Ózï¿½ï¿½ï¿½dï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½Sï¿½iï¿½pï¿½ï¿½ï¿½jï¿½É‚ï¿½ï¿½ï¿½B
 
     On Error Resume Next
 
@@ -517,28 +560,28 @@ End Sub
 
 
 ' ==============================================================================
-' ƒ‰ƒCƒtƒTƒCƒNƒ‹ŠÇ—
+' ï¿½ï¿½ï¿½Cï¿½tï¿½Tï¿½Cï¿½Nï¿½ï¿½ï¿½Ç—ï¿½
 ' ==============================================================================
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: TerminatePython
-' ì¬“ú: 2026-02-02
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð: 1.0.1 (2026-02-03) ‹K’èƒwƒbƒ_‚Ì“K—pB
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Python ‘¤‚ÌƒuƒbƒNŽQÆŽ«‘‚ð‰Šú‰»‚µAƒƒ‚ƒŠŽ‘Œ¹‚ð‰ð•ú‚·‚éB
-' ˆø”: ‚È‚µ
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: ThisWorkbook ‚ÌI—¹Žž
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) xlwings.RunPython
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: TerminatePython
+' ï¿½ì¬ï¿½ï¿½: 2026-02-02
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.0.1 (2026-02-03) ï¿½Kï¿½ï¿½wï¿½bï¿½_ï¿½Ì“Kï¿½pï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: Python ï¿½ï¿½ï¿½Ìƒuï¿½bï¿½Nï¿½Qï¿½ÆŽï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½: ï¿½È‚ï¿½
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: ThisWorkbook ï¿½ÌIï¿½ï¿½ï¿½ï¿½
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) xlwings.RunPython
 ' ---------------------------------------------------------------------------------------------------------------------
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: ShutdownExcelUiCleanup
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   1.2.0 (2026-06-07) excel_shutdown_workbook_close 1 ‰ñ‰»irestore/shutdown/registry clearjB
-'   1.1.0 (2026-05-31) Python restore_excel_host_ui_state ŒÄ‚Ño‚µEEnableEvents •œŒ³‚ð’Ç‰ÁB
-'   1.0.0 (2026-05-30) Excel I—¹Žž: WaitForm/OnTime/Interactive/ScreenUpdating ‚Ì•œŒ³B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: ƒAƒhƒCƒ“I—¹’¼‘O‚É VBA ‘¤ UI ‚ð•œŒ³‚µAPython I—¹‚ð 1 ‰ñ‚Ì RunPython ‚ÅŽÀsB
-' ŒÄo‚µ—á: Call Main.ShutdownExcelUiCleanup
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) HC_WaitForm.NotifyUiReady, CancelCursorGuardTimer, xlwings.RunPython
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: ShutdownExcelUiCleanup
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   1.2.0 (2026-06-07) excel_shutdown_workbook_close 1 ï¿½ñ‰»irestore/shutdown/registry clearï¿½jï¿½B
+'   1.1.0 (2026-05-31) Python restore_excel_host_ui_state ï¿½Ä‚Ñoï¿½ï¿½ï¿½EEnableEvents ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç‰ï¿½ï¿½B
+'   1.0.0 (2026-05-30) Excel ï¿½Iï¿½ï¿½ï¿½ï¿½: WaitForm/OnTime/Interactive/ScreenUpdating ï¿½Ì•ï¿½ï¿½ï¿½ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ï¿½Aï¿½hï¿½Cï¿½ï¿½ï¿½Iï¿½ï¿½ï¿½ï¿½ï¿½Oï¿½ï¿½ VBA ï¿½ï¿½ UI ï¿½ð•œŒï¿½ï¿½ï¿½ï¿½APython ï¿½Iï¿½ï¿½ï¿½ï¿½ 1 ï¿½ï¿½ï¿½ RunPython ï¿½ÅŽï¿½ï¿½sï¿½B
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Call Main.ShutdownExcelUiCleanup
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) HC_WaitForm.NotifyUiReady, CancelCursorGuardTimer, xlwings.RunPython
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub ShutdownExcelUiCleanup()
     On Error Resume Next
@@ -565,18 +608,18 @@ End Sub
 
 Public Sub TerminatePython()
     On Error Resume Next
-    ' # y–Ú“IzƒAƒhƒCƒ“I—¹Žž‚É Python ‘¤‚Ì COM ŽQÆ‚ðƒNƒŠƒA‚·‚é‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zï¿½Aï¿½hï¿½Cï¿½ï¿½ï¿½Iï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ COM ï¿½Qï¿½Æ‚ï¿½ï¿½Nï¿½ï¿½ï¿½Aï¿½ï¿½ï¿½é‚½ï¿½ßB
     Call HC_Log.Info("Main", "TerminatePython: Clearing internal registries.")
     RunPython "from core.excel_session import clear_internal_registry; clear_internal_registry()"
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: MarkWorkbookOpenFullPythonDone
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Workbook_Open “à‚Ì RunPythonistartup_fullj¬Œ÷Œã‚ÉŒÄ‚ÑA’x‰„‰Šú‰»‚Å‚ÌÄŽÀs‚ð—}Ž~‚·‚éB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: MarkWorkbookOpenFullPythonDone
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: Workbook_Open ï¿½ï¿½ï¿½ï¿½ RunPythonï¿½istartup_fullï¿½jï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÉŒÄ‚ÑAï¿½xï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å‚ÌÄŽï¿½ï¿½sï¿½ï¿½}ï¿½~ï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: MarkWorkbookOpenStartupFullStarted
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: startup_full ‚Ì RunPython ’…Žè‘O‚ÉŒÄ‚ÑA’x‰„ InitPythonServer ‚Ì 2 ‰ñ–Ú‚ð—}Ž~‚·‚éB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: MarkWorkbookOpenStartupFullStarted
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: startup_full ï¿½ï¿½ RunPython ï¿½ï¿½ï¿½ï¿½Oï¿½ÉŒÄ‚ÑAï¿½xï¿½ï¿½ InitPythonServer ï¿½ï¿½ 2 ï¿½ï¿½Ú‚ï¿½}ï¿½~ï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub MarkWorkbookOpenStartupFullStarted()
     mWorkbookOpenStartupFullStarted = True
@@ -595,8 +638,8 @@ Public Sub MarkWorkbookOpenFullPythonDone()
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: ResetWorkbookOpenFullPythonDone
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Manual_Init “™‚Å Python ‘¤‚ÌÄ“o˜^‚ð•K—v‚Æ‚·‚é‚Æ‚«AInitPythonServer ‚Å RunPython ‚³‚¹‚éB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: ResetWorkbookOpenFullPythonDone
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: Manual_Init ï¿½ï¿½ï¿½ï¿½ Python ï¿½ï¿½ï¿½ÌÄ“oï¿½^ï¿½ï¿½Kï¿½vï¿½Æ‚ï¿½ï¿½ï¿½Æ‚ï¿½ï¿½AInitPythonServer ï¿½ï¿½ RunPython ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub ResetWorkbookOpenFullPythonDone()
     mWorkbookOpenFullPythonDone = False
@@ -604,14 +647,14 @@ Public Sub ResetWorkbookOpenFullPythonDone()
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: RunInitEvents
-' ì¬“ú: 2026-03-xx
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð: 1.0.0 (2026-03-xx) ThisWorkbook.InitEvents ‚ð”ñ“¯ŠúŽÀs‚·‚éƒ‰ƒbƒp[‚Æ‚µ‚ÄV‹Kì¬B
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Application.OnTime ‚©‚çŒÄ‚Ño‚³‚êAThisWorkbook.InitEvents ‚ðˆÀ‘S‚ÉŽÀs‚·‚éB
-'                          ŽÀsŽž‚ÌƒGƒ‰[‚ÍƒƒO‚É‚ÍŽc‚³‚¸AŽŸ‚Ì‰Šú‰»ˆ—‚Ö‰e‹¿‚ð—^‚¦‚È‚¢B
-' ˆø”: ‚È‚µ
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: Main.WaitAndInitiApplication.OnTime Œo—Rj
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: RunInitEvents
+' ï¿½ì¬ï¿½ï¿½: 2026-03-xx
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.0.0 (2026-03-xx) ThisWorkbook.InitEvents ï¿½ï¿½ñ“¯Šï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½éƒ‰ï¿½bï¿½pï¿½[ï¿½Æ‚ï¿½ï¿½ÄVï¿½Kï¿½ì¬ï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: Application.OnTime ï¿½ï¿½ï¿½ï¿½Ä‚Ñoï¿½ï¿½ï¿½ï¿½AThisWorkbook.InitEvents ï¿½ï¿½ï¿½ï¿½ï¿½Sï¿½ÉŽï¿½ï¿½sï¿½ï¿½ï¿½ï¿½B
+'                          ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ÌƒGï¿½ï¿½ï¿½[ï¿½Íƒï¿½ï¿½Oï¿½É‚ÍŽcï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½ï¿½Ìï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö‰eï¿½ï¿½ï¿½ï¿½^ï¿½ï¿½ï¿½È‚ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½: ï¿½È‚ï¿½
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Main.WaitAndInitï¿½iApplication.OnTime ï¿½oï¿½Rï¿½j
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub RunInitEvents()
     On Error Resume Next
@@ -622,30 +665,30 @@ Public Sub RunInitEvents()
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: WaitAndInit
-' ì¬“ú: 2026-02-02
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð: 1.0.1 (2026-02-03) ‹K’èƒwƒbƒ_‚Ì“K—pB
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Excel ‹N“®Œã‚ÌˆÀ’è‘Ò‚¿‚ðs‚¢A”ñ“¯Šú‚Å‰Šú‰»ƒvƒƒV[ƒWƒƒ‚ð—\–ñŽÀs‚·‚éB
-' ˆø”: ‚È‚µ
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: Workbook_Open
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) Application.OnTime
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: WaitAndInit
+' ï¿½ì¬ï¿½ï¿½: 2026-02-02
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.0.1 (2026-02-03) ï¿½Kï¿½ï¿½wï¿½bï¿½_ï¿½Ì“Kï¿½pï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: Excel ï¿½Nï¿½ï¿½ï¿½ï¿½Ìˆï¿½ï¿½ï¿½Ò‚ï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½Aï¿½ñ“¯Šï¿½ï¿½Åï¿½ï¿½ï¿½ï¿½ï¿½ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½\ï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½: ï¿½È‚ï¿½
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: Workbook_Open
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) Application.OnTime
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub WaitAndInit()
-    ' # y–Ú“IzExcel ‹N“®’¼Œã‚Ì COM •sˆÀ’èŠú‚ð”ð‚¯AWAIT_INIT_SEC •bŒã‚É‰Šú‰»‚ðs‚¤‚½‚ßB
+    ' # ï¿½yï¿½Ú“Iï¿½zExcel ï¿½Nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ COM ï¿½sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½AWAIT_INIT_SEC ï¿½bï¿½ï¿½Éï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½ï¿½ï¿½ßB
     Call Application.OnTime(Now + TimeSerial(0, 0, WAIT_INIT_SEC), "Main.RunInitEvents")
     Call HC_Log.Info("Main", "WaitAndInit: Reserved non-blocking initialization.")
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: InitPythonServer
-' ì¬“ú: 2026-02-02
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð: 1.0.1 (2026-02-03) ‹K’èƒwƒbƒ_‚Ì“K—pB
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: Œ»Ý‚ÌƒuƒbƒN‚ð Python Ži—ß“ƒ‚É“o˜^‚µACOM ’ÊM‚Ì“y‘ä‚ð\’z‚·‚éB
-' ˆø”: ‚È‚µ
-' –ß‚è’l: ‚È‚µ
-' ŒÄo‚µ—á: ‰Šú‰»Žž
-' ƒwƒ‹ƒp[ƒvƒƒV[ƒWƒƒ‚ÌeŽqŠÖŒW: (Žq) xlwings.RunPythoni‰‰ñ¬Œ÷Œã‚ÍƒXƒLƒbƒvBManual_Init ‚ÅÄŽÀsj
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: InitPythonServer
+' ï¿½ì¬ï¿½ï¿½: 2026-02-02
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½: 1.0.1 (2026-02-03) ï¿½Kï¿½ï¿½wï¿½bï¿½_ï¿½Ì“Kï¿½pï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: ï¿½ï¿½ï¿½Ý‚Ìƒuï¿½bï¿½Nï¿½ï¿½ Python ï¿½iï¿½ß“ï¿½ï¿½É“oï¿½^ï¿½ï¿½ï¿½ACOM ï¿½ÊMï¿½Ì“yï¿½ï¿½ï¿½ï¿½\ï¿½zï¿½ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½: ï¿½È‚ï¿½
+' ï¿½ß‚ï¿½l: ï¿½È‚ï¿½
+' ï¿½Äoï¿½ï¿½ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+' ï¿½wï¿½ï¿½ï¿½pï¿½[ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ìeï¿½qï¿½ÖŒW: (ï¿½q) xlwings.RunPythonï¿½iï¿½ï¿½ï¿½ñ¬Œï¿½ï¿½ï¿½ÍƒXï¿½Lï¿½bï¿½vï¿½BManual_Init ï¿½ÅÄŽï¿½ï¿½sï¿½j
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub InitPythonServer()
     On Error Resume Next
@@ -661,15 +704,15 @@ Public Sub InitPythonServer()
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: SubmitSvcRequestViaBridge
-' ŒöŠJ: Public
-' ‰ü”Å”Ô†‚¨‚æ‚Ñ—š—ð:
-'   1.0.0 (2026-04-10) ƒŠƒ{ƒ“ tag ‚ð action ‚Æ‚µ‚½ JSON ‚ð UTF-8iADODB.Streamj‚Å bridge_requests ‚ÖB
-'   1.1.0 (2026-04-11) Optional selectionAreasJson ‚Å selection_areas ‚ð•t‰Á‰Â”\icheck_duplicatesjB
-' ƒvƒƒV[ƒWƒƒ‚Ì“®ìŠT—v: bridge_runner ‚ª“Ç‚ÝŽæ‚è svc_server ‚Ö“]‘—‚·‚éˆË—Š‚ðo—Í‚·‚éB
-' ˆø” publicAction: ƒŠƒ{ƒ“ control.Tagihc_main.invoke ‚Æ“¯ˆê•¶Žš—ñjB
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: SubmitSvcRequestViaBridge
+' ï¿½ï¿½ï¿½J: Public
+' ï¿½ï¿½ï¿½Å”Ôï¿½ï¿½ï¿½ï¿½ï¿½Ñ—ï¿½ï¿½ï¿½:
+'   1.0.0 (2026-04-10) ï¿½ï¿½ï¿½{ï¿½ï¿½ tag ï¿½ï¿½ action ï¿½Æ‚ï¿½ï¿½ï¿½ JSON ï¿½ï¿½ UTF-8ï¿½iADODB.Streamï¿½jï¿½ï¿½ bridge_requests ï¿½ÖB
+'   1.1.0 (2026-04-11) Optional selectionAreasJson ï¿½ï¿½ selection_areas ï¿½ï¿½tï¿½ï¿½ï¿½Â”\ï¿½icheck_duplicatesï¿½jï¿½B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½Ì“ï¿½ï¿½ï¿½Tï¿½v: bridge_runner ï¿½ï¿½ï¿½Ç‚ÝŽï¿½ï¿½ svc_server ï¿½Ö“]ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë—ï¿½ï¿½ï¿½ï¿½oï¿½Í‚ï¿½ï¿½ï¿½B
+' ï¿½ï¿½ï¿½ï¿½ publicAction: ï¿½ï¿½ï¿½{ï¿½ï¿½ control.Tagï¿½ihc_main.invoke ï¿½Æ“ï¿½ï¿½ê•¶ï¿½ï¿½ï¿½ï¿½jï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
-' •â‘«: selectionAreasJson ‚ÍŽ–‘OƒGƒXƒP[ƒvÏ‚Ý‚Ì JSON ”z—ñƒŠƒeƒ‰ƒ‹iselection_areas ‚Ì’ljB
+' ï¿½â‘«: selectionAreasJson ï¿½ÍŽï¿½ï¿½Oï¿½Gï¿½Xï¿½Pï¿½[ï¿½vï¿½Ï‚Ý‚ï¿½ JSON ï¿½zï¿½ñƒŠƒeï¿½ï¿½ï¿½ï¿½ï¿½iselection_areas ï¿½Ì’lï¿½jï¿½B
 Public Sub SubmitSvcRequestViaBridge(ByVal publicAction As String, ByVal hwnd As LongPtr, ByVal sId As String, ByVal bookFullName As String, ByVal bookName As String, Optional ByVal selectionAreasJson As String = "", Optional ByVal dupliCountsFragment As String = "")
     Dim baseDir As String
     Dim reqStamp As String
@@ -756,9 +799,9 @@ ErrBridge:
 End Sub
 
 ' ---------------------------------------------------------------------------------------------------------------------
-' ƒvƒƒV[ƒWƒƒ–¼: SubmitLoadCsvViaBridge
-' ŒöŠJ: PubliciŠù‘¶ŒÄ‚Ño‚µŒÝŠ·j
-' ‰ü”Å: 2.5.0 (2026-04-10) SubmitSvcRequestViaBridge("load_csv", ...) ‚ÖˆÏ÷B
+' ï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½ï¿½: SubmitLoadCsvViaBridge
+' ï¿½ï¿½ï¿½J: Publicï¿½iï¿½ï¿½ï¿½ï¿½ï¿½Ä‚Ñoï¿½ï¿½ï¿½ÝŠï¿½ï¿½j
+' ï¿½ï¿½ï¿½ï¿½: 2.5.0 (2026-04-10) SubmitSvcRequestViaBridge("load_csv", ...) ï¿½ÖˆÏï¿½ï¿½B
 ' ---------------------------------------------------------------------------------------------------------------------
 Public Sub SubmitLoadCsvViaBridge(ByVal hwnd As LongPtr, ByVal sId As String, ByVal bookFullName As String, ByVal bookName As String)
     Call SubmitSvcRequestViaBridge("load_csv", hwnd, sId, bookFullName, bookName)

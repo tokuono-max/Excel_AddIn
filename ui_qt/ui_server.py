@@ -77,7 +77,7 @@ from typing import Any
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-__version__ = "1.4.59"
+__version__ = "1.4.61"
 
 from ui_qt import ipc_file  # noqa: E402
 
@@ -1446,6 +1446,13 @@ def main() -> int:
 
     try:
         ipc_file.clear_shutdown_flag()
+    except Exception:
+        pass
+
+    try:
+        from core.excel_lifecycle_monitor import ensure_excel_lifecycle_monitor
+
+        ensure_excel_lifecycle_monitor()
     except Exception:
         pass
 

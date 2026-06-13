@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_data_agg_scan.py
 Created: 2026-03-18
 Updated: 2026-03-18
-Version: 0.1.0
+Version: 0.1.1
 Purpose:
   データ集約用のフォルダ走査。起点パス・再帰ON/OFF・拡張子・キーワード・一時ファイル除外で対象ファイル一覧を返す。
   svc_data_agg から呼び出され、サブモジュールとして分離する。

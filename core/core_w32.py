@@ -425,6 +425,48 @@ def get_window_pid(hwnd: int) -> int:
         return 0
 
 
+def is_process_alive(pid: int) -> bool:
+    """PID のプロセスが生存していれば True。
+
+    Windows では GetExitCodeProcess を使う（os.kill(0) は ACCESS_DENIED で誤判定しやすい）。
+    判定不能時は生存扱いにして Python の誤終了を防ぐ。
+    """
+    pid_i = int(pid or 0)
+    if pid_i <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid_i, 0)
+            return True
+        except OSError:
+            return False
+    STILL_ACTIVE = 259
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ERROR_ACCESS_DENIED = 5
+    try:
+        h = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_i)
+        if not h:
+            if int(_kernel32.GetLastError() or 0) == ERROR_ACCESS_DENIED:
+                return True
+            return False
+        code = wintypes.DWORD()
+        ok = _kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        _kernel32.CloseHandle(h)
+        if not ok:
+            return True
+        return int(code.value) == STILL_ACTIVE
+    except Exception:
+        return True
+
+
+def is_window(hwnd: int) -> bool:
+    """HWND が有効なウィンドウなら True（Excel 終了後は False）。"""
+    try:
+        return bool(_user32.IsWindow(int(hwnd or 0)))
+    except Exception:
+        return False
+
+
 def get_process_image_path_for_diag(pid: int, max_chars: int = 96) -> str:
     """PID に紐づく実行ファイルパスを短く返す（ログ用。失敗時は空文字）。"""
     try:

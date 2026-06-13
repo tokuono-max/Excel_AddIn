@@ -4,7 +4,7 @@ Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
 Updated: 2026-06-07
-Version: 0.4.32
+Version: 0.4.36
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
@@ -13,6 +13,10 @@ Purpose:
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.36 (2026-06-13): ensure_python_hosts_ready に register_book(hwnd) を追加（マルチ Excel 初回リボン対策）。
+  - 0.4.35 (2026-06-13): ensure_python_hosts_ready 追加。HWND 監視廃止（全 EXCEL.EXE 監視へ移行）。
+  - 0.4.34 (2026-06-13): persist_excel_hwnd を常駐 spawn 前へ移動。lifecycle monitor の bootstrap 待機を追加。
+  - 0.4.33 (2026-06-13): excel_startup で Excel HWND を IPC 保存。常駐プロセスのライフサイクル監視と連携（B+A）。
   - 0.4.32 (2026-06-07): 起動短縮 — svc/ui/bridge 並列 spawn、xlwings 先行 import 連携。
   - 0.4.31 (2026-06-07): excel_shutdown_workbook_close 追加（終了 RunPython 1 回化）。shutdown 待機をポーリング化（早期終了）。
   - 0.4.30 (2026-06-03): shutdown_all_with_force_kill 追加（フラグ終了後に hc_main/svc_server/ui_server の pythonw を taskkill）。
@@ -48,7 +52,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.32"
+__version__ = "0.4.36"
 import os
 import shlex
 import subprocess
@@ -815,6 +819,20 @@ def _wait_until_all_running(
         "[HOST_STARTUP] parallel spawn mutex not observed yet: %s",
         ",".join(missing),
     )
+
+
+def ensure_python_hosts_ready(target_hwnd: int | None = None) -> None:
+    """起動時・リボン操作時: svc/ui/bridge が死んでいれば起動。生存中は何もしない。
+
+    マルチ Excel / 新規ブックでは Workbook_Open の register_book 前にリボンが押されることがあるため、
+    target_hwnd を渡してブック登録も行う。
+    """
+    ensure_svc_ui_bridge_parallel()
+    hwnd = int(target_hwnd or 0)
+    if hwnd > 0:
+        from core.excel_session import register_book
+
+        register_book(target_hwnd=hwnd)
 
 
 def ensure_svc_ui_bridge_parallel() -> None:

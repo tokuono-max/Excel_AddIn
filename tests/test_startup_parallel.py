@@ -89,3 +89,20 @@ def test_ensure_svc_ui_bridge_parallel_spawns_all(monkeypatch):
     svc_host.ensure_svc_ui_bridge_parallel()
     assert spawned == {"svc": 1, "ui": 1, "bridge": 1}
     assert prewarm["called"] is True
+
+
+def test_ensure_python_hosts_ready_registers_book(monkeypatch):
+    calls: list[int | None] = []
+
+    monkeypatch.setattr(svc_host, "ensure_svc_ui_bridge_parallel", lambda: None)
+
+    def fake_register(*, target_hwnd=None):
+        calls.append(target_hwnd)
+
+    monkeypatch.setattr("core.excel_session.register_book", fake_register)
+
+    svc_host.ensure_python_hosts_ready(6229952)
+    assert calls == [6229952]
+
+    svc_host.ensure_python_hosts_ready(0)
+    assert calls == [6229952]

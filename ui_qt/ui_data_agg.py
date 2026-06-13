@@ -4,7 +4,7 @@ Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
 Updated: 2026-05-03
-Version: 0.4.44
+Version: 0.4.45
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。

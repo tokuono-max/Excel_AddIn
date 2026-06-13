@@ -4,7 +4,7 @@ Python: 3.12
 Module: svc/svc_server.py
 Created: 2026-02-15
 Updated: 2026-04-13
-Version: 0.1.11
+Version: 0.1.12
 Purpose:
   別プロセスで常駐する svc サーバ。
   - hc_main からの svc_req_*.pkl を監視し、action に応じて svc/hc_<feature>.py を遅延 import して実行する。
@@ -15,6 +15,7 @@ Shutdown (L1):
   - control/svc_shutdown.flag を検知したら停止する。
 
 History (latest 3):
+  - 0.1.12 (2026-06-13): _attach_book を HWND 直結＋短リトライ（マルチ Excel / 起動直後レース対策）。
   - 0.1.11 (2026-04-13) `_process_one` finally: `SVC_ACTIONS_NOTIFY_WAITFORM_AFTER_HANDLER` と data_agg 失敗時に notify_wait_form_ready。
   - 0.1.10 (2026-04-11) `SVC_SERVER_ACTION_KEYS` 公開（`core.ribbon_public_to_svc` との整合テスト用）。
   - 0.1.9 (2026-04-10) mutex 取得成功直後に `core.ipc_cleanup.run_svc_server_startup_sweeps`（`svc_requests`/`svc_results` TTL・古い `*_starting.flag`）。`svc_shutdown` クリア前。
@@ -48,7 +49,7 @@ from typing import Any, Callable
 from core import core_env
 from core.core_log import get_logger
 
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 
 logger = get_logger(__name__)
 
@@ -375,14 +376,24 @@ def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
     """excel_hwnd と book識別子から xlwings.Book を取得する（best-effort）。
 
     Notes:
-        - 多くの環境では xlwings が稼働中 Excel を列挙できる。
-        - 取得失敗時は例外を投げ、上位で ERROR にする。
+        - HWND 直結で対象 Excel を特定（マルチ Excel で apps.active を使わない）。
+        - 起動直後のレースでは短いリトライ後に active book へフォールバックする。
     """
+    import time
+
     import xlwings as xw  # type: ignore
 
-    # 1) app を特定
-    target_app = None
-    try:
+    ph = int(excel_hwnd or 0)
+    if ph <= 0:
+        raise RuntimeError("excel_hwnd missing")
+
+    def _target_app():
+        try:
+            from xlwings._xlwindows import App as WinApp
+
+            return xw.App(impl=WinApp(xl=ph))
+        except Exception:
+            pass
         for app in xw.apps:
             try:
                 hwnd = int(getattr(app, "hwnd", 0) or 0)
@@ -391,39 +402,45 @@ def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
                     hwnd = int(app.api.Hwnd)  # type: ignore[attr-defined]
                 except Exception:
                     hwnd = 0
-            if excel_hwnd and hwnd == int(excel_hwnd):
-                target_app = app
-                break
-    except Exception:
-        target_app = None
+            if hwnd == ph:
+                return app
+        raise RuntimeError(f"Excel instance not found (hwnd={ph})")
 
-    if target_app is None:
-        # fallback: active app
+    def _pick_book(target_app) -> Any:
+        if book_fullname:
+            for b in target_app.books:
+                try:
+                    if str(getattr(b, "fullname", "")) == book_fullname:
+                        return b
+                except Exception:
+                    continue
+        if book_name:
+            for b in target_app.books:
+                try:
+                    if str(getattr(b, "name", "")) == book_name:
+                        return b
+                except Exception:
+                    continue
+        active = target_app.books.active
+        if active is not None:
+            return active
+        raise RuntimeError(
+            f"Workbook not found (fullname={book_fullname!r} name={book_name!r})"
+        )
+
+    last_err: Exception | None = None
+    for attempt in range(6):
         try:
-            target_app = xw.apps.active
-        except Exception as ex:
-            raise RuntimeError(f"Excel instance not found (hwnd={excel_hwnd})") from ex
-
-    # 2) book を特定（fullname優先）
-    if book_fullname:
-        for b in target_app.books:
-            try:
-                if str(getattr(b, "fullname", "")) == book_fullname:
-                    return b
-            except Exception:
+            return _pick_book(_target_app())
+        except RuntimeError as ex:
+            last_err = ex
+            if attempt < 5 and "Workbook not found" in str(ex):
+                time.sleep(0.05 * (attempt + 1))
                 continue
-
-    if book_name:
-        for b in target_app.books:
-            try:
-                if str(getattr(b, "name", "")) == book_name:
-                    return b
-            except Exception:
-                continue
-
-    raise RuntimeError(
-        f"Workbook not found (fullname={book_fullname!r} name={book_name!r})"
-    )
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"Workbook not found (hwnd={ph})")
 
 def _call_handler(
     handler, action: str, *, excel_hwnd: int, sheet_id: str, book, kwargs: dict
@@ -607,6 +624,12 @@ def main() -> int:
     logger.info(
         "[SVC_SERVER] started pid=%s file=%s", os.getpid(), Path(__file__).resolve()
     )
+    try:
+        from core.excel_lifecycle_monitor import ensure_excel_lifecycle_monitor
+
+        ensure_excel_lifecycle_monitor()
+    except Exception:
+        pass
     _run_warmup()
 
     req_dir = _req_dir()

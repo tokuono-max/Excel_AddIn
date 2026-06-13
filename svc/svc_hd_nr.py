@@ -4,7 +4,7 @@ Python: 3.10+
 Module: svc/svc_hd_nr
 Created: 2026-03-05
 Updated: 2026-04-06
-Version: 2.4.8
+Version: 2.4.9
 Purpose:
   行整形（ヘッダブロック横結合）。選択行をヘッダブロックとし、行を横列に結合してデータ領域を整形する。
   データ領域は一括読込→メモリ内で一括 reshape（numpy）→一括書込で高速化。チャンクループは行わない。  UI: ui_hd_nr + ui_common。JSON: config/ui_hd_nr.json。

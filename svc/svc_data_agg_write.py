@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_data_agg_write.py
 Created: 2026-03-18
 Updated: 2026-04-14
-Version: 0.1.4
+Version: 0.1.5
 Purpose:
   データ集約用のマスター書き込み。行追加（append）・強制上書き（overwrite）・空き上書き（fill_in）と、
   照合キーによる行マッチを提供する。一括実行時は内部メモリで組み立てた表を終了時に一括出力、

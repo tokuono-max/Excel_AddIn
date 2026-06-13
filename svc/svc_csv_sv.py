@@ -52,7 +52,7 @@ from core.csv_tool_progress_ui import enrich_progress_req_dict
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.9"
+__version__ = "1.3.10"
 
 try:
     from core import core_xlc as xlc

@@ -8,6 +8,7 @@ Version: 1.1.2
 Purpose:
   日付・時刻変換（選択範囲を YYYY/MM/DD HH:MM 形式へ一括変換）。処理は本モジュール、画面は ui_qt.ui_dt_hm + config/ui_dt_hm.json。
 History (latest 3):
+  - 1.1.2 (2026-06-13) Version / __version__ / History 番号を同期。
   - 1.1.0 (2026-04-06) HC_LOG_PERF: [DT_HM_PERF]。診断: [DT_HM_TRACE]。
   - 1.0.0 (2026-03-18) hc_dt_hm から分離。core_xlc/get_excel_context_from_hwnd、進捗IPC、完了通知。
   - 初出 (2026-03-06) 計画に基づく svc_dt_hm + ui_dt_hm 新規作成。

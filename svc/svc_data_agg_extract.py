@@ -4,7 +4,7 @@ Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
 Updated: 2026-03-18
-Version: 0.1.0
+Version: 0.1.9
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
