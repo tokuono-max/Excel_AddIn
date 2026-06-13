@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_server.py
 Created: 2026-02-15
-Updated: 2026-04-13
-Version: 0.1.12
+Updated: 2026-06-14
+Version: 0.1.18
 Purpose:
   別プロセスで常駐する svc サーバ。
   - hc_main からの svc_req_*.pkl を監視し、action に応じて svc/hc_<feature>.py を遅延 import して実行する。
@@ -15,6 +15,12 @@ Shutdown (L1):
   - control/svc_shutdown.flag を検知したら停止する。
 
 History (latest 3):
+  - 0.1.18 (2026-06-14): A+ — excel_com_session で COM recycle を全 Excel action に統一。
+  - 0.1.17 (2026-06-14): book_action 成功後に svc_server を自終了（1 操作 1 プロセス COM）。attach 失敗時も recycle。
+  - 0.1.16 (2026-06-14): COM 汚染はプロセス再起動で解消（attach 簡素化・HWND 監視）。0.1.13–0.1.15 の in-process 修復を廃止。
+  - 0.1.15 (2026-06-14): attach_book に xlc 経路優先・COM アパートメント復旧・HWND 切替時の全リセット。
+  - 0.1.14 (2026-06-14): Excel 終了後の stale COM 検知・再バインド・RPC エラー時リトライ。
+  - 0.1.13 (2026-06-14): _attach_book マルチ Excel 対策（xw.apps 優先・他インスタンス COM 解放・HWND キャッシュ）。
   - 0.1.12 (2026-06-13): _attach_book を HWND 直結＋短リトライ（マルチ Excel / 起動直後レース対策）。
   - 0.1.11 (2026-04-13) `_process_one` finally: `SVC_ACTIONS_NOTIFY_WAITFORM_AFTER_HANDLER` と data_agg 失敗時に notify_wait_form_ready。
   - 0.1.10 (2026-04-11) `SVC_SERVER_ACTION_KEYS` 公開（`core.ribbon_public_to_svc` との整合テスト用）。
@@ -33,6 +39,7 @@ import time
 import traceback
 import subprocess
 import multiprocessing as _mp
+import threading
 
 from pathlib import Path
 
@@ -49,7 +56,7 @@ from typing import Any, Callable
 from core import core_env
 from core.core_log import get_logger
 
-__version__ = "0.1.12"
+__version__ = "0.1.18"
 
 logger = get_logger(__name__)
 
@@ -372,75 +379,459 @@ def _find_req_files(req_dir: Path) -> list[Path]:
     except Exception:
         return []
 
-def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
-    """excel_hwnd と book識別子から xlwings.Book を取得する（best-effort）。
+_book_cache_lock = threading.Lock()
+_book_cache_by_hwnd: dict[int, Any] = {}
+_last_attached_hwnd: int = 0
 
-    Notes:
-        - HWND 直結で対象 Excel を特定（マルチ Excel で apps.active を使わない）。
-        - 起動直後のレースでは短いリトライ後に active book へフォールバックする。
-    """
-    import time
 
+def _is_com_broken(exc: BaseException) -> bool:
+    try:
+        import pywintypes
+
+        if isinstance(exc, pywintypes.com_error):
+            return True
+    except Exception:
+        pass
+    return type(exc).__name__ in ("com_error", "COMError")
+
+
+def _excel_hwnd_is_live(hwnd: int) -> bool:
+    from core.core_w32 import is_window
+
+    ph = int(hwnd or 0)
+    return ph > 0 and is_window(ph)
+
+
+def _book_label(book: Any) -> str:
+    try:
+        return str(getattr(book, "name", "") or "?")
+    except Exception:
+        return "?"
+
+
+def _validate_book_alive(book: Any) -> bool:
+    try:
+        _ = str(getattr(book, "name", "") or "")
+        return True
+    except Exception:
+        return False
+
+
+def _probe_app_com(app: Any) -> bool:
+    """App の COM 接続が生きているか軽量に確認する。"""
+    try:
+        active = app.books.active
+        if active is None:
+            return False
+        _ = str(getattr(active, "name", "") or "")
+        return True
+    except Exception:
+        return False
+
+
+def _recover_com_apartment() -> None:
+    """xlwings/COM の STA を再初期化し、stale 参照を破棄する（best-effort）。"""
+    try:
+        import pythoncom
+
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        pythoncom.CoInitialize()
+    except Exception as ex:
+        logger.warning("[SVC_SERVER] attach_book com_apartment_recover skipped: %r", ex)
+    _hard_reset_all_excel_com_bindings()
+
+
+def _hard_reset_all_excel_com_bindings() -> None:
+    """全 Excel App シェルの COM バインドと Book キャッシュを破棄する。"""
+    import xlwings as xw  # type: ignore
+
+    reset = 0
+    for app in xw.apps:
+        impl = getattr(app, "impl", None)
+        if impl is None:
+            continue
+        if getattr(impl, "_xl", None) is not None or int(getattr(impl, "_hwnd", 0) or 0) > 0:
+            impl._xl = None
+            impl._hwnd = 0
+            reset += 1
+    with _book_cache_lock:
+        _book_cache_by_hwnd.clear()
+    if reset:
+        logger.info(
+            "[SVC_SERVER] attach_book hard_reset_all_com_bindings count=%s",
+            reset,
+        )
+
+
+def _reset_app_binding_for_hwnd(excel_hwnd: int) -> None:
+    """HWND に紐づく xlwings App の COM バインドを破棄し、次回再接続させる。"""
     import xlwings as xw  # type: ignore
 
     ph = int(excel_hwnd or 0)
     if ph <= 0:
-        raise RuntimeError("excel_hwnd missing")
+        return
+    with _book_cache_lock:
+        _book_cache_by_hwnd.pop(ph, None)
+    for app in xw.apps:
+        impl = getattr(app, "impl", None)
+        if impl is None:
+            continue
+        if _app_impl_hwnd(impl) != ph:
+            continue
+        impl._xl = None
+        impl._hwnd = ph
 
-    def _target_app():
-        try:
-            from xlwings._xlwindows import App as WinApp
 
-            return xw.App(impl=WinApp(xl=ph))
-        except Exception:
-            pass
-        for app in xw.apps:
-            try:
-                hwnd = int(getattr(app, "hwnd", 0) or 0)
-            except Exception:
-                try:
-                    hwnd = int(app.api.Hwnd)  # type: ignore[attr-defined]
-                except Exception:
-                    hwnd = 0
-            if hwnd == ph:
-                return app
-        raise RuntimeError(f"Excel instance not found (hwnd={ph})")
+def _purge_dead_excel_app_shells() -> None:
+    """終了済み Excel の HWND シェルを掃除し、stale COM 参照を残さない。"""
+    import xlwings as xw  # type: ignore
 
-    def _pick_book(target_app) -> Any:
-        if book_fullname:
-            for b in target_app.books:
-                try:
-                    if str(getattr(b, "fullname", "")) == book_fullname:
-                        return b
-                except Exception:
-                    continue
-        if book_name:
-            for b in target_app.books:
-                try:
-                    if str(getattr(b, "name", "")) == book_name:
-                        return b
-                except Exception:
-                    continue
-        active = target_app.books.active
-        if active is not None:
-            return active
-        raise RuntimeError(
-            f"Workbook not found (fullname={book_fullname!r} name={book_name!r})"
+    purged = 0
+    for app in xw.apps:
+        impl = getattr(app, "impl", None)
+        if impl is None:
+            continue
+        hwnd = _app_impl_hwnd(impl)
+        if hwnd <= 0 or _excel_hwnd_is_live(hwnd):
+            continue
+        impl._xl = None
+        impl._hwnd = 0
+        purged += 1
+        with _book_cache_lock:
+            _book_cache_by_hwnd.pop(hwnd, None)
+    if purged:
+        logger.info(
+            "[SVC_SERVER] attach_book purged_dead_app_shells count=%s",
+            purged,
         )
 
-    last_err: Exception | None = None
-    for attempt in range(6):
+
+def _app_impl_hwnd(impl: Any) -> int:
+    """WinApp impl の HWND（lazy 時は _hwnd のみ参照し COM を起こさない）。"""
+    try:
+        hwnd = int(getattr(impl, "_hwnd", 0) or 0)
+        if hwnd > 0:
+            return hwnd
+    except Exception:
+        pass
+    try:
+        xl = getattr(impl, "_xl", None)
+        if xl is not None:
+            return int(xl.Hwnd)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return 0
+
+
+def _release_other_excel_com_bindings(keep_hwnd: int) -> None:
+    """他 Excel インスタンスの COM バインドを外し、対象 HWND の接続だけを有効にする。
+
+    常駐 svc_server で 2 つ目の Excel へ接続するとき、先に解決済みの _xl が残っていると
+    get_xl_app_from_hwnd がハング／クラッシュすることがあるため。
+    """
+    import xlwings as xw  # type: ignore
+
+    keep = int(keep_hwnd or 0)
+    released = 0
+    for app in xw.apps:
+        impl = getattr(app, "impl", None)
+        if impl is None:
+            continue
+        hwnd = _app_impl_hwnd(impl)
+        if hwnd == keep:
+            continue
+        if hwnd > 0 and not _excel_hwnd_is_live(hwnd):
+            impl._xl = None
+            impl._hwnd = 0
+            released += 1
+            with _book_cache_lock:
+                _book_cache_by_hwnd.pop(hwnd, None)
+            continue
+        if getattr(impl, "_xl", None) is None:
+            continue
         try:
-            return _pick_book(_target_app())
-        except RuntimeError as ex:
-            last_err = ex
-            if attempt < 5 and "Workbook not found" in str(ex):
-                time.sleep(0.05 * (attempt + 1))
+            if hwnd <= 0:
+                hwnd = int(impl._xl.Hwnd)  # type: ignore[attr-defined]
+        except Exception:
+            hwnd = 0
+        impl._xl = None
+        if hwnd > 0:
+            impl._hwnd = hwnd
+        released += 1
+    if released:
+        logger.info(
+            "[SVC_SERVER] attach_book released_other_com_bindings keep_hwnd=%s count=%s",
+            keep,
+            released,
+        )
+    with _book_cache_lock:
+        for cached_hwnd in list(_book_cache_by_hwnd):
+            if int(cached_hwnd) != keep:
+                _book_cache_by_hwnd.pop(cached_hwnd, None)
+
+
+def _find_or_create_app_for_hwnd(excel_hwnd: int, *, force_fresh: bool = False):
+    """HWND に対応する xlwings App（xw.apps 走査優先、未登録時は lazy shell を追加）。"""
+    import xlwings as xw  # type: ignore
+    from xlwings._xlwindows import App as WinApp
+
+    ph = int(excel_hwnd or 0)
+    if ph <= 0:
+        raise RuntimeError("excel_hwnd missing")
+    if not _excel_hwnd_is_live(ph):
+        raise RuntimeError(f"Excel window not found (hwnd={ph})")
+
+    if not force_fresh:
+        for app in xw.apps:
+            impl = getattr(app, "impl", None)
+            if impl is None or _app_impl_hwnd(impl) != ph:
                 continue
-            raise
-    if last_err is not None:
-        raise last_err
-    raise RuntimeError(f"Workbook not found (hwnd={ph})")
+            if _probe_app_com(app):
+                logger.info(
+                    "[SVC_SERVER] attach_book app_hit phase=apps_scan hwnd=%s",
+                    ph,
+                )
+                return app
+            logger.info(
+                "[SVC_SERVER] attach_book app_stale phase=apps_scan hwnd=%s",
+                ph,
+            )
+            _reset_app_binding_for_hwnd(ph)
+            break
+
+    logger.info(
+        "[SVC_SERVER] attach_book app_create phase=%s hwnd=%s",
+        "force_fresh" if force_fresh else "apps_miss_or_stale",
+        ph,
+    )
+    return xw.App(impl=WinApp(xl=ph))
+
+
+def _pick_book_from_app(target_app, *, book_fullname: str, book_name: str) -> Any:
+    if book_fullname:
+        for b in target_app.books:
+            try:
+                if str(getattr(b, "fullname", "")) == book_fullname:
+                    return b
+            except Exception:
+                continue
+    if book_name:
+        for b in target_app.books:
+            try:
+                if str(getattr(b, "name", "")) == book_name:
+                    return b
+            except Exception:
+                continue
+    active = target_app.books.active
+    if active is not None:
+        return active
+    raise RuntimeError(
+        f"Workbook not found (fullname={book_fullname!r} name={book_name!r})"
+    )
+
+
+def _attach_book_via_xlc_context(
+    excel_hwnd: int,
+    *,
+    book_fullname: str,
+    book_name: str,
+) -> Any | None:
+    """short_runner と同じ get_excel_context_from_hwnd 経路で Book を取得する。"""
+    from core.core_xlc import get_excel_context_from_hwnd
+
+    ph = int(excel_hwnd or 0)
+    if ph <= 0:
+        return None
+    ctx = get_excel_context_from_hwnd(ph, "")
+    if ctx is None:
+        return None
+    _app, book, _sheet, _hwnd = ctx
+    if book is None:
+        return None
+    if book_name:
+        try:
+            if str(getattr(book, "name", "")) != book_name:
+                logger.info(
+                    "[SVC_SERVER] attach_book xlc_ctx name_mismatch hwnd=%s expected=%r actual=%r",
+                    ph,
+                    book_name,
+                    getattr(book, "name", "?"),
+                )
+        except Exception:
+            pass
+    if book_fullname:
+        try:
+            actual_full = str(getattr(book, "fullname", "") or "")
+            if actual_full and actual_full != book_fullname:
+                logger.info(
+                    "[SVC_SERVER] attach_book xlc_ctx fullname_mismatch hwnd=%s expected=%r actual=%r",
+                    ph,
+                    book_fullname,
+                    actual_full,
+                )
+        except Exception:
+            pass
+    if not _validate_book_alive(book):
+        logger.info(
+            "[SVC_SERVER] attach_book phase=xlc_ctx_stale hwnd=%s book=%s",
+            ph,
+            _book_label(book),
+        )
+        return None
+    logger.info(
+        "[SVC_SERVER] attach_book phase=xlc_ctx_ok hwnd=%s book=%s",
+        ph,
+        _book_label(book),
+    )
+    return book
+
+
+def _store_attached_book(excel_hwnd: int, book: Any) -> Any:
+    global _last_attached_hwnd
+
+    ph = int(excel_hwnd or 0)
+    with _book_cache_lock:
+        _book_cache_by_hwnd[ph] = book
+    _last_attached_hwnd = ph
+    try:
+        from core.excel_com_session import record_com_session_hwnd
+
+        record_com_session_hwnd(ph)
+    except Exception:
+        pass
+    return book
+
+
+def _cached_book_if_alive(excel_hwnd: int) -> Any | None:
+    ph = int(excel_hwnd or 0)
+    if ph <= 0 or not _excel_hwnd_is_live(ph):
+        with _book_cache_lock:
+            _book_cache_by_hwnd.pop(ph, None)
+        return None
+    with _book_cache_lock:
+        book = _book_cache_by_hwnd.get(ph)
+    if book is None:
+        return None
+    if _validate_book_alive(book):
+        return book
+    with _book_cache_lock:
+        _book_cache_by_hwnd.pop(ph, None)
+    return None
+
+
+def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
+    """excel_hwnd と book識別子から xlwings.Book を取得する。
+
+    Notes:
+        - マルチ Excel の COM 汚染は in-process では復旧できないため、svc_host が
+          HWND 切替時に svc_server を再起動する（本関数はシンプルな接続のみ担当）。
+        - 接続経路は short_runner と同じ get_excel_context_from_hwnd を優先する。
+    """
+    ph = int(excel_hwnd or 0)
+    if ph <= 0:
+        raise RuntimeError("excel_hwnd missing")
+    if not _excel_hwnd_is_live(ph):
+        raise RuntimeError(f"Excel window not found (hwnd={ph})")
+
+    _purge_dead_excel_app_shells()
+
+    cached = _cached_book_if_alive(ph)
+    if cached is not None:
+        logger.info("[SVC_SERVER] attach_book phase=cache_hit hwnd=%s", ph)
+        return cached
+
+    logger.info(
+        "[SVC_SERVER] attach_book phase=resolve_enter hwnd=%s fullname=%r name=%r",
+        ph,
+        book_fullname or "",
+        book_name or "",
+    )
+
+    book = _attach_book_via_xlc_context(
+        ph, book_fullname=book_fullname, book_name=book_name
+    )
+    if book is not None:
+        logger.info(
+            "[SVC_SERVER] attach_book phase=resolve_ok hwnd=%s via=xlc_ctx book=%s",
+            ph,
+            _book_label(book),
+        )
+        return _store_attached_book(ph, book)
+
+    logger.info("[SVC_SERVER] attach_book phase=xlc_ctx_miss hwnd=%s", ph)
+    _release_other_excel_com_bindings(ph)
+    target_app = _find_or_create_app_for_hwnd(ph, force_fresh=True)
+    book = _pick_book_from_app(
+        target_app, book_fullname=book_fullname, book_name=book_name
+    )
+    if not _validate_book_alive(book):
+        raise RuntimeError(f"Workbook COM stale (hwnd={ph})")
+    logger.info(
+        "[SVC_SERVER] attach_book phase=resolve_ok hwnd=%s via=xlwings book=%s",
+        ph,
+        _book_label(book),
+    )
+    return _store_attached_book(ph, book)
+
+
+_COM_MONITOR_POLL_SEC = 1.0
+_com_monitor_started = False
+_com_monitor_lock = threading.Lock()
+
+
+def _schedule_com_recycle_after_op(*, reason: str = "after_com_session") -> None:
+    """COM 操作後にプロセスを終了し、次回リクエストでクリーンな COM を得る。"""
+    try:
+        _shutdown_flag().write_text(str(reason or "after_com_session"), encoding="utf-8")
+        logger.info("[SVC_SERVER] com_recycle scheduled reason=%s", reason)
+    except Exception:
+        pass
+
+
+def _com_hwnd_monitor_worker() -> None:
+    """最後に COM 接続した Excel HWND が消えたら svc_server を終了し COM 状態を破棄する。"""
+    while True:
+        try:
+            time.sleep(_COM_MONITOR_POLL_SEC)
+            if _is_shutdown_requested():
+                return
+            last = int(_last_attached_hwnd or 0)
+            if last <= 0:
+                continue
+            if _excel_hwnd_is_live(last):
+                continue
+            logger.info(
+                "[SVC_SERVER] com_monitor last_hwnd=%s dead; requesting shutdown for recycle",
+                last,
+            )
+            try:
+                _shutdown_flag().write_text("com_recycle", encoding="utf-8")
+            except Exception:
+                pass
+            return
+        except Exception:
+            return
+
+
+def _ensure_com_hwnd_monitor() -> None:
+    global _com_monitor_started
+    with _com_monitor_lock:
+        if _com_monitor_started:
+            return
+        th = threading.Thread(
+            target=_com_hwnd_monitor_worker,
+            name="SvcComHwndMonitor",
+            daemon=True,
+        )
+        th.start()
+        _com_monitor_started = True
+        logger.info(
+            "[SVC_SERVER] com_monitor started poll_sec=%s",
+            _COM_MONITOR_POLL_SEC,
+        )
 
 def _call_handler(
     handler, action: str, *, excel_hwnd: int, sheet_id: str, book, kwargs: dict
@@ -517,10 +908,16 @@ def _call_handler(
     handler(*pos, **call_kwargs)
 
 def _process_one(req_path: Path) -> None:
+    from core.excel_com_session import (
+        action_uses_attach_book,
+        should_schedule_com_recycle_after_handler,
+    )
+
     res_path = _new_res_path(req_path)
     action = ""
     handler_ok = False
     excel_hwnd = 0
+    handler_exc: Exception | None = None
     try:
         req = _read_pickle(req_path)
         action = str(req.get("action", "")).strip()
@@ -543,8 +940,7 @@ def _process_one(req_path: Path) -> None:
         t0 = time.perf_counter()
 
         # action ごとの呼び分け（既存svcモジュールのシグネチャを尊重）
-        book_actions = ("csv_mg", "csv_ld", "csv_sv", "csv_sp", "hd_in", "hd_nr", "undo")
-        if action in book_actions:
+        if action_uses_attach_book(action):
             book = _attach_book(
                 excel_hwnd=excel_hwnd, book_fullname=book_fullname, book_name=book_name
             )
@@ -574,6 +970,7 @@ def _process_one(req_path: Path) -> None:
             "[SVC_SERVER] exec done action=%s ms=%s res=%s", action, ms, res_path.name
         )
     except Exception as ex:
+        handler_exc = ex
         import traceback
 
         tb = traceback.format_exc()
@@ -598,6 +995,13 @@ def _process_one(req_path: Path) -> None:
                 notify_wait_form_ready(parent_hwnd=excel_hwnd)
         except Exception:
             pass
+        if should_schedule_com_recycle_after_handler(
+            action,
+            handler_ok=handler_ok,
+            exc=handler_exc,
+        ):
+            reason = "after_com_session" if handler_ok else "com_session_error"
+            _schedule_com_recycle_after_op(reason=reason)
         try:
             req_path.unlink(missing_ok=True)
         except Exception:
@@ -628,6 +1032,10 @@ def main() -> int:
         from core.excel_lifecycle_monitor import ensure_excel_lifecycle_monitor
 
         ensure_excel_lifecycle_monitor()
+    except Exception:
+        pass
+    try:
+        _ensure_com_hwnd_monitor()
     except Exception:
         pass
     _run_warmup()

@@ -4,7 +4,7 @@ Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
 Updated: 2026-06-07
-Version: 0.4.36
+Version: 0.4.39
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
@@ -13,6 +13,9 @@ Purpose:
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.39 (2026-06-14): A+ — excel_com_session 経由で COM recycle を全 Excel action に統一。
+  - 0.4.38 (2026-06-14): 同一 HWND での 2 回目以降の操作前も svc_server を再起動（COM 使い回し防止）。
+  - 0.4.37 (2026-06-14): マルチ Excel COM 汚染対策 — svc_server 再起動（HWND 切替・前回 HWND 終了時）。
   - 0.4.36 (2026-06-13): ensure_python_hosts_ready に register_book(hwnd) を追加（マルチ Excel 初回リボン対策）。
   - 0.4.35 (2026-06-13): ensure_python_hosts_ready 追加。HWND 監視廃止（全 EXCEL.EXE 監視へ移行）。
   - 0.4.34 (2026-06-13): persist_excel_hwnd を常駐 spawn 前へ移動。lifecycle monitor の bootstrap 待機を追加。
@@ -52,7 +55,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.36"
+__version__ = "0.4.39"
 import os
 import shlex
 import subprocess
@@ -219,7 +222,7 @@ def excel_startup_after_excel_idle(target_hwnd: int) -> None:
 
 
 def _is_project_venv_interpreter(project_root: Path) -> bool:
-    """True if current interpreter is the project's .venv Python (Windows).
+    r"""True if current interpreter is the project's .venv Python (Windows).
 
     Notes
     - When Python is invoked as `python -c ...`, `sys.argv[0]` may be `-c` (or a
@@ -470,6 +473,8 @@ def spawn_ui_server() -> None:
             env = runtime_layout.env_with_packaged_dll_search_path(env, ir)
 
     if packaged:
+        if ui_exe is None:
+            return
         cmd = [str(ui_exe)]
         spawn_label = ui_exe
         # EXE と同じフォルダを cwd に（Nuitka+PySide6 の相対パス・DLL 解決を安定化。HC_PROJECT_ROOT は引き続きインストールルート）
@@ -826,9 +831,16 @@ def ensure_python_hosts_ready(target_hwnd: int | None = None) -> None:
 
     マルチ Excel / 新規ブックでは Workbook_Open の register_book 前にリボンが押されることがあるため、
     target_hwnd を渡してブック登録も行う。
+
+    常駐 svc_server の COM はマルチ Excel 後にプロセス内で汚染されるため、HWND 切替・前回 Excel
+    終了時は svc_server を再起動してからホストを起動する。
     """
-    ensure_svc_ui_bridge_parallel()
     hwnd = int(target_hwnd or 0)
+    if hwnd > 0:
+        from core.excel_com_session import prepare_com_session_before_request
+
+        prepare_com_session_before_request(hwnd)
+    ensure_svc_ui_bridge_parallel()
     if hwnd > 0:
         from core.excel_session import register_book
 
@@ -932,6 +944,123 @@ def _write_svc_shutdown_flag() -> None:
             p.open("a").close()
         except Exception:
             pass
+
+
+_SVC_LAST_COM_HWND_FILE = "svc_last_com_hwnd.txt"
+_SVC_COM_RECYCLE_WAIT_SEC = 3.0
+
+
+def read_last_svc_com_hwnd() -> int:
+    """svc_server が最後に COM 接続した Excel HWND（IPC 永続化）。"""
+    try:
+        p = _control_dir() / _SVC_LAST_COM_HWND_FILE
+        if not p.exists():
+            return 0
+        return int((p.read_text(encoding="utf-8") or "0").strip() or "0")
+    except Exception:
+        return 0
+
+
+def write_last_svc_com_hwnd(hwnd: int) -> None:
+    """svc_server の COM 接続先 HWND を記録する。"""
+    ph = int(hwnd or 0)
+    p = _control_dir() / _SVC_LAST_COM_HWND_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if ph <= 0:
+            p.unlink(missing_ok=True)
+        else:
+            p.write_text(str(ph), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _list_svc_server_pids(project_root: Path | None = None) -> list[int]:
+    """稼働中の svc_server プロセス PID を列挙する。"""
+    if os.name != "nt":
+        return []
+    root = project_root or Path(__file__).resolve().parent.parent
+    root_key = str(root.resolve()).lower()
+    pids: list[int] = []
+    try:
+        cmd = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -eq 'hc_svc_server.exe' -or "
+            "($_.CommandLine -match 'svc_server\\.py') } | "
+            "ForEach-Object { $_.ProcessId.ToString() + [char]9 + ($_.CommandLine ?? '') }"
+        )
+        cp = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        for line in (cp.stdout or "").splitlines():
+            low = line.lower()
+            if "svc_server" not in low and "hc_svc_server" not in low:
+                continue
+            if root_key not in low and "hc_svc_server.exe" not in low:
+                continue
+            try:
+                pid = int(line.split("\t", 1)[0].strip())
+            except Exception:
+                continue
+            if pid > 0 and pid not in pids:
+                pids.append(pid)
+    except Exception:
+        pass
+    return pids
+
+
+def restart_svc_server(*, reason: str = "") -> None:
+    """COM 汚染時: svc_server を終了し新インスタンスを起動する（ui/bridge は維持）。"""
+    logger.info("[SVC_SERVER] com_recycle restart begin reason=%s", reason or "-")
+    if is_svc_server_running():
+        _write_svc_shutdown_flag()
+        t0 = time.time()
+        while is_svc_server_running() and (time.time() - t0) < _SVC_COM_RECYCLE_WAIT_SEC:
+            time.sleep(0.05)
+        if is_svc_server_running():
+            root = Path(__file__).resolve().parent.parent
+            for pid in _list_svc_server_pids(root):
+                if pid != os.getpid():
+                    _safe_kill_pid_windows(pid)
+            time.sleep(0.15)
+    clear_shutdown_flags("restart_svc_server")
+    _clear_control_flags(_SVC_STARTING_FLAG)
+    if not is_svc_server_running():
+        spawn_svc_server()
+        _wait_until_running(is_svc_server_running, "[SVC_SERVER]", poll_sec=0.05)
+    logger.info("[SVC_SERVER] com_recycle restart done reason=%s", reason or "-")
+
+
+def restart_svc_server_for_com_if_needed(target_hwnd: int) -> bool:
+    """COM 操作前に svc_server を再起動すべきか判定し、必要なら再起動する。
+
+    再起動条件:
+      - 前回 COM 接続 HWND と今回が異なる（マルチ Excel 切替）
+      - 前回 COM 接続 HWND と同じ（同一 Excel で 2 回目以降 — プロセス内 COM 汚染）
+      - 前回 COM 接続 HWND のウィンドウが消えた
+    """
+    th = int(target_hwnd or 0)
+    if th <= 0 or not is_svc_server_running():
+        return False
+    last = read_last_svc_com_hwnd()
+    if last <= 0:
+        return False
+    need = False
+    reason = ""
+    if last == th:
+        need = True
+        reason = f"same_hwnd_reuse last={last}"
+    else:
+        need = True
+        reason = f"hwnd_switch last={last} target={th}"
+    if not need:
+        return False
+    restart_svc_server(reason=reason)
+    return True
 
 
 def request_shutdown_all() -> None:

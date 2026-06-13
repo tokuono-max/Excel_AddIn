@@ -4,7 +4,7 @@ Python: 3.12
 Module: core/core_xlc.py
 Created: 2026-01-xx
 Updated: 2026-06-06
-Version: 2.5.11
+Version: 2.5.12
 Purpose:
   Excel COM 操作の薄いヘルパ（UI非依存 / core から ui import 禁止）。
   - シートカスタムプロパティ（GUID 等）の読み書き
@@ -16,6 +16,7 @@ Design:
   - 失敗時に例外を投げない（Excelロック解除漏れの方が致命）
 
 History (latest 3):
+  - 2.5.12 (2026-06-14): get_excel_context_from_hwnd: sheet_id 指定時は全ブック走査（アクティブブック誤結合を防止）。
   - 2.5.11 (2026-06-06) restore_screen_updating ヘルパを追加（restore_on_exit=False 利用後の復帰用）。
   - 2.5.10 (2026-06-06) suspend_sheet_updates: restore_on_exit=False で ScreenUpdating 復帰を呼び出し側に委譲。
   - 2.5.9 (2026-06-04) Excel シート名: sanitize_excel_sheet_name / unique / 分割用 part 名（最大 31 文字）。
@@ -189,6 +190,34 @@ def find_sheet_by_guid(workbook_pointer: Any, target_guid_string: str) -> Option
     return None
 
 
+def find_book_and_sheet_by_guid_in_app(
+    app: Any,
+    target_guid_string: str,
+) -> tuple[Any, Any] | None:
+    """App 内の全ブックを走査し、GUID を持つシートとそのブックを返す。
+
+    マルチブック／アクティブブック切替後も、起動時 sheet_id で正しいブックに結び付ける。
+    """
+    guid = str(target_guid_string or "").strip()
+    if not guid:
+        return None
+    try:
+        for book in app.books:
+            sheet = find_sheet_by_guid(book, guid)
+            if sheet is not None:
+                return book, sheet
+    except Exception as ex:
+        try:
+            logger.warning(
+                "[XLC_CTX] find_book_and_sheet_by_guid_in_app ex=%r guid=%r",
+                ex,
+                guid,
+            )
+        except Exception:
+            pass
+    return None
+
+
 # ==============================================================================
 # Excel コンテキスト取得（HWND から app / book / sheet）
 # ==============================================================================
@@ -259,6 +288,25 @@ def get_excel_context_from_hwnd(hwnd: int, sheet_id: str = "") -> Optional[tuple
         from xlwings._xlwindows import App as WinApp  # noqa: PLC0415
 
         app = xw.App(impl=WinApp(xl=ph))
+        sheet_id_s = str(sheet_id or "").strip()
+        if sheet_id_s:
+            hit = find_book_and_sheet_by_guid_in_app(app, sheet_id_s)
+            if hit is None:
+                logger.info(
+                    "[XLC_CTX] get_excel_context_from_hwnd fail: sheet_guid_not_found hwnd=%s sheet_id=%r",
+                    ph,
+                    sheet_id_s,
+                )
+                return None
+            book, sheet = hit
+            logger.info(
+                "[XLC_CTX] get_excel_context_from_hwnd ok hwnd=%s sheet_id=%r book=%s via=guid_scan",
+                ph,
+                sheet_id_s,
+                getattr(book, "name", "?"),
+            )
+            return (app, book, sheet, ph)
+
         book = app.books.active
         if not book:
             logger.info(
@@ -266,13 +314,7 @@ def get_excel_context_from_hwnd(hwnd: int, sheet_id: str = "") -> Optional[tuple
                 ph,
             )
             return None
-        sheet_id_s = str(sheet_id or "").strip()
-        if sheet_id_s:
-            sheet = find_sheet_by_guid(book, sheet_id_s)
-        else:
-            sheet = None
-        if sheet is None:
-            sheet = book.sheets.active
+        sheet = book.sheets.active
         if sheet is None:
             logger.info(
                 "[XLC_CTX] get_excel_context_from_hwnd fail: no_sheet hwnd=%s sheet_id=%r",
