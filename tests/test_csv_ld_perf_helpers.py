@@ -2,6 +2,8 @@
 """CSV 読込 Excel 書込み高速化ヘルパのユニットテスト。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from svc import svc_csv_ld as ld
@@ -58,6 +60,31 @@ def test_csv_ld_progress_labels_and_detail() -> None:
     assert ld._csv_ld_progress_detail(done=100, total=200, pct=50) == "100 / 200 行 (50%)"
     assert ld._csv_ld_progress_detail(extra="行数確認中 — foo.csv") == "行数確認中 — foo.csv"
     assert ld.CSV_LD_DONE_DELAY_MS == 400
+
+
+def test_csv_ld_autofit_header_only_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HC_CSV_LD_AUTOFIT_MAX_ROWS", raising=False)
+    monkeypatch.delenv("HC_CSV_LD_AUTOFIT_MAX_CELLS", raising=False)
+    assert ld._csv_ld_should_use_header_only_autofit(5001, 10) is True
+    assert ld._csv_ld_should_use_header_only_autofit(100, 10) is False
+    assert ld._csv_ld_should_use_header_only_autofit(1000, 300) is True
+
+
+def test_csv_ld_skip_autofit_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HC_CSV_LD_SKIP_AUTOFIT", raising=False)
+    assert ld._csv_ld_skip_autofit() is False
+    monkeypatch.setenv("HC_CSV_LD_SKIP_AUTOFIT", "1")
+    assert ld._csv_ld_skip_autofit() is True
+
+
+def test_progress_write_terminal_increments_seq(tmp_path: Path) -> None:
+    p = tmp_path / "progress.pkl"
+    ld._progress_write(p, {"status": "RUN", "seq": 7})
+    seq = ld._progress_write_terminal(p, status="DONE")
+    assert seq == 8
+    d = ld.read_pickle(p)
+    assert d["status"] == "DONE"
+    assert d["seq"] == 8
 
 
 def test_resolve_progress_min_interval_large_file() -> None:

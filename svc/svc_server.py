@@ -4,7 +4,7 @@ Python: 3.12
 Module: svc/svc_server.py
 Created: 2026-02-15
 Updated: 2026-06-14
-Version: 0.1.18
+Version: 0.1.20
 Purpose:
   別プロセスで常駐する svc サーバ。
   - hc_main からの svc_req_*.pkl を監視し、action に応じて svc/hc_<feature>.py を遅延 import して実行する。
@@ -15,9 +15,10 @@ Shutdown (L1):
   - control/svc_shutdown.flag を検知したら停止する。
 
 History (latest 3):
+  - 0.1.20 (2026-06-16): com_monitor 掃除時に svc_last_com_hwnd.txt を同期。warmup リスト見直しと整合。
+  - 0.1.19 (2026-06-14): B+ — 成功時は常駐維持。COM 汚染時のみ com_recycle。HWND 監視はキャッシュ掃除のみ。
   - 0.1.18 (2026-06-14): A+ — excel_com_session で COM recycle を全 Excel action に統一。
   - 0.1.17 (2026-06-14): book_action 成功後に svc_server を自終了（1 操作 1 プロセス COM）。attach 失敗時も recycle。
-  - 0.1.16 (2026-06-14): COM 汚染はプロセス再起動で解消（attach 簡素化・HWND 監視）。0.1.13–0.1.15 の in-process 修復を廃止。
   - 0.1.15 (2026-06-14): attach_book に xlc 経路優先・COM アパートメント復旧・HWND 切替時の全リセット。
   - 0.1.14 (2026-06-14): Excel 終了後の stale COM 検知・再バインド・RPC エラー時リトライ。
   - 0.1.13 (2026-06-14): _attach_book マルチ Excel 対策（xw.apps 優先・他インスタンス COM 解放・HWND キャッシュ）。
@@ -56,7 +57,7 @@ from typing import Any, Callable
 from core import core_env
 from core.core_log import get_logger
 
-__version__ = "0.1.18"
+__version__ = "0.1.20"
 
 logger = get_logger(__name__)
 
@@ -726,8 +727,7 @@ def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
     """excel_hwnd と book識別子から xlwings.Book を取得する。
 
     Notes:
-        - マルチ Excel の COM 汚染は in-process では復旧できないため、svc_host が
-          HWND 切替時に svc_server を再起動する（本関数はシンプルな接続のみ担当）。
+        - マルチ Excel は _book_cache_by_hwnd で HWND ごとに Book を保持する（B+ 常駐）。
         - 接続経路は short_runner と同じ get_excel_context_from_hwnd を優先する。
     """
     ph = int(excel_hwnd or 0)
@@ -782,36 +782,67 @@ _com_monitor_started = False
 _com_monitor_lock = threading.Lock()
 
 
-def _schedule_com_recycle_after_op(*, reason: str = "after_com_session") -> None:
-    """COM 操作後にプロセスを終了し、次回リクエストでクリーンな COM を得る。"""
+def _schedule_com_recycle_after_op(*, reason: str = "com_session_error") -> None:
+    """COM 汚染時にプロセスを終了し、次回リクエストでクリーンな COM を得る。"""
     try:
-        _shutdown_flag().write_text(str(reason or "after_com_session"), encoding="utf-8")
+        _shutdown_flag().write_text(str(reason or "com_session_error"), encoding="utf-8")
         logger.info("[SVC_SERVER] com_recycle scheduled reason=%s", reason)
     except Exception:
         pass
 
 
+def _sync_ipc_last_com_hwnd() -> None:
+    """診断用 IPC（svc_last_com_hwnd.txt）をプロセス内の last_attached と同期する。"""
+    try:
+        from svc.svc_host import write_last_svc_com_hwnd
+
+        last = int(_last_attached_hwnd or 0)
+        if last > 0 and _excel_hwnd_is_live(last):
+            write_last_svc_com_hwnd(last)
+        else:
+            write_last_svc_com_hwnd(0)
+    except Exception:
+        pass
+
+
+def _prune_stale_hwnd_cache() -> int:
+    """終了済み Excel の HWND を Book キャッシュから除去する（プロセスは維持）。"""
+    global _last_attached_hwnd
+
+    with _book_cache_lock:
+        stale_hwnds = [
+            int(h)
+            for h in _book_cache_by_hwnd
+            if not _excel_hwnd_is_live(int(h))
+        ]
+    pruned = 0
+    for ph in stale_hwnds:
+        with _book_cache_lock:
+            if _book_cache_by_hwnd.pop(ph, None) is not None:
+                pruned += 1
+        _reset_app_binding_for_hwnd(ph)
+    last = int(_last_attached_hwnd or 0)
+    if last > 0 and not _excel_hwnd_is_live(last):
+        _last_attached_hwnd = 0
+        logger.info("[SVC_SERVER] com_monitor cleared stale last_attached_hwnd=%s", last)
+    _purge_dead_excel_app_shells()
+    _sync_ipc_last_com_hwnd()
+    return pruned
+
+
 def _com_hwnd_monitor_worker() -> None:
-    """最後に COM 接続した Excel HWND が消えたら svc_server を終了し COM 状態を破棄する。"""
+    """キャッシュ済み HWND のうち終了済み Excel を定期的に掃除する（常駐は維持）。"""
     while True:
         try:
             time.sleep(_COM_MONITOR_POLL_SEC)
             if _is_shutdown_requested():
                 return
-            last = int(_last_attached_hwnd or 0)
-            if last <= 0:
-                continue
-            if _excel_hwnd_is_live(last):
-                continue
-            logger.info(
-                "[SVC_SERVER] com_monitor last_hwnd=%s dead; requesting shutdown for recycle",
-                last,
-            )
-            try:
-                _shutdown_flag().write_text("com_recycle", encoding="utf-8")
-            except Exception:
-                pass
-            return
+            pruned = _prune_stale_hwnd_cache()
+            if pruned:
+                logger.info(
+                    "[SVC_SERVER] com_monitor pruned_dead_hwnds count=%s",
+                    pruned,
+                )
         except Exception:
             return
 
@@ -1000,8 +1031,7 @@ def _process_one(req_path: Path) -> None:
             handler_ok=handler_ok,
             exc=handler_exc,
         ):
-            reason = "after_com_session" if handler_ok else "com_session_error"
-            _schedule_com_recycle_after_op(reason=reason)
+            _schedule_com_recycle_after_op(reason="com_session_error")
         try:
             req_path.unlink(missing_ok=True)
         except Exception:

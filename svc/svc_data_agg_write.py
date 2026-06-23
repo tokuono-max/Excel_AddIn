@@ -292,7 +292,7 @@ def append_event_log_rows(book: Any, rows: list[list[Any]]) -> None:
                         break
                     except Exception:
                         continue
-            core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS])
+            core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
         else:
             # 旧レイアウト（列数不足）のログシートへ追記する前にヘッダ行を新形式に揃える
             try:
@@ -300,7 +300,7 @@ def append_event_log_rows(book: Any, rows: list[list[Any]]) -> None:
                 lc0 = getattr(ur0, "last_cell", None) if ur0 is not None else None
                 nc0 = int(lc0.column) if lc0 is not None else 0
                 if 0 < nc0 < len(EVENT_LOG_HEADERS):
-                    core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS])
+                    core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
             except Exception:
                 pass
         ur = getattr(ws, "used_range", None)
@@ -310,7 +310,7 @@ def append_event_log_rows(book: Any, rows: list[list[Any]]) -> None:
             lc = getattr(ur, "last_cell", None)
             last_r = int(lc.row) if lc is not None else 1
             start_row = last_r + 1
-        core_xlc.write_chunk(ws, start_row, 1, rows)
+        core_xlc.write_chunk(ws, start_row, 1, rows, text_mode=True)
         end_row = start_row + len(rows) - 1
         n_col = len(EVENT_LOG_HEADERS)
         try:
@@ -429,7 +429,11 @@ def _write_excel_master(path: Path, headers: list[str], rows: list[list[Any]]) -
 
 def _row_key(row: list[Any], key_indices: list[int]) -> tuple:
     """行から照合キーとなる列の値をタプルで返す。"""
-    return tuple(row[i] if i < len(row) else None for i in key_indices)
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    return tuple(
+        join_compare_display_key(row[i] if i < len(row) else None) for i in key_indices
+    )
 
 
 def parse_a1_to_row_col_1based(cell_ref: str) -> Optional[tuple[int, int]]:
@@ -938,7 +942,7 @@ def write_master_to_sheet(
 
             bk = book_for_jump if book_for_jump is not None else getattr(sheet, "book", None)
             with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
-                core_xlc.write_chunk(sheet, tr, tc, chunk_2d)
+                core_xlc.write_chunk(sheet, tr, tc, chunk_2d, text_mode=True)
                 full_bottom = tr + len(chunk_2d) - 1
                 n_rows_rect = len(chunk_2d)
                 if tr == 1 and tc == 1:
@@ -1017,10 +1021,10 @@ def write_master_to_sheet(
             with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
                 if include_header:
                     chunk_2d = [hdr_line] + [list(r) for r in rows]
-                    core_xlc.write_chunk(sheet, tr, tc, chunk_2d)
+                    core_xlc.write_chunk(sheet, tr, tc, chunk_2d, text_mode=True)
                     full_bottom = tr + len(chunk_2d) - 1
                 else:
-                    core_xlc.write_chunk(sheet, start_row, tc, rows)
+                    core_xlc.write_chunk(sheet, start_row, tc, rows, text_mode=True)
                     full_bottom = start_row + len(rows) - 1
                 n_rows_rect = full_bottom - tr + 1
                 if tr == 1 and tc == 1:
@@ -1115,7 +1119,7 @@ def write_master_to_sheet(
                 update_count,
             )
             with core_xlc.suspend_sheet_updates(sheet, restore_on_exit=False):
-                core_xlc.write_chunk(sheet, tr, tc, data_2d)
+                core_xlc.write_chunk(sheet, tr, tc, data_2d, text_mode=True)
                 if tr == 1 and tc == 1:
                     core_xlc.clear_used_range_overflow(
                         sheet, len(data_2d), len(prev_headers)
@@ -1228,9 +1232,9 @@ def write_scenario_export_table(
         else:
             hdr_row = 1
             data_start = 2
-        core_xlc.write_chunk(sheet_pointer, hdr_row, 1, [headers])
+        core_xlc.write_chunk(sheet_pointer, hdr_row, 1, [headers], text_mode=True)
         if rows:
-            core_xlc.write_chunk(sheet_pointer, data_start, 1, rows)
+            core_xlc.write_chunk(sheet_pointer, data_start, 1, rows, text_mode=True)
         end_row = (data_start + len(rows) - 1) if rows else hdr_row
         _scenario_export_apply_layout(
             sheet_pointer,

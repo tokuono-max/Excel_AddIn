@@ -9,10 +9,15 @@ Purpose:
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
+
+_EXCEL_SERIAL_MIN = 1.0
+_EXCEL_SERIAL_MAX = 60000.0
+_EXCEL_SERIAL_INT_MIN = 10000
 
 from core.core_log import get_logger
 
@@ -145,6 +150,33 @@ def _shape_wide(t: str) -> str:
     return unicodedata.normalize("NFKC", t)
 
 
+def _datetime_from_excel_serial(n: float) -> datetime | None:
+    """Excel 日付シリアル（1899-12-30 起点）を datetime に変換。範囲外は None。"""
+    if not math.isfinite(n) or n < _EXCEL_SERIAL_MIN or n > _EXCEL_SERIAL_MAX:
+        return None
+    try:
+        import pandas as pd  # type: ignore
+
+        ts = pd.Timestamp("1899-12-30") + pd.Timedelta(days=float(n))
+        if pd.isna(ts):
+            return None
+        return ts.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _excel_serial_from_number(val: int | float) -> datetime | None:
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, float):
+        return _datetime_from_excel_serial(val)
+    if isinstance(val, int):
+        if val < _EXCEL_SERIAL_INT_MIN or val > int(_EXCEL_SERIAL_MAX):
+            return None
+        return _datetime_from_excel_serial(float(val))
+    return None
+
+
 def _shape_date(t: str) -> str:
     """日付部のみ YYYY/MM/DD。時刻付き入力は日付に正規化（時刻は捨てる）。"""
     raw = t.strip()
@@ -178,6 +210,98 @@ def _shape_date(t: str) -> str:
         except ValueError:
             continue
     return t
+
+
+def shape_date_value(val: Any) -> str:
+    """
+    セル由来の値を YYYY/MM/DD 文字列へ。datetime / Excel 日付シリアル / 文字列を扱う。
+    解釈不能時は scalar_to_text 相当の文字列を返す。
+    """
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "True" if val else "False"
+    try:
+        import pandas as pd  # type: ignore
+
+        if pd.isna(val):
+            return ""
+    except Exception:
+        pass
+    if isinstance(val, datetime):
+        return val.strftime("%Y/%m/%d")
+    if isinstance(val, date):
+        return val.strftime("%Y/%m/%d")
+    if isinstance(val, (int, float)):
+        dt = _excel_serial_from_number(val)
+        if dt is not None:
+            return dt.strftime("%Y/%m/%d")
+    from core.core_excel_text import scalar_to_text
+
+    s = val.strip() if isinstance(val, str) else scalar_to_text(val)
+    if not s:
+        return s
+    shaped = _shape_date(s)
+    if shaped != s:
+        return shaped
+    try:
+        n = float(s)
+    except ValueError:
+        return s
+    if not math.isfinite(n):
+        return s
+    use_serial = isinstance(val, float) or (
+        isinstance(val, int) and _EXCEL_SERIAL_INT_MIN <= val <= int(_EXCEL_SERIAL_MAX)
+    )
+    if isinstance(val, str):
+        use_serial = n >= _EXCEL_SERIAL_INT_MIN or (
+            "." in s and _EXCEL_SERIAL_MIN <= n <= _EXCEL_SERIAL_MAX
+        )
+    if use_serial:
+        dt = _datetime_from_excel_serial(n)
+        if dt is not None:
+            return dt.strftime("%Y/%m/%d")
+    return s
+
+
+def shape_datetime_value(val: Any) -> str:
+    """セル由来の値を YYYY/MM/DD HH:MM 文字列へ。解釈不能時は文字列化して返す。"""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "True" if val else "False"
+    try:
+        import pandas as pd  # type: ignore
+
+        if pd.isna(val):
+            return ""
+    except Exception:
+        pass
+    if isinstance(val, datetime):
+        return val.strftime("%Y/%m/%d %H:%M")
+    if isinstance(val, date):
+        return datetime(val.year, val.month, val.day).strftime("%Y/%m/%d %H:%M")
+    if isinstance(val, (int, float)):
+        dt = _excel_serial_from_number(val)
+        if dt is not None:
+            return dt.strftime("%Y/%m/%d %H:%M")
+    from core.core_excel_text import scalar_to_text
+
+    s = val.strip() if isinstance(val, str) else scalar_to_text(val)
+    if not s:
+        return s
+    try:
+        import pandas as pd  # type: ignore
+
+        ts = pd.to_datetime(s, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y/%m/%d %H:%M")
+    except Exception:
+        pass
+    ymd = shape_date_value(val)
+    if ymd != s:
+        return ymd + " 0:00" if " " not in ymd else ymd
+    return s
 
 
 def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
@@ -239,7 +363,7 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
     if c == "wide":
         return _shape_wide(t)
     if c == "date":
-        return _shape_date(t)
+        return shape_date_value(t)
     if c:
         logger.debug("[VALUE_SHAPE] unknown command: %s", c)
     return t
@@ -304,7 +428,7 @@ def parse_and_apply_commands(text: str, tokens: list[str]) -> str:
 
 def normalize_to_yyyy_mm_dd(text: str) -> str:
     """チェック「日付」と DSL の date で共通化する YYYY/MM/DD 整形。"""
-    return _shape_date(text)
+    return shape_date_value(text)
 
 
 def apply_value_shape(text: Any, script: str | None) -> str:

@@ -3,12 +3,15 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-05-03
-Version: 0.4.45
+Updated: 2026-06-22
+Version: 0.4.48
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.48 (2026-06-22) showEvent: 同期 _pulse を廃止し _schedule_excel_unlock_pulse_chain に統合（QTimer(0)+90/200/450ms・二重 guid_scan 防止）。create_dialog の重複 deferred pulse を削除。
+  - 0.4.47 (2026-06-22) create_dialog(main): WaitForm 合図を prepare 直後に移動。起動時の同期 _pulse を廃止し show 後 QTimer(0) で非同期実行（COM 競合・WaitForm 待ち短縮。guid_scan は維持）。
+  - 0.4.46 (2026-06-22) create_dialog(main): 起動区間のフェーズ計測プローブ（DATA_AGG_TRACE phase=… elapsed_ms/step_ms）。_pulse 内 COM サブ区間も診断時に出力。
   - 0.4.45 (2026-06-03) 基準フォルダ走査: 拡張子チェックに .xlsm を追加（.xls/.xlsx と同形式）。
   - 0.4.44 (2026-05-03) EXCEL_LOCK false 時: _pulse_excel_unlock_if_excel_lock_off で Win32 解除に加え CommandBars 有効化・Interactive=True。showEvent で 0/130/400ms の再パルス（ensure_front 直後の無効化取りこぼし緩和）。
   - 0.4.43 (2026-05-03) EXCEL_LOCK false 時: メイン create_dialog（prepare 後）と showEvent で enable_excel_window(True)＋メニューロック解除を明示（子 HWND 無効の取り残しでリボンが効かない事象の緩和）。
@@ -71,9 +74,9 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from PySide6.QtCore import QItemSelectionModel, QPoint, QTimer, Qt
+from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -158,6 +161,48 @@ logger = get_logger(__name__)
 _data_agg_ui_diag = get_data_agg_diag_logger()
 
 
+def folder_scan_paths_from_state(state: dict[str, Any]) -> list[str]:
+    """走査条件 dict から scan_folder を実行し、パス文字列リストを返す（UI スレッド外可）。"""
+    from svc import svc_data_agg_scan as scan_mod  # noqa: WPS433
+
+    sp = str(state.get("start_path") or "").strip() or "."
+    exts = list(state.get("extensions") or [])
+    if not exts:
+        return []
+    paths = scan_mod.scan_folder(
+        sp,
+        recursive=bool(state.get("recursive")),
+        extensions=tuple(exts),
+        keyword=str(state.get("keyword") or ""),
+    )
+    return [str(p) for p in paths]
+
+
+def should_apply_folder_scan_result(generation: int, current_generation: int) -> bool:
+    """走査世代が最新のときだけ UI へ結果を反映する。"""
+    return int(generation) == int(current_generation)
+
+
+class _FolderScanWorker(QObject):
+    """フォルダ走査をバックグラウンドスレッドで実行する。"""
+
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, generation: int, state: dict[str, Any]) -> None:
+        super().__init__()
+        self._generation = int(generation)
+        self._state = dict(state)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            paths = folder_scan_paths_from_state(self._state)
+            self.finished.emit(self._generation, paths)
+        except Exception as ex:
+            self.failed.emit(self._generation, str(ex))
+
+
 def _log_scenario_edit_diag(fmt: str, *args: Any) -> None:
     """シナリオ編集の診断行（hc_csv_diag.log、診断ファイル有効時のみ）。"""
     try:
@@ -195,12 +240,39 @@ def _log_data_agg_main_lifecycle(w: QWidget, where: str, extra: str = "") -> Non
         pass
 
 
+def _log_data_agg_create_dialog_phase(
+    phase: str,
+    *,
+    t0: float,
+    t_prev: float,
+    parent_hwnd: int = 0,
+    extra: str = "",
+) -> float:
+    """create_dialog(main) 起動区間の計測プローブ（hc_csv_diag.log・HC_LOG_DIAG=1 等）。"""
+    now = time.perf_counter()
+    tail = (" " + str(extra).strip()) if str(extra or "").strip() else ""
+    try:
+        _data_agg_ui_diag.info(
+            "[DATA_AGG_TRACE] create_dialog phase=%s parent_hwnd=%s "
+            "elapsed_ms=%d step_ms=%d wall_perf_s=%.6f%s",
+            str(phase or "").strip() or "?",
+            int(parent_hwnd or 0),
+            int((now - t0) * 1000),
+            int((now - t_prev) * 1000),
+            now,
+            tail,
+        )
+    except Exception:
+        pass
+    return now
+
+
 def _data_agg_summary_table_tooltip(display: str) -> str:
     """要約表ツールチップ: 区切り「 | 」を改行して複数行表示（メイン項目表・シナリオ編集一覧で共用）。"""
     return (display or "").replace(" | ", "\n")
 
 
-__version__ = "0.4.45"
+__version__ = "0.4.48"
 
 # メイン項目表: 連携参照行・結合参照行の背景（連携優先で灰）
 _ROW_BG_LINK = QColor("#E0E0E0")
@@ -575,7 +647,7 @@ class _DataAggMainWindow(QDialog):
         _ith.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         _ith.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self._item_table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         _ww = getattr(self._item_table, "setWordWrap", None)
         if callable(_ww):
@@ -596,7 +668,7 @@ class _DataAggMainWindow(QDialog):
         self._main_set_tip(
             self._item_table,
             "TOOLTIP_ITEM_TABLE",
-            "項目名・シナリオ編集・要約を表示する一覧です。ダブルクリックでシナリオ編集を開きます。",
+            "項目名・シナリオ編集・要約を表示する一覧です。項目名列のダブルクリックで編集し、シナリオ編集はボタンから開きます。",
         )
         self._main_set_tip(
             self._item_table.horizontalHeader(),
@@ -733,10 +805,11 @@ class _DataAggMainWindow(QDialog):
         scan_layout.addLayout(row_opts)
         row_scan_run = QHBoxLayout()
         row_scan_run.addStretch(1)
-        btn_scan_run = QPushButton(_u("BTN_SEARCH_RUN", "検索実行"))
-        btn_scan_run.setAutoDefault(False)
-        btn_scan_run.setDefault(False)
-        btn_scan_run.clicked.connect(lambda: self._on_scan(False))
+        self._btn_scan_run = QPushButton(_u("BTN_SEARCH_RUN", "検索実行"))
+        self._btn_scan_run.setAutoDefault(False)
+        self._btn_scan_run.setDefault(False)
+        self._btn_scan_run.clicked.connect(lambda: self._on_scan(False))
+        btn_scan_run = self._btn_scan_run
         self._main_set_tip(
             btn_scan_run,
             "TOOLTIP_BTN_SEARCH_RUN",
@@ -822,6 +895,13 @@ class _DataAggMainWindow(QDialog):
         self._fit_item_table_columns()
         layout.addWidget(grp_items)
         self._file_list_items: list[str] = []
+        self._scan_generation: int = 0
+        self._scan_busy: bool = False
+        self._scan_thread: QThread | None = None
+        self._scan_worker: _FolderScanWorker | None = None
+        self._scan_pending_auto: bool = False
+        self._excel_unlock_pulse_chain_scheduled: bool = False
+        self._excel_create_probe_t0: float = 0.0
         # 制御用ボタン（シナリオ読込/保存、一括実行・キャンセル）
         row_btn = QHBoxLayout()
         btn_load = QPushButton(_u("BTN_SCENARIO_LOAD", "シナリオ読込"))
@@ -903,10 +983,9 @@ class _DataAggMainWindow(QDialog):
         self._wire_scenario_dirty_signals()
         self._update_item_count_label()
         self._update_detected_file_count_label()
-        # 基準フォルダが空のときは一覧も空。パスが入っているときだけ自動走査（メッセージなし）。
-        if (self._edit_start_path.text() or "").strip():
-            self._on_scan(auto_mode=True)
-        else:
+        # 基準フォルダが空のときは一覧も空。パスありは showEvent 後に非同期走査（UI 表示を先に返す）。
+        self._scan_pending_auto = bool((self._edit_start_path.text() or "").strip())
+        if not self._scan_pending_auto:
             self._file_list_items = []
             self._file_list.clear()
             self._update_detected_file_count_label()
@@ -1110,12 +1189,93 @@ class _DataAggMainWindow(QDialog):
             self._excel_lock_interactive_prev = None
             return not lock
 
-    def _pulse_excel_unlock_if_excel_lock_off(self) -> None:
+    def _pulse_excel_unlock_if_excel_lock_off(
+        self,
+        *,
+        _create_dialog_probe: bool = False,
+        _probe_t0: float = 0.0,
+        _probe_t_prev: float = 0.0,
+    ) -> tuple[float, float] | None:
         """
         WINDOW.EXCEL_LOCK が false（子 HWND ロック不要）のとき、Excel 側の操作感を有効寄せにする。
         Win32 の子 HWND 再有効化に加え、COM の CommandBars 有効化と Application.Interactive を試す。
         ensure_front／前面追従の直後に子が再無効化される環境向けに showEvent から短い遅延で複数回呼ぶ。
         """
+        ph = int(self._parent_hwnd or 0)
+        probe_t0 = float(_probe_t0 or 0.0)
+        probe_t_prev = float(_probe_t_prev or probe_t0 or 0.0)
+
+        def _probe_sub(sub_phase: str) -> None:
+            nonlocal probe_t_prev
+            if not _create_dialog_probe:
+                return
+            probe_t_prev = _log_data_agg_create_dialog_phase(
+                sub_phase,
+                t0=probe_t0,
+                t_prev=probe_t_prev,
+                parent_hwnd=ph,
+            )
+
+        if not ph:
+            return (probe_t0, probe_t_prev) if _create_dialog_probe else None
+        try:
+            from shiboken6 import Shiboken
+
+            if not Shiboken.isValid(self):
+                return (probe_t0, probe_t_prev) if _create_dialog_probe else None
+        except Exception:
+            pass
+        try:
+            from ui_qt.ui_common import want_excel_child_hwnd_lock_while_modal
+
+            if want_excel_child_hwnd_lock_while_modal(self._window_cfg or {}):
+                return (probe_t0, probe_t_prev) if _create_dialog_probe else None
+        except Exception:
+            return (probe_t0, probe_t_prev) if _create_dialog_probe else None
+        try:
+            from ui_qt.ui_common import enable_excel_window
+
+            enable_excel_window(ph, True)
+        except Exception:
+            pass
+        _probe_sub("pulse_after_enable_win32")
+        try:
+            from core.core_xlc import (
+                excel_try_set_main_commandbars_enabled,
+                get_excel_context_from_hwnd,
+            )
+
+            ctx = get_excel_context_from_hwnd(ph, self._sheet_id)
+            _probe_sub("pulse_after_get_ctx")
+            if ctx:
+                app, *_rest = ctx
+                excel_try_set_main_commandbars_enabled(app, True)
+                _probe_sub("pulse_after_cmdbars")
+                try:
+                    ax = getattr(app, "api", None)
+                    if ax is not None:
+                        ax.Interactive = True
+                except Exception:
+                    pass
+                _probe_sub("pulse_after_interactive")
+        except Exception:
+            pass
+        try:
+            self._apply_excel_menu_bar_lock(False)
+            self._excel_menu_bar_lock_applied = False
+        except Exception:
+            pass
+        _probe_sub("pulse_after_menu_unlock")
+        return (probe_t0, probe_t_prev) if _create_dialog_probe else None
+
+    def _schedule_excel_unlock_pulse_chain(self) -> None:
+        """EXCEL_LOCK=false 時: Win32/COM 解禁を非同期 1 本化（show をブロックしない）。
+
+        QTimer(0) で初回 pulse、90/200/450 ms で再試行（ensure_front 後の無効化取りこぼし緩和）。
+        showEvent から複数回呼ばれても 1 チェーンだけ予約する。
+        """
+        if getattr(self, "_excel_unlock_pulse_chain_scheduled", False):
+            return
         ph = int(self._parent_hwnd or 0)
         if not ph:
             return
@@ -1133,35 +1293,56 @@ class _DataAggMainWindow(QDialog):
                 return
         except Exception:
             return
-        try:
-            from ui_qt.ui_common import enable_excel_window
 
-            enable_excel_window(ph, True)
-        except Exception:
-            pass
-        try:
-            from core.core_xlc import (
-                excel_try_set_main_commandbars_enabled,
-                get_excel_context_from_hwnd,
-            )
+        self._excel_unlock_pulse_chain_scheduled = True
 
-            ctx = get_excel_context_from_hwnd(ph, self._sheet_id)
-            if ctx:
-                app, *_rest = ctx
-                excel_try_set_main_commandbars_enabled(app, True)
-                try:
-                    ax = getattr(app, "api", None)
-                    if ax is not None:
-                        ax.Interactive = True
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        def _run_pulse(*, use_create_probe: bool) -> None:
+            try:
+                from shiboken6 import Shiboken
+
+                if not Shiboken.isValid(self) or not self.isVisible():
+                    return
+            except Exception:
+                return
+            probe_t0 = 0.0
+            if use_create_probe:
+                probe_t0 = float(getattr(self, "_excel_create_probe_t0", 0) or 0)
+            t_prev = time.perf_counter()
+            try:
+                if use_create_probe and probe_t0 > 0:
+                    t_prev = _log_data_agg_create_dialog_phase(
+                        "pulse_deferred_enter",
+                        t0=probe_t0,
+                        t_prev=t_prev,
+                        parent_hwnd=ph,
+                    )
+                probe_out = self._pulse_excel_unlock_if_excel_lock_off(
+                    _create_dialog_probe=use_create_probe and probe_t0 > 0,
+                    _probe_t0=probe_t0 if use_create_probe else 0.0,
+                    _probe_t_prev=t_prev if use_create_probe else 0.0,
+                )
+                if use_create_probe and probe_t0 > 0:
+                    if probe_out is not None:
+                        _, t_prev = probe_out
+                    _log_data_agg_create_dialog_phase(
+                        "pulse_deferred_done",
+                        t0=probe_t0,
+                        t_prev=t_prev,
+                        parent_hwnd=ph,
+                    )
+                    self._excel_create_probe_t0 = 0.0
+            except Exception:
+                pass
+
+        def _first_pulse() -> None:
+            _run_pulse(use_create_probe=True)
+
         try:
-            self._apply_excel_menu_bar_lock(False)
-            self._excel_menu_bar_lock_applied = False
+            QTimer.singleShot(0, _first_pulse)
+            for _ms in (90, 200, 450):
+                QTimer.singleShot(int(_ms), lambda _u=False: _run_pulse(use_create_probe=_u))
         except Exception:
-            pass
+            self._excel_unlock_pulse_chain_scheduled = False
 
     def _schedule_deferred_excel_owner_front(self) -> None:
         """DATA_AGG_MAIN は apply_window_config で遅延オーナーが付かないため、表示後に再適用する。
@@ -1868,12 +2049,199 @@ class _DataAggMainWindow(QDialog):
         self._lbl_item_total.setText(fmt % n)
 
     def _update_detected_file_count_label(self) -> None:
+        if getattr(self, "_scan_busy", False):
+            return
         n = len(self._file_list_items)
         fmt = str(self._ui.get("LABEL_DETECTED_FILE_COUNT_FMT") or "ファイル数：%d").strip()
         try:
             self._lbl_detected_file_count.setText(fmt % n)
         except Exception:
             self._lbl_detected_file_count.setText("ファイル数：%d" % n)
+
+    def _set_scan_ui_busy(self, busy: bool) -> None:
+        self._scan_busy = bool(busy)
+        btn = getattr(self, "_btn_scan_run", None)
+        if btn is not None:
+            btn.setEnabled(not busy)
+        lbl = getattr(self, "_lbl_detected_file_count", None)
+        if lbl is None:
+            return
+        if busy:
+            lbl.setText(
+                _ui_disp_str(
+                    self._ui or {},
+                    "LABEL_DETECTED_FILE_COUNT_SCANNING",
+                    "走査中…",
+                )
+            )
+        else:
+            self._update_detected_file_count_label()
+
+    def _stop_scan_thread(self) -> None:
+        th = getattr(self, "_scan_thread", None)
+        if th is not None and th.isRunning():
+            try:
+                th.quit()
+                th.wait(5000)
+            except Exception:
+                pass
+        self._scan_thread = None
+        self._scan_worker = None
+
+    def _apply_folder_scan_result(
+        self,
+        generation: int,
+        paths: list[str],
+        *,
+        auto_mode: bool,
+        on_complete: Callable[[int], None] | None = None,
+    ) -> None:
+        if not should_apply_folder_scan_result(generation, self._scan_generation):
+            return
+        self._set_scan_ui_busy(False)
+        self._file_list_items = list(paths)
+        self._file_list.clear()
+        for fp in self._file_list_items:
+            self._file_list.addItem(fp)
+        self._update_detected_file_count_label()
+        try:
+            sp = str(self._get_scan_state().get("start_path") or "").strip() or "."
+            rp = Path(sp).resolve()
+            if rp.is_dir():
+                set_last_folder(str(rp))
+        except Exception:
+            pass
+        if not auto_mode:
+            t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
+            msg = _ui_disp_str(
+                self._ui or {},
+                "MSG_SCAN_DONE",
+                "%s 件のファイルを検出しました。",
+            )
+            show_info_notice(self, t_scan, msg % len(paths))
+        if on_complete is not None:
+            on_complete(len(paths))
+        try:
+            logger.info(
+                "[DATA_AGG_UI] folder_scan_async done generation=%s n=%s auto=%s",
+                generation,
+                len(paths),
+                auto_mode,
+            )
+        except Exception:
+            pass
+
+    @Slot(int, object)
+    def _on_folder_scan_worker_finished(self, generation: int, paths_obj: object) -> None:
+        paths = list(paths_obj) if isinstance(paths_obj, list) else []
+        auto_mode = bool(getattr(self, "_scan_req_auto_mode", True))
+        cb = getattr(self, "_scan_req_on_complete", None)
+        self._apply_folder_scan_result(
+            generation,
+            paths,
+            auto_mode=auto_mode,
+            on_complete=cb if callable(cb) else None,
+        )
+        self._scan_thread = None
+        self._scan_worker = None
+
+    @Slot(int, str)
+    def _on_folder_scan_worker_failed(self, generation: int, message: str) -> None:
+        if not should_apply_folder_scan_result(generation, self._scan_generation):
+            return
+        self._set_scan_ui_busy(False)
+        auto_mode = bool(getattr(self, "_scan_req_auto_mode", True))
+        cb = getattr(self, "_scan_req_on_complete", None)
+        if not auto_mode:
+            t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
+            show_warning_notice(
+                self,
+                t_scan,
+                _ui_disp_str(
+                    self._ui or {},
+                    "MSG_SCAN_FAILED_FMT",
+                    "検索に失敗しました: %s",
+                )
+                % message,
+            )
+        if callable(cb):
+            cb(0)
+        self._scan_thread = None
+        self._scan_worker = None
+        try:
+            logger.warning(
+                "[DATA_AGG_UI] folder_scan_async failed generation=%s err=%s",
+                generation,
+                message,
+            )
+        except Exception:
+            pass
+
+    def _request_folder_scan(
+        self,
+        *,
+        auto_mode: bool = False,
+        on_complete: Callable[[int], None] | None = None,
+    ) -> None:
+        """フォルダ走査をバックグラウンドで実行し、完了後に一覧を更新する。"""
+        state = self._get_scan_state()
+        sp = str(state.get("start_path") or "").strip()
+        if not sp:
+            self._file_list_items = []
+            self._file_list.clear()
+            self._update_detected_file_count_label()
+            if on_complete is not None:
+                on_complete(0)
+            return
+        exts = list(state.get("extensions") or [])
+        if not exts:
+            self._file_list_items = []
+            self._file_list.clear()
+            self._update_detected_file_count_label()
+            if not auto_mode:
+                t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
+                show_warning_notice(
+                    self,
+                    t_scan,
+                    _ui_disp_str(
+                        self._ui or {},
+                        "MSG_SCAN_SELECT_EXT",
+                        "拡張子を1つ以上選択してください。（.xls / .xlsx / .xlsm / .csv）",
+                    ),
+                )
+            if on_complete is not None:
+                on_complete(0)
+            return
+
+        self._scan_generation += 1
+        gen = self._scan_generation
+        self._scan_req_auto_mode = auto_mode
+        self._scan_req_on_complete = on_complete
+        self._set_scan_ui_busy(True)
+        self._stop_scan_thread()
+
+        thread = QThread(self)
+        worker = _FolderScanWorker(gen, state)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_folder_scan_worker_finished)
+        worker.failed.connect(self._on_folder_scan_worker_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._scan_thread = thread
+        self._scan_worker = worker
+        thread.start()
+        try:
+            logger.info(
+                "[DATA_AGG_UI] folder_scan_async start generation=%s auto=%s path=%s",
+                gen,
+                auto_mode,
+                sp,
+            )
+        except Exception:
+            pass
 
     def _sync_item_table_master_name_roles(self) -> None:
         """列0の UserRole を表示テキストと一致させる（移動・読込後に呼ぶ）。"""
@@ -2558,13 +2926,18 @@ class _DataAggMainWindow(QDialog):
                 return
 
     def _on_item_table_double_clicked(self, row: int, column: int) -> None:
-        """項目名列・要約列のダブルクリックでもシナリオ編集を開く。"""
+        """項目名列のダブルクリックで編集を開始する。"""
         if row < 0 or column < 0:
             return
+        if column != 0:
+            return
         c0 = self._item_table.item(row, 0)
+        if c0 is None:
+            return
         if self._is_linked_master_name((c0.text() if c0 else "").strip()):
             return
-        self._on_scenario_edit(row)
+        self._item_table.setCurrentItem(c0)
+        self._item_table.editItem(c0)
 
     def _create_scenario_edit_button(self, row: int) -> QPushButton:
         """シナリオ編集ボタンを生成する（スタイル適用）。"""
@@ -2609,7 +2982,7 @@ class _DataAggMainWindow(QDialog):
         hdr.resizeSection(1, max(floor, w_hdr, w_btn))
 
     def _fit_item_table_columns(self) -> None:
-        """項目表3列: 0=内容に合わせつつ最大幅で抑制、1=狭い固定、2=タブ幅内で内容を優先して調整。"""
+        """項目表3列: 0/2 は内容幅優先、足りない分は横スクロールで見る。"""
         tbl = self._item_table
         hdr = tbl.horizontalHeader()
         ui = self._ui
@@ -2653,16 +3026,7 @@ class _DataAggMainWindow(QDialog):
             it = tbl.item(r, 2)
             if it is not None:
                 w2_need = max(w2_need, self._item_table_max_line_advance(fm, it.text(), pad2))
-
-        vw = max(0, tbl.viewport().width())
-        available = max(0, vw - w0 - w1 - 8)
-        # 列2は常にビュー内に収める（狭幅時は最小限まで縮め、全文はツールチップで補う）
-        if available <= 0:
-            w2 = 1
-        elif available < w2_floor:
-            w2 = max(1, available)
-        else:
-            w2 = max(w2_floor, min(w2_need, available))
+        w2 = max(w2_floor, w2_need)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(2, w2)
 
@@ -2715,7 +3079,6 @@ class _DataAggMainWindow(QDialog):
                 scenario_for_dry_run=data,
                 scan_root=scan_root,
             )
-            _data_agg_prepare_subdialog_excel_center(dlg, self, dbg.get("WINDOW"))
             dlg.exec()
         except Exception as exc:
             _data_agg_warn_debug_open_failed(self, t_dbg, exc)
@@ -2954,9 +3317,6 @@ class _DataAggMainWindow(QDialog):
                 scan_paths_hint=scan_paths_hint,
                 on_registered=lambda r, it=item, rr=row: self._apply_item_edit_result(rr, it, r),
             )
-            _data_agg_prepare_subdialog_excel_center(
-                dlg, self, scenario_edit_cfg.get("WINDOW")
-            )
             dlg.exec()
         except Exception as exc:
             show_warning_notice(
@@ -3015,81 +3375,8 @@ class _DataAggMainWindow(QDialog):
             )
 
     def _on_scan(self, auto_mode: bool = False) -> None:
-        """検索実行でフォルダを走査し、検出ファイル一覧を更新する。"""
-        try:
-            from svc import svc_data_agg_scan as scan_mod
-            start_path = (self._edit_start_path.text() or ".").strip() or "."
-            ext_list = []
-            if self._chk_ext_xls.isChecked():
-                ext_list.append(".xls")
-            if self._chk_ext_xlsx.isChecked():
-                ext_list.append(".xlsx")
-            if self._chk_ext_xlsm.isChecked():
-                ext_list.append(".xlsm")
-            if self._chk_ext_csv.isChecked():
-                ext_list.append(".csv")
-            if not ext_list:
-                self._file_list_items = []
-                self._file_list.clear()
-                self._update_detected_file_count_label()
-                if not auto_mode:
-                    t_scan = _ui_disp_str(
-                        self._ui or {}, "BTN_SEARCH_RUN", "検索実行"
-                    )
-                    show_warning_notice(
-                        self,
-                        t_scan,
-                        _ui_disp_str(
-                            self._ui or {},
-                            "MSG_SCAN_SELECT_EXT",
-                            "拡張子を1つ以上選択してください。（.xls / .xlsx / .xlsm / .csv）",
-                        ),
-                    )
-                return
-            paths = scan_mod.scan_folder(
-                start_path,
-                recursive=self._chk_recursive.isChecked(),
-                extensions=tuple(ext_list),
-                keyword=self._edit_keyword.text().strip(),
-            )
-            self._file_list_items = [str(p) for p in paths]
-            self._file_list.clear()
-            for fp in self._file_list_items:
-                self._file_list.addItem(fp)
-            self._update_detected_file_count_label()
-            try:
-                from pathlib import Path as _Path
-
-                rp = _Path(start_path).resolve()
-                if rp.is_dir():
-                    set_last_folder(str(rp))
-            except Exception:
-                pass
-            if not auto_mode:
-                t_scan = _ui_disp_str(
-                    self._ui or {}, "BTN_SEARCH_RUN", "検索実行"
-                )
-                msg = _ui_disp_str(
-                    self._ui or {},
-                    "MSG_SCAN_DONE",
-                    "%s 件のファイルを検出しました。",
-                )
-                show_info_notice(self, t_scan, msg % len(paths))
-        except Exception as exc:
-            if not auto_mode:
-                t_scan = _ui_disp_str(
-                    self._ui or {}, "BTN_SEARCH_RUN", "検索実行"
-                )
-                show_warning_notice(
-                    self,
-                    t_scan,
-                    _ui_disp_str(
-                        self._ui or {},
-                        "MSG_SCAN_FAILED_FMT",
-                        "検索に失敗しました: %s",
-                    )
-                    % exc,
-                )
+        """検索実行でフォルダを走査し、検出ファイル一覧を更新する（非同期）。"""
+        self._request_folder_scan(auto_mode=auto_mode)
 
     def _get_scan_state(self) -> dict[str, Any]:
         """現在の走査条件を返す。"""
@@ -3129,7 +3416,6 @@ class _DataAggMainWindow(QDialog):
             if not path:
                 return
             from svc import svc_data_agg_scenario as scenario_mod
-            from svc import svc_data_agg_scan as scan_mod
             data = scenario_mod.load_scenario(path)
             errs = scenario_mod.validate_scenario(data)
             if errs:
@@ -3184,29 +3470,8 @@ class _DataAggMainWindow(QDialog):
                 self._chk_ext_xlsm.setChecked(".xlsm" in ext_set)
                 self._chk_ext_csv.setChecked(".csv" in ext_set)
                 self._edit_keyword.setText(str(scan.get("keyword") or ""))
-                # 検出ファイル一覧（タブ2）を更新（start_path 空→last_folder 補完後の入力と一致させる）
-                start_path = (self._edit_start_path.text() or ".").strip() or "."
-                ext_list = []
-                if self._chk_ext_xls.isChecked():
-                    ext_list.append(".xls")
-                if self._chk_ext_xlsx.isChecked():
-                    ext_list.append(".xlsx")
-                if self._chk_ext_xlsm.isChecked():
-                    ext_list.append(".xlsm")
-                if self._chk_ext_csv.isChecked():
-                    ext_list.append(".csv")
-                if not ext_list:
-                    ext_list = [".xlsx", ".xlsm", ".csv"]
-                file_paths = scan_mod.scan_folder(
-                    start_path,
-                    recursive=self._chk_recursive.isChecked(),
-                    extensions=tuple(ext_list),
-                    keyword=self._edit_keyword.text().strip(),
-                )
-                self._file_list_items = [str(fp) for fp in file_paths]
+                self._file_list_items = []
                 self._file_list.clear()
-                for fp in self._file_list_items:
-                    self._file_list.addItem(fp)
                 self._update_detected_file_count_label()
                 self._apply_excel_options_to_ui(data.get("excel_options"))
             finally:
@@ -3223,11 +3488,16 @@ class _DataAggMainWindow(QDialog):
                 "MSG_SCENARIO_LOAD_DONE_FMT",
                 "シナリオを読込みました。\n項目数: %d\n対象ファイル数: %d",
             )
-            show_done_notice(
-                self,
-                title_ld,
-                done_msg % (len(items), len(file_paths)),
-            )
+            items_count = len(items)
+
+            def _after_scenario_load_scan(n_files: int) -> None:
+                show_done_notice(
+                    self,
+                    title_ld,
+                    done_msg % (items_count, n_files),
+                )
+
+            self._request_folder_scan(auto_mode=True, on_complete=_after_scenario_load_scan)
         except FileNotFoundError as e:
             show_warning_notice(
                 self,
@@ -3650,14 +3920,7 @@ class _DataAggMainWindow(QDialog):
             want_hwnd_lock = True
         if not want_hwnd_lock:
             try:
-                self._pulse_excel_unlock_if_excel_lock_off()
-            except Exception:
-                pass
-            try:
-                from PySide6.QtCore import QTimer
-
-                for _ms in (90, 200, 450):
-                    QTimer.singleShot(int(_ms), self._pulse_excel_unlock_if_excel_lock_off)
+                self._schedule_excel_unlock_pulse_chain()
             except Exception:
                 pass
         self._schedule_deferred_excel_owner_front()
@@ -3679,6 +3942,9 @@ class _DataAggMainWindow(QDialog):
 
                 for _delay_ms in (150, 450, 1000):
                     QTimer.singleShot(_delay_ms, _retry_menu_lock)
+        if getattr(self, "_scan_pending_auto", False):
+            self._scan_pending_auto = False
+            self._request_folder_scan(auto_mode=True)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -3696,6 +3962,9 @@ class _DataAggMainWindow(QDialog):
             pass
         self._apply_excel_menu_bar_lock(False)
         self._excel_menu_bar_lock_applied = False
+        self._excel_unlock_pulse_chain_scheduled = False
+        self._excel_create_probe_t0 = 0.0
+        self._stop_scan_thread()
         try:
             if self._batch_poll_timer is not None:
                 self._batch_poll_timer.stop()
@@ -3830,6 +4099,8 @@ class _ScenarioEditDialog(QDialog):
             root_win = (_get_cfg().get("WINDOW") or {})
             scen_win = (self._screen_cfg.get("WINDOW") or {})
             win_merged = _deep_merge(dict(root_win), dict(scen_win))
+            # Child dialogs should stay on the parent window, not recenter on Excel.
+            win_merged["CENTER_ON_EXCEL"] = False
             ph = 0
             pw: QWidget | None = parent
             while pw is not None:
@@ -4301,6 +4572,7 @@ class _ScenarioEditDialog(QDialog):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._center_on_parent_widget()
         ph, _rect = _data_agg_excel_parent_hwnd_rect(self)
         if ph:
             try:
@@ -4323,9 +4595,21 @@ class _ScenarioEditDialog(QDialog):
                 QTimer.singleShot(120, _front)
             except Exception:
                 pass
+        QTimer.singleShot(0, self._center_on_parent_widget)
+        QTimer.singleShot(160, self._center_on_parent_widget)
         QTimer.singleShot(0, self._sync_left_splitter_sizes)
         QTimer.singleShot(80, self._sync_left_splitter_sizes)
         QTimer.singleShot(0, self._clear_initial_button_focus)
+
+    def _center_on_parent_widget(self) -> None:
+        pw = self.parentWidget()
+        if pw is None:
+            return
+        pr = pw.frameGeometry()
+        gr = self.frameGeometry()
+        x = pr.x() + (pr.width() - gr.width()) // 2
+        y = pr.y() + (pr.height() - gr.height()) // 2
+        self.move(x, y)
 
     def _sync_left_splitter_sizes(self) -> None:
         sp = getattr(self, "_left_splitter", None)
@@ -4549,7 +4833,6 @@ class _ScenarioEditDialog(QDialog):
                 fixed_mode=0,
                 scan_root=scan_root_dbg,
             )
-            _data_agg_prepare_subdialog_excel_center(dlg, self, dbg.get("WINDOW"))
             dlg.exec()
         except Exception as exc:
             _data_agg_warn_debug_open_failed(self, t_reg, exc)
@@ -6065,8 +6348,16 @@ def create_dialog(
         # シート操作併用: EXCEL_LOCK は JSON に書かずコードで false（want_excel_child_hwnd_lock_while_modal）
         win_cfg = dict(win_cfg)
         win_cfg["EXCEL_LOCK"] = False
-        dlg = _DataAggMainWindow(req, int(parent_hwnd or 0), str(sheet_id or ""), main_cfg, win_cfg)
         ph = int(parent_hwnd or 0)
+        t_create0 = time.perf_counter()
+        t_create_prev = t_create0
+        dlg = _DataAggMainWindow(req, ph, str(sheet_id or ""), main_cfg, win_cfg)
+        t_create_prev = _log_data_agg_create_dialog_phase(
+            "main_window_ready",
+            t0=t_create0,
+            t_prev=t_create_prev,
+            parent_hwnd=ph,
+        )
         try:
             from ui_qt.ui_common import prepare_dialog_excel_center_before_show
 
@@ -6075,26 +6366,44 @@ def create_dialog(
             )
         except Exception:
             pass
-        try:
-            from ui_qt.ui_common import want_excel_child_hwnd_lock_while_modal
-
-            if ph and not want_excel_child_hwnd_lock_while_modal(win_cfg):
-                dlg._pulse_excel_unlock_if_excel_lock_off()
-        except Exception:
-            pass
+        t_create_prev = _log_data_agg_create_dialog_phase(
+            "prepare_done",
+            t0=t_create0,
+            t_prev=t_create_prev,
+            parent_hwnd=ph,
+        )
         try:
             from ui_qt.ipc_file import write_waitform_ready_signal
 
             write_waitform_ready_signal(int(ph or 0))
         except Exception:
             pass
+        t_create_prev = _log_data_agg_create_dialog_phase(
+            "waitform_written",
+            t0=t_create0,
+            t_prev=t_create_prev,
+            parent_hwnd=ph,
+        )
+        dlg._excel_create_probe_t0 = t_create0
         dlg.show()
+        t_create_prev = _log_data_agg_create_dialog_phase(
+            "show_done",
+            t0=t_create0,
+            t_prev=t_create_prev,
+            parent_hwnd=ph,
+        )
         try:
             from ui_qt.ui_common import _keep_modeless
 
             _keep_modeless(dlg, exclude_from_bulk_close=True)
         except Exception:
             pass
+        _log_data_agg_create_dialog_phase(
+            "create_dialog_done",
+            t0=t_create0,
+            t_prev=t_create_prev,
+            parent_hwnd=ph,
+        )
         return dlg
 
     if action == "progress":

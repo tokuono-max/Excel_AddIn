@@ -15,6 +15,7 @@ from svc.svc_data_agg import (  # noqa: E402
     _join_search_rows_for_slice_with_host_supplement,
     _row_satisfies_join_and,
 )
+from core.core_join_compare import join_compare_display_key  # noqa: E402
 
 
 def test_row_satisfies_join_and() -> None:
@@ -22,6 +23,15 @@ def test_row_satisfies_join_and() -> None:
     row = {"A": "1", "B": " 2 "}
     assert _row_satisfies_join_and(row, jds, {"A": "1", "B": "2"})
     assert not _row_satisfies_join_and(row, jds, {"A": "x", "B": "2"})
+
+
+def test_row_satisfies_join_and_apostrophe_mismatch() -> None:
+    """Excel 文字列固定 ' と本体のみが一致する。"""
+    jds = [{"item": "出荷日"}]
+    row = {"出荷日": "'20220527"}
+    assert _row_satisfies_join_and(row, jds, {"出荷日": "20220527"})
+    assert _row_satisfies_join_and(row, jds, {"出荷日": "'20220527"})
+    assert not _row_satisfies_join_and(row, jds, {"出荷日": "20220601"})
 
 
 def test_apply_join_key_search_1_primary_n_join_slices_union() -> None:
@@ -298,9 +308,10 @@ def test_batch_extract_skips_items_without_matching_file_pattern(tmp_path: Path)
         join_targets=set(),
         path_col="",
         master_preview_cap_idx=None,
+        master_preview_extract_allow=None,
         preview_master_mode=False,
         use_join_search_merge=True,
         max_primary_rows=None,
     )
-    assert (res.bundles[0].get("primary_values") or []) == ["HOSTVAL"]
+    assert join_compare_display_key((res.bundles[0].get("primary_values") or [])[0]) == "HOSTVAL"
     assert res.bundles[1] == {}

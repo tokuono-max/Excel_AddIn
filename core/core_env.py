@@ -283,6 +283,41 @@ def return_early_wait_sec() -> float:
     return min(v, 30.0)
 
 
+def data_agg_extract_default_max() -> int:
+    """縦反復: repeat_max 未設定かつ空白まででもないときの既定上限（互換 9999）。"""
+    return 9999
+
+
+def data_agg_extract_absolute_max() -> int:
+    """縦反復: N件・空白までの絶対上限。HC_DATA_AGG_EXTRACT_ABSOLUTE_MAX（既定 999999）。"""
+    raw = get_first("HC_DATA_AGG_EXTRACT_ABSOLUTE_MAX", default="999999")
+    try:
+        v = int(str(raw or "999999").strip())
+        return max(1, min(v, 999999))
+    except ValueError:
+        return 999999
+
+
+def data_agg_extract_trunc_policy(
+    *,
+    probe_caller: Optional[str] = None,
+    preview_master: bool = False,
+) -> str:
+    """
+    抽出打ち切り検知時の方針。HC_DATA_AGG_EXTRACT_TRUNC_POLICY:
+      abort … 結合前に DataAggExtractTruncated（本番一括の既定）
+      warn  … ログのみで続行
+    """
+    raw = (get("HC_DATA_AGG_EXTRACT_TRUNC_POLICY") or "").strip().lower()
+    if raw in ("warn", "continue", "log"):
+        return "warn"
+    if raw in ("abort", "stop", "cancel"):
+        return "abort"
+    if preview_master or (probe_caller or "") not in ("excel_batch_submit",):
+        return "warn"
+    return "abort"
+
+
 # 常駐メイン（ルート hc_main.py）のログプレフィックス（hc_csv.log 等で grep）
 LOG_MAIN_PREFIX = "[MAIN]"
 

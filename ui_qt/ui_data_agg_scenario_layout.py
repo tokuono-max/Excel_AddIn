@@ -893,7 +893,7 @@ def build_scenario_detail_cell_scroll(
     refs["end_mode_labels"] = end_items
 
     sp_n = QSpinBox()
-    sp_n.setRange(1, 99999)
+    sp_n.setRange(1, 999999)
     sp_n.setValue(int(_dc(cfg, "DEFAULT_N_COUNT", 1) or 1))
     _compact_spin(sp_n, w_n)
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_N_COUNT", "取得件数")), sp_n)

@@ -183,6 +183,15 @@ VBA（`HC_Log`）と Python（`core_log`）が **同じファイル名** で追�
 | `DATA_AGG_PER_FILE_TIMING` / `HC_DIAG_DATA_AGG_FILE_TIMING` | オフ | `1` でファイル別 open/read/merge ms を診断ログへ。 |
 | `DATA_AGG_COMPUTE_BATCH_TIMING` / `HC_DIAG_DATA_AGG_BATCH_TIMING` | 本番は常時1行 | 本番一括完了時 `[DATA_AGG] compute_batch_timing …`（extract/merge/total_ms）を `hc_csv.log` に出力。 |
 
+**縦反復抽出の上限・打ち切り**
+
+| 変数名 | 既定 | 意味 |
+|--------|------|------|
+| `HC_DATA_AGG_EXTRACT_ABSOLUTE_MAX` | `999999` | 「N件」指定および「空白まで」の絶対上限。UI の取得件数スピンもこの範囲。 |
+| `HC_DATA_AGG_EXTRACT_TRUNC_POLICY` | 本番一括 `abort`、それ以外 `warn` | 読取上限に達し未読データがあると判定したときの方針。`abort` … 結合前に処理中断（`DataAggExtractTruncated`）。`warn` … ログのみで続行。 |
+
+**互換（コード側の既定・環境変数なし）**: シナリオで `repeat_max` 未設定かつ「空白まで」でもない場合、縦反復の上限は従来どおり **9999** 件。
+
 ### 4.3 svc / ブリッジ・Excel 連携
 
 | 変数名 | 既定（概要） | 意味（概要） |
@@ -198,6 +207,8 @@ VBA（`HC_Log`）と Python（`core_log`）が **同じファイル名** で追�
 | `HC_MAIN_BAD_FILE_MAX_POLLS` | `100` | 同一ファイルの JSON 解釈または転送がこのポーリング回数を超えたら削除。**読取**: `core_env.hc_main_bad_file_max_polls()`。**互換**: **`HC_BRIDGE_BAD_FILE_MAX_POLLS`**（積算秒の目安は `HC_MAIN_POLL_SEC` または互換の `HC_BRIDGE_POLL_SEC`）。 |
 | `HC_PROGRESS_WINDOW_STARTUP_WAIT_SEC` | `1.0`（秒） | 進捗ウィンドウ起動待ち（CSV 読込等）。読取は **`core_env.progress_window_startup_wait_sec()`**。 |
 | `HC_EXCEL_HWND` | — | 実行中に Python 側が設定（子プロセスが HWND を参照）。**`core_env.set_excel_hwnd_for_spawn(hwnd)`** / 定数 **`core_env.ENV_EXCEL_HWND`**。 |
+
+**svc_server ウォームアップ（B+）**: 既定は **`config/svc_warmup.json`** の `warmup_actions`。B+ 常駐のため **初回 spawn 時のみ** `_run_warmup` が走る。上記 `HC_SVC_WARMUP_ACTIONS` は JSON が無いときのフォールバック。COM 常駐・再起動方針は **`docs/svc_com_session.md`**。
 
 **試験: `HC_RETURN_EARLY_WAIT_SEC`（待機短縮の効果・取りこぼし確認）**
 

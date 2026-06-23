@@ -17,6 +17,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from svc.data_agg_cancel import DataAggCancelled  # noqa: E402
+from core.core_join_compare import join_compare_display_key  # noqa: E402
 from svc.svc_data_agg import (  # noqa: E402
     _apply_join_key_search_link_write,
     _apply_join_key_search_write,
@@ -209,7 +210,7 @@ def test_file_pattern_skip_join_bundle_index(tmp_path: Path) -> None:
     )
     ix_pt = headers.index("PT番号")
     assert len(rows) == 1
-    assert rows[0][ix_pt] == "PT-001"
+    assert join_compare_display_key(rows[0][ix_pt]) == "PT-001"
 
 
 def test_cancel_during_parallel_extract(

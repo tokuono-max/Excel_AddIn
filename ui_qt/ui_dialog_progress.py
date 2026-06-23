@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_dialog_progress.py
 Created: 2026-03-10
-Updated: 2026-06-06
-Version: 0.1.35
+Updated: 2026-06-14
+Version: 0.1.36
 Purpose:
   進捗表示用ダイアログ（ProgressDialog）および create_progress_dialog を提供する。
   ui_common の Progress 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -16,6 +16,7 @@ Purpose:
   - 呼び出し側は ui_common.create_progress_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.1.36 (2026-06-14) DONE/ERROR は seq が古くても必ず処理（CSV読込オートフィット後の終端 pickle 取りこぼし防止）。
   - 0.1.35 (2026-06-13) 砂時計: Qt WaitCursor を進捗表示中に付与。Excel xlWait は遅延再武装。
   - 0.1.34 (2026-06-13) DONE 終了アニメ中は直前工程ではなく「仕上げ中…」を表示（オートフィット表示の残りを防止）。
   - 0.1.33 (2026-06-13) DONE: バー100%到達後に「完了」表示。終了アニメは加速 creep で短時間化。
@@ -103,7 +104,7 @@ try:
 except Exception:  # pragma: no cover
     _diag_ui = None  # type: ignore
 
-__version__ = "0.1.35"
+__version__ = "0.1.36"
 
 # DONE 受信後、バーが 100% に達するまでの暫定ラベル（直前工程名のまま残さない）
 DONE_FINISH_INTERIM_LABEL = "仕上げ中…"
@@ -685,8 +686,8 @@ class ProgressDialog(QDialog):
                 seq = int(d.get("seq", -1))
             except (TypeError, ValueError):
                 seq = -1
-            # CANCEL/ERROR は seq の古さで無視しない（重複キャンセル等で必ず処理する）
-            if status_u not in ("CANCEL", "ERROR"):
+            # CANCEL/ERROR/DONE は seq の古さで無視しない（終端状態は必ず反映）
+            if status_u not in ("CANCEL", "ERROR", "DONE"):
                 if seq >= 0 and seq <= getattr(self, "_last_seen_seq", -1):
                     return
                 self._last_seen_seq = seq

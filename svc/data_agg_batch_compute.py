@@ -21,6 +21,7 @@ from svc.data_agg_cancel import (
     register_batch_worker_pid,
     reset_cancel_path,
 )
+from svc.data_agg_extract_limit import DataAggExtractTruncated
 
 logger = get_logger(__name__)
 _agg_diag = get_data_agg_diag_logger()
@@ -336,36 +337,13 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     prog_last_pct = [2]
     cfg_msgs = (_get_config().get("MESSAGES") or {})
 
-    def _prog_write(**kw: Any) -> None:
-        if write_pickle is None:
-            return
-        prog_seq[0] += 1
-        phase = str(kw.get("phase", "") or "")
-        d: dict[str, Any] = {
-            "status": str(kw.get("status", "RUN")),
-            "seq": prog_seq[0],
-            "pct": int(max(0, min(100, int(kw.get("pct", 5) or 5)))),
-            "phase": phase,
-            "phase_i": int(kw.get("phase_i", 0) or 0),
-            "phase_total": 4,
-            "msg": phase,
-            "show_done_dialog": False,
-        }
-        if kw.get("done") is not None:
-            d["done"] = kw["done"]
-        if kw.get("total") is not None:
-            d["total"] = kw["total"]
-        cf = str(kw.get("current_file", "") or "").strip()
-        if cf:
-            d["current_file"] = cf
-        dt = str(kw.get("detail", "") or "").strip()
-        if dt:
-            d["detail"] = dt
-        try:
-            prog_path.parent.mkdir(parents=True, exist_ok=True)
-            write_pickle(prog_path, d)
-        except Exception:
-            pass
+    from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
+
+    _prog_write = make_throttled_progress_writer(
+        prog_path,
+        write_pickle,
+        min_interval_sec=0.35,
+    )
 
     def _prog_cancel() -> None:
         _prog_write(
@@ -438,8 +416,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         ni_l = max(len(items), 1)
         fi_kw = int(rest[0]) if len(rest) >= 1 else None
         nf_kw = int(rest[1]) if len(rest) >= 2 else None
-        if cancel_check is not None:
-            cancel_check(force=True)
         raw = _batch_progress_pct_from_hook(
             sub,
             suffix,
@@ -571,6 +547,44 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             event_log_rows=event_log_rows,
         )
         return
+    except DataAggExtractTruncated as e:
+        dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)
+        user_msg = str(e)
+        spill = batch_spill_dir(ipc_root, sheet_id, batch_run_id)
+        write_batch_spill(
+            spill,
+            [],
+            [],
+            {
+                "abort": True,
+                "abort_phase": "extract_truncated",
+                "error": "extract_truncated",
+                "user_msg": user_msg,
+                "scenario_id": scenario_id,
+                "scenario_path_log": scenario_path_log,
+                "files_n": len(file_paths),
+                "compute_ms": dt_compute_ms,
+                "event_log_rows": event_log_rows,
+                "excel_write_summary": _excel_options_log_summary(data.get("excel_options")),
+                "batch_run_id": batch_run_id,
+                "batch_start_ts_ms": batch_start_ts_ms,
+                "notify_parent": notify_parent,
+            },
+        )
+        try:
+            clear_batch_worker_pid(sheet_id, ipc_root)
+        except Exception:
+            pass
+        _dispatch_batch_write(
+            parent_hwnd,
+            sheet_id,
+            spill_dir=spill,
+            batch_run_id=batch_run_id,
+            notify_parent=notify_parent,
+            prog_path=str(prog_path),
+            cancel_path=str(cancel_path),
+        )
+        return
     except Exception as e:
         logger.exception("[DATA_AGG] compute_batch_table_rows failed: %s", e)
         dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)
@@ -681,7 +695,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     prog_last_pct[0] = max(prog_last_pct[0], 93)
     _prog_write(
         pct=93,
-        phase="マスターへ書き込み",
+        phase=str(cfg_msgs.get("PHASE_EXCEL_SPREAD") or "Excelへ展開"),
         phase_i=4,
         done=93,
         total=100,

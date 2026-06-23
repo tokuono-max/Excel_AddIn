@@ -33,6 +33,7 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger  # noqa: E402
+from core.core_value_shape import shape_datetime_value  # noqa: E402
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle  # noqa: E402
 
 logger = get_logger(__name__)
@@ -616,7 +617,10 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
                 ser_col = df_worker.iloc[:, j_idx]
                 ser_dt = _parse_datetime_with_normalized_fallback(ser_col)
                 ser_fmt = ser_dt.dt.strftime("%Y/%m/%d %H:%M")
-                ser_final = ser_fmt.fillna(ser_col)
+                ser_final = [
+                    (f if pd.notna(d) else shape_datetime_value(o))
+                    for o, d, f in zip(ser_col.tolist(), ser_dt.tolist(), ser_fmt.tolist())
+                ]
                 df_worker.iloc[:, j_idx] = ser_final
                 ser_mask = ser_dt.notnull()
                 val_success_n += int(ser_mask.sum())
@@ -681,6 +685,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
                     x1_i,
                     arr_i,
                     progress_cb=_write_progress_cb,
+                    text_mode=True,
                 )
                 written_rows += total_rows_i
         finally:

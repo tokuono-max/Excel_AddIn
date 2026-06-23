@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: svc/svc_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-06-04
-Version: 1.3.10
+Updated: 2026-06-22
+Version: 1.3.11
 Purpose:
   CSV保存（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_csv_sv（ファイル「名前を付けて保存」ダイアログ）で行う。
@@ -13,6 +13,7 @@ Purpose:
   - 完了時は csv_ld と同様の完了通知（シート名・ファイル名・容量・行数）を表示。
 
 History (latest 3):
+  - 1.3.11 (2026-06-22) 保存ダイアログ待ち後に Book/Sheet を再取得（COM 切れ緩和。csv_ld と同経路）。
   - 1.3.10 (2026-06-13) 進捗 UI 共通設定（poll/creep）と即時表示連携。保存先確定直後の砂時計 ON。
   - 1.3.9 (2026-06-04) 保存: 既定で画面上の表示文字列をチャンク Copy→クリップボードで読込。文字列行列を csv.writer で直接出力（日付正規化不要）。HC_CSV_SV_USE_VALUE_READ=1 で従来 .value 経路。
   - 1.3.8 (2026-06-04) 性能: 保存前チェックを先頭行サンプルのみに変更（全 UsedRange 読込廃止）。大容量は日付正規化スキップ。保存計測ログ分割。
@@ -52,7 +53,7 @@ from core.csv_tool_progress_ui import enrich_progress_req_dict
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.10"
+__version__ = "1.3.11"
 
 try:
     from core import core_xlc as xlc
@@ -94,6 +95,141 @@ def _bring_excel_to_front(hwnd: int) -> None:
         _w32.bring_to_front(int(hwnd))
     except Exception:
         pass
+
+
+def _capture_book_attach_keys(book: Any) -> tuple[int, str, str]:
+    """svc_server 再 attach 用に HWND / fullname / name を保存する。"""
+    excel_hwnd = 0
+    book_fullname = ""
+    book_name = ""
+    if book is None:
+        return excel_hwnd, book_fullname, book_name
+    try:
+        excel_hwnd = int(getattr(book.app, "hwnd", 0) or 0)
+    except Exception:
+        excel_hwnd = 0
+    try:
+        book_fullname = str(getattr(book, "fullname", "") or "")
+    except Exception:
+        book_fullname = ""
+    try:
+        book_name = str(getattr(book, "name", "") or "")
+    except Exception:
+        book_name = ""
+    return excel_hwnd, book_fullname, book_name
+
+
+def _reattach_book(
+    book: Any,
+    parent_hwnd: int,
+    attach_keys: tuple[int, str, str] | None = None,
+) -> Any | None:
+    """ファイルダイアログ待ち後など COM が切れたとき book を再取得する。"""
+    excel_hwnd, book_fullname, book_name = attach_keys or (0, "", "")
+    if not excel_hwnd and not book_fullname and not book_name:
+        excel_hwnd, book_fullname, book_name = _capture_book_attach_keys(book)
+    hwnd_for_attach = int(excel_hwnd or parent_hwnd or 0)
+    if hwnd_for_attach or book_fullname or book_name:
+        try:
+            from svc.svc_server import _attach_book
+
+            book2 = _attach_book(
+                excel_hwnd=hwnd_for_attach,
+                book_fullname=book_fullname,
+                book_name=book_name,
+            )
+            if book2 is not None:
+                logger.info(
+                    "[CSV_SV] phase=book_reattached hwnd=%s fullname=%s",
+                    hwnd_for_attach,
+                    os.path.basename(book_fullname) if book_fullname else "",
+                )
+                return book2
+        except Exception as ex:
+            logger.warning(
+                "[CSV_SV] book reattach failed hwnd=%s ex=%r",
+                hwnd_for_attach,
+                ex,
+            )
+    if parent_hwnd and xlc is not None:
+        ctx = xlc.get_excel_context_from_hwnd(int(parent_hwnd), "")
+        if ctx is not None:
+            _app, book3, _sh, _hwnd = ctx
+            if book3 is not None:
+                logger.info(
+                    "[CSV_SV] phase=book_resolved_via_hwnd hwnd=%s",
+                    parent_hwnd,
+                )
+                return book3
+    return book
+
+
+def _resolve_book_and_sheet(
+    book: Any,
+    sheet_id: str,
+    parent_hwnd: int,
+    ptr_s: Any | None = None,
+    attach_keys: tuple[int, str, str] | None = None,
+) -> tuple[Any | None, Any | None]:
+    """保存直前に Book/Sheet を再解決する（UI 待ち中の COM 切れ緩和）。"""
+    if book is None:
+        return None, None
+
+    sid = str(sheet_id or "").strip()
+    if xlc is not None and sid:
+        sh = xlc.find_sheet_by_guid(book, sid)
+        if sh is not None:
+            return book, sh
+
+    book2 = _reattach_book(book, parent_hwnd, attach_keys=attach_keys)
+    if book2 is None:
+        return book, None
+
+    if xlc is not None and sid:
+        sh2 = xlc.find_sheet_by_guid(book2, sid)
+        if sh2 is not None:
+            logger.info("[CSV_SV] phase=sheet_resolved_after_reattach sheet_id=%s", sid)
+            return book2, sh2
+        if parent_hwnd:
+            ctx = xlc.get_excel_context_from_hwnd(int(parent_hwnd), sid)
+            if ctx is not None:
+                _app, book3, sh3, _hwnd = ctx
+                if sh3 is not None:
+                    logger.info(
+                        "[CSV_SV] phase=sheet_resolved_via_hwnd sheet_id=%s hwnd=%s",
+                        sid,
+                        parent_hwnd,
+                    )
+                    return book3, sh3
+        return book2, None
+
+    try:
+        sh_active = book2.sheets.active
+        if sh_active is not None:
+            return book2, sh_active
+    except Exception:
+        pass
+    return book2, ptr_s
+
+
+def _progress_write_sheet_unavailable(progress_path: Path, sheet_id: str) -> None:
+    """COM 切れ等でシート解決できないとき。"""
+    detail = (
+        "対象シートに接続できませんでした。\n"
+        "Excel を前面にしたうえで、もう一度 CSV 保存を実行してください。"
+    )
+    if sheet_id:
+        detail += f"\n（GUID={sheet_id}）"
+    _progress_write_monotonic(
+        progress_path,
+        {
+            "status": "ERROR",
+            "phase": "CSV保存を開始できません",
+            "msg": detail,
+            "detail": detail,
+            "pct": 0,
+        },
+    )
 
 
 def _sv_trace(fmt: str, *args: object) -> None:
@@ -777,12 +913,15 @@ def _watch_result(
     parent_hwnd: int = 0,
     t_load0: float = 0.0,
     t_dialog_wait_start: float | None = None,
+    attach_keys: tuple[int, str, str] | None = None,
 ) -> None:
     """UI結果を待ち、OK かつ path があれば _do_save_csv を実行。
 
     t_dialog_wait_start:
         ui_ipc 確定直後の perf_counter。指定時は result_ok/cancel で dialog_wait_ms をログする
         （保存／警告ダイアログの操作待ち＋ポーリング、機械処理の前後比較用）。
+    attach_keys:
+        ダイアログ表示前に取得した HWND/fullname/name。保存直前の COM 再取得に使う。
     """
     p = Path(result_path)
     while True:
@@ -836,11 +975,27 @@ def _watch_result(
                     pass
                 _bring_excel_to_front(parent_hwnd)
                 progress_path = _progress_path(sheet_id or "_")
-                _do_save_csv(
+                book_save, ptr_save = _resolve_book_and_sheet(
                     book,
+                    str(sheet_id or ""),
+                    parent_hwnd,
+                    ptr_s=ptr_s,
+                    attach_keys=attach_keys,
+                )
+                if ptr_save is None:
+                    logger.error(
+                        "[CSV_SV] 保存直前のシート解決失敗 sheet_id=%s hwnd=%s",
+                        sheet_id or "",
+                        parent_hwnd,
+                    )
+                    _progress_write_sheet_unavailable(progress_path, str(sheet_id or ""))
+                    _bring_excel_to_front(parent_hwnd)
+                    return
+                _do_save_csv(
+                    book_save,
                     sheet_id,
                     path,
-                    ptr_s,
+                    ptr_save,
                     progress_path=progress_path,
                     parent_hwnd=parent_hwnd,
                     sheet_id_for_progress=sheet_id or "",
@@ -1077,6 +1232,7 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
     )
 
     t_dialog_wait_save = time.perf_counter()
+    attach_keys = _capture_book_attach_keys(book)
     th_ready = threading.Thread(
         target=_watch_ready,
         args=(ready_path, str(sheet_id or ""), t_load0),
@@ -1093,6 +1249,7 @@ def save_csv(book: Any, sheet_id: str = "") -> None:
         parent_hwnd,
         t_load0,
         t_dialog_wait_start=t_dialog_wait_save,
+        attach_keys=attach_keys,
     )
     logger.info(
         "[CSV_SV] phase=save_csv_flow_done elapsed_ms=%s sheet_id=%s",

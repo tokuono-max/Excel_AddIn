@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
-Updated: 2026-06-07
-Version: 0.4.39
+Updated: 2026-06-16
+Version: 0.4.41
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
@@ -13,9 +13,10 @@ Purpose:
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.41 (2026-06-16): restart_svc_server ログを recovery restart に変更（救済用である旨を明示）。
+  - 0.4.40 (2026-06-14): B+ — 常駐 svc_server を維持。事前 COM 再起動を廃止（汚染時のみ recycle）。
   - 0.4.39 (2026-06-14): A+ — excel_com_session 経由で COM recycle を全 Excel action に統一。
   - 0.4.38 (2026-06-14): 同一 HWND での 2 回目以降の操作前も svc_server を再起動（COM 使い回し防止）。
-  - 0.4.37 (2026-06-14): マルチ Excel COM 汚染対策 — svc_server 再起動（HWND 切替・前回 HWND 終了時）。
   - 0.4.36 (2026-06-13): ensure_python_hosts_ready に register_book(hwnd) を追加（マルチ Excel 初回リボン対策）。
   - 0.4.35 (2026-06-13): ensure_python_hosts_ready 追加。HWND 監視廃止（全 EXCEL.EXE 監視へ移行）。
   - 0.4.34 (2026-06-13): persist_excel_hwnd を常駐 spawn 前へ移動。lifecycle monitor の bootstrap 待機を追加。
@@ -55,7 +56,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.39"
+__version__ = "0.4.41"
 import os
 import shlex
 import subprocess
@@ -832,8 +833,7 @@ def ensure_python_hosts_ready(target_hwnd: int | None = None) -> None:
     マルチ Excel / 新規ブックでは Workbook_Open の register_book 前にリボンが押されることがあるため、
     target_hwnd を渡してブック登録も行う。
 
-    常駐 svc_server の COM はマルチ Excel 後にプロセス内で汚染されるため、HWND 切替・前回 Excel
-    終了時は svc_server を再起動してからホストを起動する。
+    B+: 常駐 svc_server は HWND キャッシュでマルチ Excel を扱い、COM 汚染時のみ recycle する。
     """
     hwnd = int(target_hwnd or 0)
     if hwnd > 0:
@@ -1014,8 +1014,12 @@ def _list_svc_server_pids(project_root: Path | None = None) -> list[int]:
 
 
 def restart_svc_server(*, reason: str = "") -> None:
-    """COM 汚染時: svc_server を終了し新インスタンスを起動する（ui/bridge は維持）。"""
-    logger.info("[SVC_SERVER] com_recycle restart begin reason=%s", reason or "-")
+    """救済用: svc_server を明示的に終了し新インスタンスを起動する（ui/bridge は維持）。
+
+    通常のリボン操作では呼ばない（B+ 常駐）。COM 汚染時は svc_server 自プロセスの
+    com_recycle が先に動く。本関数は手動復旧・将来の明示再起動用に残す。
+    """
+    logger.info("[SVC_SERVER] recovery restart begin reason=%s", reason or "-")
     if is_svc_server_running():
         _write_svc_shutdown_flag()
         t0 = time.time()
@@ -1032,35 +1036,17 @@ def restart_svc_server(*, reason: str = "") -> None:
     if not is_svc_server_running():
         spawn_svc_server()
         _wait_until_running(is_svc_server_running, "[SVC_SERVER]", poll_sec=0.05)
-    logger.info("[SVC_SERVER] com_recycle restart done reason=%s", reason or "-")
+    logger.info("[SVC_SERVER] recovery restart done reason=%s", reason or "-")
 
 
 def restart_svc_server_for_com_if_needed(target_hwnd: int) -> bool:
-    """COM 操作前に svc_server を再起動すべきか判定し、必要なら再起動する。
+    """COM 操作前の svc_server 再起動判定（B+: 常駐維持のため事前再起動は行わない）。
 
-    再起動条件:
-      - 前回 COM 接続 HWND と今回が異なる（マルチ Excel 切替）
-      - 前回 COM 接続 HWND と同じ（同一 Excel で 2 回目以降 — プロセス内 COM 汚染）
-      - 前回 COM 接続 HWND のウィンドウが消えた
+    COM 汚染時の recycle は svc_server 側で com_recycle を予約する。
+    本関数は API 互換のため残し、常に False を返す。
     """
-    th = int(target_hwnd or 0)
-    if th <= 0 or not is_svc_server_running():
-        return False
-    last = read_last_svc_com_hwnd()
-    if last <= 0:
-        return False
-    need = False
-    reason = ""
-    if last == th:
-        need = True
-        reason = f"same_hwnd_reuse last={last}"
-    else:
-        need = True
-        reason = f"hwnd_switch last={last} target={th}"
-    if not need:
-        return False
-    restart_svc_server(reason=reason)
-    return True
+    _ = int(target_hwnd or 0)
+    return False
 
 
 def request_shutdown_all() -> None:

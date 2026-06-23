@@ -3,14 +3,15 @@
 Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
-Updated: 2026-05-05 (JST)
-Version: 1.4.28
+Updated: 2026-06-22 (JST)
+Version: 1.4.29
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.29 (2026-06-22) 結合直前の Book/Sheet 解決を _attach_book+GUID に変更（apps.active 廃止）。
   - 1.4.28 (2026-06-13) 進捗表示: Excel書き込み→CSVファイル結合中。
   - 1.4.27 (2026-06-13) 進捗 UI 共通設定（poll/creep）とファイル確定直後の砂時計 ON。
   - 1.4.26 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.28"
+__version__ = "1.4.29"
 import os
 import re
 import threading
@@ -44,6 +45,10 @@ from core.core_cursor import (
 from core.core_progress_wait import wait_after_progress_done
 from core.csv_tool_progress_ui import enrich_progress_req_dict
 from core import core_cst as cst
+from svc.svc_csv_ld import (  # noqa: E402
+    _capture_book_attach_keys,
+    _resolve_book_and_sheet,
+)
 
 try:
     from core import core_xlc as xlc
@@ -352,6 +357,72 @@ def _shutdown_flag_exists() -> bool:
         return False
 
 
+def _progress_write_merge_sheet_error(progress_path: Path, sheet_id: str) -> None:
+    """COM 切れ等で結合先シートを解決できないとき。"""
+    detail = (
+        "対象シートに接続できませんでした。\n"
+        "Excel を前面にしたうえで、もう一度 CSV 結合を実行してください。"
+    )
+    if sheet_id:
+        detail += f"\n（GUID={sheet_id}）"
+    _progress_write_monotonic(
+        progress_path,
+        {
+            "status": "ERROR",
+            "phase": "CSV結合を開始できません",
+            "msg": detail,
+            "detail": detail,
+            "pct": 0,
+        },
+    )
+
+
+def _resolve_merge_workbook_sheet(
+    sheet_guid: str,
+    parent_hwnd: int,
+    attach_keys: tuple[int, str, str] | None,
+    workbook_name: str,
+) -> tuple[Any | None, Any | None]:
+    """結合 UI 待ち後に HWND 固定で Workbook/Sheet を再解決する。"""
+    sid = str(sheet_guid or "").strip()
+    ak = attach_keys or (0, "", "")
+    if sid:
+        wb, sht = _resolve_book_and_sheet(
+            None,
+            sid,
+            parent_hwnd,
+            attach_keys=ak,
+        )
+        if wb is not None and sht is not None:
+            logger.info(
+                "[CSV_MG] phase=sheet_resolved sheet_id=%s hwnd=%s",
+                sid,
+                int(parent_hwnd or ak[0] or 0),
+            )
+        return wb, sht
+
+    try:
+        from svc.svc_server import _attach_book
+
+        hwnd = int(parent_hwnd or ak[0] or 0)
+        wb = _attach_book(
+            excel_hwnd=hwnd,
+            book_fullname=str(ak[1] or ""),
+            book_name=str(ak[2] or workbook_name or ""),
+        )
+        sht = wb.sheets.active if wb is not None else None
+        if wb is not None and sht is not None:
+            logger.info("[CSV_MG] phase=sheet_resolved_active hwnd=%s", hwnd)
+        return wb, sht
+    except Exception as ex:
+        logger.warning(
+            "[CSV_MG] workbook attach failed hwnd=%s ex=%r",
+            int(parent_hwnd or ak[0] or 0),
+            ex,
+        )
+        return None, None
+
+
 def _watch_result(
     result_path: str,
     workbook_name: str,
@@ -359,6 +430,7 @@ def _watch_result(
     t_enter0: float = 0.0,
     *,
     parent_hwnd: int = 0,
+    attach_keys: tuple[int, str, str] | None = None,
 ) -> None:
     """
     UI結果(res)監視（非同期）。
@@ -450,6 +522,7 @@ def _watch_result(
                     mode=mode,
                     parent_hwnd=parent_hwnd,
                     progress_closed_path=progress_closed_path,
+                    attach_keys=attach_keys,
                 )
             else:
                 logger.info(
@@ -531,6 +604,7 @@ def _merge_files_to_sheet(
     *,
     parent_hwnd: int = 0,
     progress_closed_path: Path | None = None,
+    attach_keys: tuple[int, str, str] | None = None,
 ) -> None:
     """指定されたCSV群を、指定シートの最終行へ追記する（pandas + xlwings）。
 
@@ -549,8 +623,6 @@ def _merge_files_to_sheet(
         pythoncom = None  # type: ignore
 
     try:
-        import xlwings as xw  # 事前に行数を確定（total_rows） + 完了ポップアップ用の明細（0行も含む）
-
         t_merge_exec0 = time.perf_counter()
         mode_key = (mode or "mode_append").strip().lower()
         if mode_key not in ("mode_append", "mode_replace", "mode_preview"):
@@ -617,20 +689,22 @@ def _merge_files_to_sheet(
                 },
             )
 
-        _phase("P3-0", step="xw_apps_active")
-        app = xw.apps.active
-        _phase("P3-1", step="select_workbook", workbook_name=workbook_name)
-        wb = app.books[workbook_name] if workbook_name else app.books.active
-
-        api_sheet = None
-        _phase("P3-4", step="guid_lookup_begin", sheet_guid=sheet_guid)
-        if xlc is not None and sheet_guid:
-            # api_sheet = xlc.find_sheet_by_guid(wb.api, sheet_guid)
-            api_sheet = xlc.find_sheet_by_guid(wb, sheet_guid)
-            _phase("P3-5", step="guid_lookup_done", found=int(api_sheet is not None))
-
-        _phase("P3-6", step="select_sheet", fallback=int(api_sheet is None))
-        sht = wb.sheets.active if api_sheet is None else api_sheet
+        _phase("P3-0", step="resolve_workbook_sheet")
+        wb, sht = _resolve_merge_workbook_sheet(
+            sheet_guid,
+            parent_hwnd,
+            attach_keys,
+            workbook_name,
+        )
+        if wb is None or sht is None:
+            logger.error(
+                "[CSV_MG] 結合先シート解決失敗 sheet_guid=%s hwnd=%s",
+                sheet_guid or "",
+                parent_hwnd,
+            )
+            if progress_path is not None:
+                _progress_write_merge_sheet_error(progress_path, str(sheet_guid or ""))
+            return
 
         # シートにデータがなければ1行目から、あれば最終データの次の行から
         _phase("P3-7", step="detect_last_row")
@@ -1079,6 +1153,7 @@ def merge_csv(book: Any, sheet_id: str = "") -> None:
         _phase("P2-3", step="ready_watch_start")
         th_ready.start()
 
+        attach_keys = _capture_book_attach_keys(book)
         wb_name = ""
         try:
             wb_name = str(getattr(book, "name", "") or getattr(book, "Name", ""))
@@ -1093,6 +1168,7 @@ def merge_csv(book: Any, sheet_id: str = "") -> None:
             str(sheet_id or ""),
             t_enter0,
             parent_hwnd=parent_hwnd,
+            attach_keys=attach_keys,
         )
         _phase("P2-5", step="result_watch_done")
         logger.info(

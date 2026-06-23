@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""core.excel_com_session（A+ COM セッション方針）の単体テスト。"""
+"""core.excel_com_session（B+ COM セッション方針）の単体テスト。"""
 from __future__ import annotations
 
 import svc.svc_server as svc_server
@@ -38,9 +38,9 @@ def test_is_com_session_error_detects_stale_and_rpc() -> None:
     assert ecs.is_com_session_error(RuntimeError("file not found")) is False
 
 
-def test_should_schedule_recycle_on_success_for_com_action() -> None:
+def test_should_not_schedule_recycle_on_success_for_com_action() -> None:
     assert (
-        ecs.should_schedule_com_recycle_after_handler("csv_ld", handler_ok=True) is True
+        ecs.should_schedule_com_recycle_after_handler("csv_ld", handler_ok=True) is False
     )
     assert (
         ecs.should_schedule_com_recycle_after_handler(
@@ -68,15 +68,9 @@ def test_should_schedule_recycle_on_com_error() -> None:
     )
 
 
-def test_prepare_com_session_delegates_to_svc_host(monkeypatch) -> None:
-    called: list[int] = []
-
-    monkeypatch.setattr(
-        "svc.svc_host.restart_svc_server_for_com_if_needed",
-        lambda hwnd: called.append(hwnd) or True,
-    )
-    assert ecs.prepare_com_session_before_request(12345) is True
-    assert called == [12345]
+def test_prepare_com_session_is_noop() -> None:
+    assert ecs.prepare_com_session_before_request(12345) is False
+    assert ecs.prepare_com_session_before_request(0) is False
 
 
 def test_record_and_read_com_session_hwnd(tmp_path, monkeypatch) -> None:

@@ -61,6 +61,11 @@ from core.core_progress_wait import wait_after_progress_done  # noqa: E402
 from svc.data_agg_path_norm import normalize_source_path, path_is_under_directory  # noqa: E402
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_cancel import DataAggCancelled  # noqa: E402
+from svc.data_agg_extract_limit import (  # noqa: E402
+    clear_extract_truncation_records,
+    enforce_extract_truncation_policy,
+    take_extract_truncation_records,
+)
 from svc.data_agg_value_post import _coerce_cell_scalar_to_full_text  # noqa: E402
 from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
 
@@ -1188,10 +1193,81 @@ def _merged_dict_rows_to_table_rows(
     return out
 
 
+def _table_assembly_chunk_size() -> int:
+    """一覧組立のチャンク行数。DATA_AGG_TABLE_ASSEMBLY_CHUNK_SIZE で上書き可（下限 100）。"""
+    import os
+
+    raw = os.environ.get("DATA_AGG_TABLE_ASSEMBLY_CHUNK_SIZE", "").strip()
+    if raw:
+        try:
+            return max(100, int(raw))
+        except ValueError:
+            pass
+    return 2000
+
+
+def _append_merged_rows_to_table_chunked(
+    table_rows: list[list[Any]],
+    merged_rows: Sequence[dict[str, Any]],
+    headers: list[str],
+    *,
+    max_table_rows: Optional[int] = None,
+    row_skip: Optional[Callable[[dict[str, Any]], bool]] = None,
+    chunk_size: Optional[int] = None,
+    progress_detail: Optional[Callable[[int, int], str]] = None,
+    progress_ph: Optional[Callable[[str], None]] = None,
+    cancel_poll: Optional[Callable[..., None]] = None,
+    iteration_contexts_out: Optional[list[dict[str, Any]]] = None,
+    iteration_context_for_row: Optional[
+        Callable[[dict[str, Any], int], dict[str, Any]]
+    ] = None,
+) -> bool:
+    """
+    merged_rows をチャンク単位で table_rows に追加する（行単位 progress ループを避ける）。
+    max_table_rows に達したら True。疎行フィルタ・iteration_contexts は従来ループと同順。
+    """
+    if not headers or not merged_rows:
+        return False
+    n_total = len(merged_rows)
+    step = chunk_size if chunk_size is not None else _table_assembly_chunk_size()
+    step = max(100, int(step))
+    capped = max_table_rows is not None and max_table_rows > 0
+    offset = 0
+    while offset < n_total:
+        if cancel_poll is not None:
+            cancel_poll(force=True)
+        if capped and len(table_rows) >= max_table_rows:
+            return True
+        end = min(offset + step, n_total)
+        chunk = merged_rows[offset:end]
+        kept: list[dict[str, Any]] = []
+        for iter_i, r in enumerate(chunk):
+            global_i = offset + iter_i
+            if capped and len(table_rows) + len(kept) >= max_table_rows:
+                break
+            if not isinstance(r, dict):
+                continue
+            if row_skip is not None and row_skip(r):
+                continue
+            kept.append(r)
+            if iteration_contexts_out is not None and iteration_context_for_row is not None:
+                iteration_contexts_out.append(iteration_context_for_row(r, global_i))
+        if kept:
+            table_rows.extend(_merged_dict_rows_to_table_rows(kept, headers))
+        if progress_ph is not None and progress_detail is not None and n_total > 0:
+            progress_ph(progress_detail(end, n_total))
+        if capped and len(table_rows) >= max_table_rows:
+            return True
+        if end >= n_total:
+            break
+        offset = end
+    return False
+
+
 def _join_cell_compare_norm(v: Any) -> str:
-    if v is None:
-        return ""
-    return _coerce_cell_scalar_to_full_text(v).strip()
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    return join_compare_display_key(v)
 
 
 def _row_satisfies_join_and(
@@ -1764,6 +1840,8 @@ def _apply_join_key_search_across_file_passes(
     _join_slice_prog_last: list[float] = [0.0]
     if progress_hook is not None and preview_master_mode:
         _join_prog_interval = 0.10
+    elif progress_hook is not None:
+        _join_prog_interval = 0.20
     elif preview_master_mode:
         _join_prog_interval = 0.25
     else:
@@ -1880,12 +1958,19 @@ def _apply_join_key_search_across_file_passes(
                 pass
         join_defs_item = _item_join_defs_list(jit)
         n_cross_applied = 0
-        for fp_info in file_passes:
+        n_fp = len(file_passes)
+        for fpi, fp_info in enumerate(file_passes, start=1):
             n_file_attempt += 1
             _poll_cancel()
             if not isinstance(fp_info, dict):
                 continue
             file_path = str(fp_info.get("file_path") or "")
+            fname = Path(file_path).name if file_path else "-"
+            _join_progress(
+                "ファイル %s/%s: %s" % (fpi, n_fp, fname),
+                file_index=fpi,
+                log=False,
+            )
             bundles = fp_info.get("bundles") or []
             if not _item_sources_pass_file(jit, file_path):
                 continue
@@ -1901,11 +1986,6 @@ def _apply_join_key_search_across_file_passes(
                 search_pool = side_list_ref or []
                 search_pool_len = len(search_pool)
                 n_cross_applied += 1
-                _join_progress(
-                    Path(file_path).name if file_path else "結合",
-                    file_index=max(progress_n_files, 1),
-                    log=False,
-                )
 
                 def _slice_progress(
                     k: int,
@@ -2942,6 +3022,120 @@ def filter_file_paths_for_master_preview(
     return filter_file_paths_by_item_file_patterns(file_paths, items)
 
 
+def _interleave_non_empty_lists(lists: Sequence[list[str]]) -> list[str]:
+    """各 tier の先頭からラウンドロビンで並べる（side / host を交互に走査）。"""
+    tiers = [list(t) for t in lists if t]
+    if not tiers:
+        return []
+    out: list[str] = []
+    idx = [0] * len(tiers)
+    while True:
+        any_added = False
+        for i, tier in enumerate(tiers):
+            if idx[i] < len(tier):
+                out.append(tier[idx[i]])
+                idx[i] += 1
+                any_added = True
+        if not any_added:
+            break
+    return out
+
+
+def _master_preview_path_tier(
+    file_path: str,
+    side_patterns: list[str],
+    host_patterns: list[str],
+    allow_patterns: list[str],
+) -> str:
+    fps = str(file_path or "")
+    if side_patterns and _file_path_matches_patterns(fps, side_patterns):
+        return "side"
+    if host_patterns and _file_path_matches_patterns(fps, host_patterns):
+        return "host"
+    if allow_patterns and _file_path_matches_patterns(fps, allow_patterns):
+        return "allow"
+    return "other"
+
+
+def reorder_paths_for_master_preview_join_priority(
+    paths: Sequence[str | Path],
+    items: list[dict[str, Any]],
+    headers: list[str],
+    debug_diag: dict[str, Any],
+) -> list[str]:
+    """
+    横断 join のマスタプレビュー: 結合必須ファイル（side / host / allowlist）を走査順の先頭へ。
+    案α — join 定義・allowlist から file_pattern を自動検出（シナリオ個別設定なし）。
+    """
+    mi = debug_diag.get("mi_idx")
+    if not isinstance(mi, int) or mi < 0 or mi >= len(items):
+        return [str(p) for p in paths]
+    host = items[mi]
+    if not isinstance(host, dict) or not _item_join_defs_list(host):
+        return [str(p) for p in paths]
+    if not _join_host_needs_cross_file_pool(host, items, headers):
+        return [str(p) for p in paths]
+
+    side_patterns = _join_comparison_side_file_patterns(host, items, headers)
+    host_patterns = _item_source_file_patterns(host)
+    allow_patterns: list[str] = []
+    allow = _master_preview_extract_allowset(debug_diag)
+    if allow:
+        for idx in sorted(allow):
+            if 0 <= idx < len(items) and isinstance(items[idx], dict):
+                for p in _item_source_file_patterns(items[idx]):
+                    if p not in allow_patterns:
+                        allow_patterns.append(p)
+
+    tier1: list[str] = []
+    tier2: list[str] = []
+    tier3: list[str] = []
+    tier4: list[str] = []
+    seen: set[str] = set()
+    for fp in paths:
+        fps = str(fp)
+        if fps in seen:
+            continue
+        seen.add(fps)
+        if side_patterns and _file_path_matches_patterns(fps, side_patterns):
+            tier1.append(fps)
+        elif host_patterns and _file_path_matches_patterns(fps, host_patterns):
+            tier2.append(fps)
+        elif allow_patterns and _file_path_matches_patterns(fps, allow_patterns):
+            tier3.append(fps)
+        else:
+            tier4.append(fps)
+    ordered = _interleave_non_empty_lists([tier1, tier2, tier3, tier4])
+    if isinstance(debug_diag, dict):
+        debug_diag["master_preview_priority_files"] = [
+            Path(p).name for p in _interleave_non_empty_lists([tier1[:1], tier2[:1]])
+        ]
+        debug_diag["master_preview_join_side_patterns"] = list(side_patterns)
+        debug_diag["master_preview_join_host_patterns"] = list(host_patterns)
+        debug_diag["master_preview_join_allow_patterns"] = list(allow_patterns)
+    return ordered
+
+
+def _master_preview_per_file_pool_cap(
+    pool_row_cap: int,
+    host_item: dict[str, Any],
+    items: list[dict[str, Any]],
+    headers: list[str],
+) -> int:
+    """横断 join プレビュー: 1 ファイルが pool cap を独占しないよう按分する。"""
+    if pool_row_cap <= 0:
+        return pool_row_cap
+    if not _join_host_needs_cross_file_pool(host_item, items, headers):
+        return pool_row_cap
+    n_slots = 0
+    if _join_comparison_side_file_patterns(host_item, items, headers):
+        n_slots += 1
+    if _item_source_file_patterns(host_item):
+        n_slots += 1
+    n_slots = max(2, n_slots)
+    return max(1, pool_row_cap // n_slots)
+
+
 @dataclass
 class _BatchFileExtractResult:
     bundles: list[dict[str, Any]]
@@ -3003,6 +3197,8 @@ def _batch_file_extract_and_merge(
     items_for_file = [it for it in items if _item_sources_pass_file(it, fp_str)]
     with extract_mod.xlsx_workbook_scope():
         extract_mod.precache_xlsx_workbook_sheets_for_items(file_path, items_for_file)
+        if str(file_path).lower().endswith(".csv"):
+            extract_mod.precache_csv_matrix_for_file(file_path)
         for i, it in enumerate(items):
             _poll()
             t_item0 = time.perf_counter()
@@ -3214,6 +3410,7 @@ def compute_batch_table_rows(
     item_ids_ordered = [str(it.get("id") or ("item_%s" % i)) for i, it in enumerate(items)]
     id_to_value_col = {item_ids_ordered[i]: headers[i] for i in range(len(items))}
     scenario_id = str(data.get("id") or "debug")
+    clear_extract_truncation_records()
     join_events_total = 0
     event_log_rows: list[list[Any]] = []
     table_rows: list[list[Any]] = []
@@ -3234,6 +3431,14 @@ def compute_batch_table_rows(
     n_paths_before = len(paths)
     if preview_master_mode and paths:
         paths = filter_file_paths_for_master_preview(paths, items)
+        if (
+            max_primary_rows is not None
+            and int(max_primary_rows) > 0
+            and isinstance(dd, dict)
+        ):
+            paths = reorder_paths_for_master_preview_join_priority(
+                paths, items, headers, dd
+            )
     elif (
         paths
         and probe_caller == "excel_batch_submit"
@@ -3279,6 +3484,11 @@ def compute_batch_table_rows(
         )
     n_files = len(paths)
     n_items = len(items)
+    master_pool_row_cap: Optional[int] = None
+    master_preview_truncated = False
+    master_per_file_pool_cap: Optional[int] = None
+    if preview_master_mode and max_primary_rows is not None and int(max_primary_rows) > 0:
+        master_pool_row_cap = int(max_primary_rows)
     _prog_hook_interval = (
         0.045 if probe_caller == "excel_batch_submit" else 0.08
     )
@@ -3317,6 +3527,39 @@ def compute_batch_table_rows(
     join_search_global_pool: list[dict[str, Any]] = []
     use_join_search_merge = _scenario_has_join_defs(items)
     if (
+        master_pool_row_cap is not None
+        and use_join_search_merge
+        and isinstance(dd, dict)
+    ):
+        mi_cap = dd.get("mi_idx")
+        if isinstance(mi_cap, int) and 0 <= mi_cap < len(items):
+            host_cap = items[mi_cap]
+            if isinstance(host_cap, dict):
+                master_per_file_pool_cap = _master_preview_per_file_pool_cap(
+                    master_pool_row_cap,
+                    host_cap,
+                    items,
+                    headers,
+                )
+    master_preview_side_patterns: list[str] = []
+    master_preview_host_patterns: list[str] = []
+    master_preview_allow_patterns: list[str] = []
+    master_pattern_pool_rows: dict[str, int] = {}
+    if (
+        master_pool_row_cap is not None
+        and use_join_search_merge
+        and isinstance(dd, dict)
+    ):
+        master_preview_side_patterns = list(
+            dd.get("master_preview_join_side_patterns") or []
+        )
+        master_preview_host_patterns = list(
+            dd.get("master_preview_join_host_patterns") or []
+        )
+        master_preview_allow_patterns = list(
+            dd.get("master_preview_join_allow_patterns") or []
+        )
+    if (
         preview_master_mode
         and use_join_search_merge
         and isinstance(dd, dict)
@@ -3335,6 +3578,11 @@ def compute_batch_table_rows(
                 )
             except Exception:
                 pass
+    if (
+        master_pool_row_cap is not None
+        and len(join_search_global_pool) > master_pool_row_cap
+    ):
+        del join_search_global_pool[master_pool_row_cap:]
     join_file_passes: list[dict[str, Any]] = []
 
     batch_timing = core_env.data_agg_batch_timing_enabled()
@@ -3351,6 +3599,7 @@ def compute_batch_table_rows(
     use_file_parallel = (
         file_parallel_workers > 1
         and not path_trace_on
+        and master_pool_row_cap is None
         and (
             not preview_master_mode
             or core_env.data_agg_master_parallel_extract_enabled()
@@ -3441,7 +3690,6 @@ def compute_batch_table_rows(
                 file_index=fi,
             )
         _extract_prog_t0 = 0.0
-        _tbl_prog_t0 = 0.0
         _bt0 = time.perf_counter() if timing_log else 0.0
         pf_t0 = time.perf_counter() if per_file_timing else 0.0
         pf_open_ms = 0
@@ -3512,6 +3760,21 @@ def compute_batch_table_rows(
             bundles = []
             with extract_mod.xlsx_workbook_scope():
                 extract_mod.precache_xlsx_workbook_sheets_for_items(file_path, items)
+                _csv_prog = (
+                    (lambda msg: _ph(4, msg, file_index=fi))
+                    if progress_hook is not None
+                    and str(file_path).lower().endswith(".csv")
+                    else None
+                )
+                if _csv_prog is not None:
+                    _csv_prog(
+                        "ファイル %s/%s: %s"
+                        % (fi, n_files, Path(str(file_path)).name)
+                    )
+                extract_mod.precache_csv_matrix_for_file(
+                    file_path,
+                    progress_hook=_csv_prog,
+                )
                 for i, it in enumerate(items):
                     _poll_cancel()
                     t_item0 = time.perf_counter()
@@ -3843,7 +4106,97 @@ def compute_batch_table_rows(
                 )
             )
         if use_join_search_merge:
-            join_search_global_pool.extend(merged_rows)
+            rows_to_add = merged_rows
+            if master_pool_row_cap is not None:
+                room = max(0, master_pool_row_cap - len(join_search_global_pool))
+                if room <= 0:
+                    if not master_preview_truncated:
+                        master_preview_truncated = True
+                        dd["master_preview_read_truncated"] = True
+                    break
+                file_limit = room
+                if master_per_file_pool_cap is not None:
+                    file_limit = min(file_limit, master_per_file_pool_cap)
+                if master_per_file_pool_cap is not None and (
+                    master_preview_side_patterns
+                    or master_preview_host_patterns
+                ):
+                    tier_key = _master_preview_path_tier(
+                        str(file_path),
+                        master_preview_side_patterns,
+                        master_preview_host_patterns,
+                        master_preview_allow_patterns,
+                    )
+                    if tier_key in ("side", "host", "allow"):
+                        pat_room = max(
+                            0,
+                            master_per_file_pool_cap
+                            - int(master_pattern_pool_rows.get(tier_key, 0)),
+                        )
+                        file_limit = min(file_limit, pat_room)
+                        if pat_room <= 0:
+                            if not master_preview_truncated:
+                                master_preview_truncated = True
+                                dd["master_preview_read_truncated"] = True
+                            _emit_per_file_timing()
+                            continue
+                if len(merged_rows) > file_limit:
+                    rows_to_add = merged_rows[:file_limit]
+                    if not master_preview_truncated:
+                        master_preview_truncated = True
+                        dd["master_preview_read_truncated"] = True
+                else:
+                    rows_to_add = merged_rows
+                if master_per_file_pool_cap is not None and (
+                    master_preview_side_patterns
+                    or master_preview_host_patterns
+                ):
+                    tier_key = _master_preview_path_tier(
+                        str(file_path),
+                        master_preview_side_patterns,
+                        master_preview_host_patterns,
+                        master_preview_allow_patterns,
+                    )
+                    if tier_key in ("side", "host", "allow"):
+                        master_pattern_pool_rows[tier_key] = int(
+                            master_pattern_pool_rows.get(tier_key, 0)
+                        ) + len(rows_to_add)
+            join_search_global_pool.extend(rows_to_add)
+            if (
+                master_pool_row_cap is not None
+                and len(join_search_global_pool) >= master_pool_row_cap
+            ):
+                if len(join_search_global_pool) > master_pool_row_cap:
+                    del join_search_global_pool[master_pool_row_cap:]
+                if isinstance(dd, dict):
+                    dd["master_preview_read_truncated"] = True
+                    dd["master_preview_pool_row_cap"] = master_pool_row_cap
+                    dd["master_preview_pool_rows"] = len(join_search_global_pool)
+                    dd["master_preview_files_processed"] = fi
+                    dd["master_preview_files_detected"] = n_files
+                    if master_pattern_pool_rows:
+                        dd["master_preview_pattern_pool_rows"] = dict(
+                            master_pattern_pool_rows
+                        )
+                try:
+                    _agg_diag.info(
+                        "[DATA_AGG_PROBE] master_preview_read_truncated "
+                        "cap=%s pool_rows=%s files_processed=%s files_detected=%s",
+                        master_pool_row_cap,
+                        len(join_search_global_pool),
+                        fi,
+                        n_files,
+                    )
+                except Exception:
+                    pass
+                _ph(
+                    6,
+                    "読込打ち切り（%s 行・%s/%s ファイル）"
+                    % (len(join_search_global_pool), fi, n_files),
+                    file_index=fi,
+                )
+                _emit_per_file_timing()
+                break
         _ph(
             6,
             "ファイル %s/%s: %s（結合待ち %s 行）"
@@ -3875,51 +4228,49 @@ def compute_batch_table_rows(
             def _sparse_skip_row(row: dict[str, Any]) -> bool:
                 return _batch_sparse_merged_row_noise(row, headers)
 
-            rows_for_table: list[dict[str, Any]] = []
-            for iter_i, r in enumerate(merged_rows):
-                if max_table_rows is not None and max_table_rows > 0 and (
-                    len(table_rows) + len(rows_for_table) >= max_table_rows
-                ):
-                    break
-                if not isinstance(r, dict):
-                    continue
-                if _apply_batch_sparse and _sparse_skip_row(r):
-                    continue
-                rows_for_table.append(r)
-                if iteration_contexts_out is not None:
-                    iteration_contexts_out.append(
-                        {
-                            "file_path": str(file_path),
-                            "iter_index": int(iter_i),
-                            "base_cell": None,
-                            "base_row": None,
-                            "base_col": None,
-                            "filter_snapshot": {
-                                "files": [str(file_path)],
-                                "count": 1,
-                            },
-                            "primary_value": r.get(headers[0]) if headers else None,
-                        }
-                    )
-                if progress_hook is not None and n_merged > 0:
-                    t_now = time.perf_counter()
-                    ri = iter_i + 1
-                    if _should_report_table_row_progress(
-                        ri,
-                        n_merged,
-                        t_now=t_now,
-                        t_last=_tbl_prog_t0,
-                        interval=_prog_hook_interval,
-                    ):
-                        _tbl_prog_t0 = t_now
-                        _ph(
-                            7,
-                            "一覧行 %s/%s（%s）"
-                            % (ri, n_merged, Path(str(file_path)).name),
-                            file_index=fi,
-                        )
-            if rows_for_table:
-                table_rows.extend(_merged_dict_rows_to_table_rows(rows_for_table, headers))
+            _table_prog_ph = (
+                (lambda msg: _ph(7, msg, file_index=fi))
+                if progress_hook is not None
+                else None
+            )
+            _table_prog_detail = (
+                (
+                    lambda ri, nt: "一覧行 %s/%s（%s）"
+                    % (ri, nt, Path(str(file_path)).name)
+                )
+                if progress_hook is not None
+                else None
+            )
+            _iter_ctx_fn = (
+                (
+                    lambda r, gi: {
+                        "file_path": str(file_path),
+                        "iter_index": int(gi),
+                        "base_cell": None,
+                        "base_row": None,
+                        "base_col": None,
+                        "filter_snapshot": {
+                            "files": [str(file_path)],
+                            "count": 1,
+                        },
+                        "primary_value": r.get(headers[0]) if headers else None,
+                    }
+                )
+                if iteration_contexts_out is not None
+                else None
+            )
+            hit_table_cap = _append_merged_rows_to_table_chunked(
+                table_rows,
+                merged_rows,
+                headers,
+                max_table_rows=max_table_rows,
+                row_skip=_sparse_skip_row if _apply_batch_sparse else None,
+                progress_detail=_table_prog_detail,
+                progress_ph=_table_prog_ph,
+                cancel_poll=_poll_cancel if cancel_check is not None else None,
+                iteration_contexts_out=iteration_contexts_out,
+                iteration_context_for_row=_iter_ctx_fn,
+            )
             if diag_on:
                 try:
                     sh_idx = headers.index("出荷番号")
@@ -3960,7 +4311,9 @@ def compute_batch_table_rows(
                     )
                 except Exception:
                     pass
-            if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
+            if max_table_rows is not None and max_table_rows > 0 and (
+                hit_table_cap or len(table_rows) >= max_table_rows
+            ):
                 if timing_log:
                     bt_table += time.perf_counter() - _bt0
                 if per_file_timing:
@@ -4043,6 +4396,12 @@ def compute_batch_table_rows(
         _emit_per_file_timing()
         if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
             break
+    enforce_extract_truncation_policy(
+        take_extract_truncation_records(),
+        scenario_id=scenario_id,
+        probe_caller=probe_caller or "",
+        preview_master_mode=preview_master_mode,
+    )
     if use_join_search_merge and join_search_global_pool:
         _join_t0 = time.perf_counter()
         _poll_cancel(force=True)
@@ -4208,48 +4567,50 @@ def compute_batch_table_rows(
                 "結果一覧へ反映中（%s 行）" % n_out,
                 file_index=max(n_files, 1),
             )
-        _tbl_prog_t0 = 0.0
-        rows_for_table: list[dict[str, Any]] = []
-        sparse_skip = (
-            _batch_sparse_merged_row_noise if _apply_batch_sparse else None
+        _join_pool_prog_ph = (
+            (lambda msg: _ph(7, msg, file_index=max(n_files, 1)))
+            if progress_hook is not None
+            else None
         )
-        for iter_i, r in enumerate(output_rows):
-            if max_table_rows is not None and max_table_rows > 0 and (
-                len(table_rows) + len(rows_for_table) >= max_table_rows
-            ):
-                break
-            if sparse_skip is not None and sparse_skip(r, headers):
-                continue
-            rows_for_table.append(r)
-            if iteration_contexts_out is not None:
-                iteration_contexts_out.append(
-                    {
-                        "file_path": str(r.get("__file_path") or ""),
-                        "iter_index": _row_iter_index(r),
-                        "base_cell": None,
-                        "base_row": None,
-                        "base_col": None,
-                        "filter_snapshot": {
-                            "files": [str(r.get("__file_path") or "")],
-                            "count": 1,
-                        },
-                        "primary_value": r.get(headers[0]) if headers else None,
-                    }
-                )
-            if progress_hook is not None and n_out > 0:
-                t_now = time.perf_counter()
-                ri = iter_i + 1
-                if _should_report_table_row_progress(
-                    ri,
-                    n_out,
-                    t_now=t_now,
-                    t_last=_tbl_prog_t0,
-                    interval=_prog_hook_interval,
-                ):
-                    _tbl_prog_t0 = t_now
-                    _ph(7, "行 %s/%s" % (ri, n_out), file_index=max(n_files, 1))
-        if rows_for_table:
-            table_rows.extend(_merged_dict_rows_to_table_rows(rows_for_table, headers))
+        _join_pool_prog_detail = (
+            (lambda ri, nt: "行 %s/%s" % (ri, nt))
+            if progress_hook is not None
+            else None
+        )
+        _join_pool_iter_ctx = (
+            (
+                lambda r, _gi: {
+                    "file_path": str(r.get("__file_path") or ""),
+                    "iter_index": _row_iter_index(r),
+                    "base_cell": None,
+                    "base_row": None,
+                    "base_col": None,
+                    "filter_snapshot": {
+                        "files": [str(r.get("__file_path") or "")],
+                        "count": 1,
+                    },
+                    "primary_value": r.get(headers[0]) if headers else None,
+                }
+            )
+            if iteration_contexts_out is not None
+            else None
+        )
+        _append_merged_rows_to_table_chunked(
+            table_rows,
+            output_rows,
+            headers,
+            max_table_rows=max_table_rows,
+            row_skip=(
+                (lambda r: _batch_sparse_merged_row_noise(r, headers))
+                if _apply_batch_sparse
+                else None
+            ),
+            progress_detail=_join_pool_prog_detail,
+            progress_ph=_join_pool_prog_ph,
+            cancel_poll=_poll_cancel if cancel_check is not None else None,
+            iteration_contexts_out=iteration_contexts_out,
+            iteration_context_for_row=_join_pool_iter_ctx,
+        )
         if timing_log:
             bt_table += time.perf_counter() - _tbl_t0
     if preview_master_mode and isinstance(dd, dict):
@@ -4801,36 +5162,13 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     prog_last_pct = [2]
     cfg_msgs = (_get_config().get("MESSAGES") or {})
 
-    def _prog_write(**kw: Any) -> None:
-        if write_pickle is None:
-            return
-        prog_seq[0] += 1
-        phase = str(kw.get("phase", "") or "")
-        d: dict[str, Any] = {
-            "status": str(kw.get("status", "RUN")),
-            "seq": prog_seq[0],
-            "pct": int(max(0, min(100, int(kw.get("pct", 5) or 5)))),
-            "phase": phase,
-            "phase_i": int(kw.get("phase_i", 0) or 0),
-            "phase_total": 4,
-            "msg": phase,
-            "show_done_dialog": False,
-        }
-        if kw.get("done") is not None:
-            d["done"] = kw["done"]
-        if kw.get("total") is not None:
-            d["total"] = kw["total"]
-        cf = str(kw.get("current_file", "") or "").strip()
-        if cf:
-            d["current_file"] = cf
-        dt = str(kw.get("detail", "") or "").strip()
-        if dt:
-            d["detail"] = dt
-        try:
-            prog_path.parent.mkdir(parents=True, exist_ok=True)
-            write_pickle(prog_path, d)
-        except Exception:
-            pass
+    from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
+
+    _prog_write = make_throttled_progress_writer(
+        prog_path,
+        write_pickle,
+        min_interval_sec=0.35,
+    )
 
     def _prog_done() -> None:
         prog_last_pct[0] = max(prog_last_pct[0], 99)
@@ -5195,7 +5533,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     prog_last_pct[0] = max(prog_last_pct[0], 93)
     _prog_write(
         pct=93,
-        phase="マスターへ書き込み",
+        phase=str(cfg_msgs.get("PHASE_EXCEL_SPREAD") or "Excelへ展開"),
         phase_i=4,
         done=93,
         total=100,
@@ -5738,7 +6076,14 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
         except Exception:
             pass
 
-    _prog_write(pct=93, phase="マスターへ書き込み", phase_i=4)
+    _prog_write(
+        pct=93,
+        phase=str(
+            (_get_config().get("MESSAGES") or {}).get("PHASE_EXCEL_SPREAD")
+            or "Excelへ展開"
+        ),
+        phase_i=4,
+    )
     t_write = time.perf_counter()
     try:
         from core import core_xlc  # noqa: E402

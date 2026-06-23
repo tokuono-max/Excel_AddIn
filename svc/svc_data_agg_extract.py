@@ -4,12 +4,15 @@ Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
 Updated: 2026-03-18
-Version: 0.1.9
+Version: 0.1.11
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.12 (2026-06-23) CSV Polars DF キャッシュ、link batch postprocess、スコープ内 legacy 禁止。
+  - 0.1.11 (2026-06-23) CSV 主キー縦/横反復の行列一括読取、Polars rows() 化、path_key キャッシュ。
+  - 0.1.10 (2026-06-23) CSV 行列キャッシュ（xlsx_workbook_scope 内必須）と link/join 列一括読取 fast path。
   - 0.1.9 (2026-06-03) .xlsm を OpenXML Excel（.xlsx と同経路）として読取。is_openxml_excel_suffix ヘルパ追加。
   - 0.1.8 (2026-05-29) Phase B: 大量反復シートの事前 materialize、反復読取の行列経路、join バッチ走査の行列化。
   - 0.1.6 (2026-04-07) extract_item_values: sources 空はファイル名ではなく主値 [""]（未設定列を一括出力で空にする）。
@@ -41,17 +44,27 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_logger  # noqa: E402
+from svc.data_agg_extract_limit import (  # noqa: E402
+    record_extract_truncation_if_needed,
+    skip_extract_truncation_peek,
+    resolve_extract_repeat_limit,
+)
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_value_post import (  # noqa: E402
     postprocess_cell_primary,
     postprocess_cell_primary_batch,
     postprocess_link_rule_value,
+    postprocess_link_rule_value_batch,
     postprocess_metadata_like_primary,
     postprocess_name_extract_primary,
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.9"
+__version__ = "0.1.12"
+
+
+class DataAggCsvReadError(Exception):
+    """バッチスコープ内で CSV 行列化に失敗した場合（ファイル再読込にはフォールバックしない）。"""
 
 _OPENXML_EXCEL_SUFFIXES = frozenset({".xlsx", ".xlsm"})
 
@@ -121,7 +134,13 @@ def xlsx_workbook_scope() -> Iterator[None]:
     if stack is None:
         stack = []
         _tls_wb_scope.stack = stack
-    frame: dict[str, Any] = {"wbs": {}, "sheet_mats": {}, "sheet_hits": {}}
+    frame: dict[str, Any] = {
+        "wbs": {},
+        "sheet_mats": {},
+        "sheet_hits": {},
+        "csv_mats": {},
+        "csv_dfs": {},
+    }
     stack.append(frame)
     try:
         yield
@@ -241,6 +260,33 @@ def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -
     if "含まない" in rule or rule.lower() in ("exclude", "not_contains"):
         return pat_l not in stem_l
     return pat_l in stem_l
+
+
+def file_paths_for_source_extract(
+    file_paths: Sequence[str | Path],
+    src: dict[str, Any],
+) -> list[str]:
+    """
+    当該ソースの file_pattern / name_extract 規則に合うパスのみ返す（入力順・重複除去）。
+
+    extract_item_bundle と同じ source_passes_file_name_filter / name_extract 順序を
+    マスタ列抽出の走査前に適用し、無関係なファイルを開かない。
+    file_pattern が空の cell ソースはフィルタなし（全候補）。
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for fp in file_paths:
+        fps = str(fp).strip()
+        if not fps or fps in seen:
+            continue
+        seen.add(fps)
+        ordered.append(fps)
+    if not ordered:
+        return []
+    typ = str(src.get("type") or "cell").strip().lower()
+    if typ in ("metadata", "meta", "filename", "name_extract"):
+        return list(name_extract_hit_files_ordered(ordered, src))
+    return [fp for fp in ordered if source_passes_file_name_filter(fp, src)]
 
 
 # メタデータのソース種別（後方互換用）
@@ -566,7 +612,47 @@ def extract_cells_repeat(
     p = Path(file_path).resolve()
     if not p.is_file():
         return []
+    cap = resolve_extract_repeat_limit(
+        repeat_max=repeat_max,
+        repeat_until_empty=repeat_until_empty,
+    )
     if p.suffix.lower() == ".csv":
+        col, row = _parse_cell_ref(cell_ref)
+        if col is None or row is None:
+            return []
+        if _xlsx_workbook_cache_top() is not None:
+            series = _read_repeated_series_from_csv_cached(
+                p,
+                base_col=col,
+                base_row=row,
+                row_step=1 if repeat_direction == "vertical" else 0,
+                col_step=1 if repeat_direction == "horizontal" else 0,
+                limit=cap,
+                repeat_until_empty=repeat_until_empty,
+                cancel_check=cancel_check,
+            )
+            if series is not None:
+                return series
+        mat = _get_csv_matrix(p, create=False)
+        if mat is None and _xlsx_workbook_cache_top() is not None:
+            mat = _get_csv_matrix(p, create=True)
+        if mat is not None:
+            dc = 1 if repeat_direction == "horizontal" else 0
+            dr = 1 if repeat_direction == "vertical" else 0
+            out_mat: list[Any] = []
+            c, r = col, row
+            for _ in range(cap):
+                if r < 0 or c < 0:
+                    break
+                v = _matrix_cell_value(mat, c, r)
+                if repeat_until_empty and (v is None or v == ""):
+                    break
+                out_mat.append(v)
+                c += dc
+                r += dr
+                if len(out_mat) >= cap:
+                    break
+            return out_mat
         pl_mod = _get_polars()
         if pl_mod is not None:
             try:
@@ -577,7 +663,7 @@ def extract_cells_repeat(
                 out: list[Any] = []
                 dc = 1 if repeat_direction == "horizontal" else 0
                 dr = 1 if repeat_direction == "vertical" else 0
-                for _ in range(repeat_max or 9999):
+                for _ in range(cap):
                     if row >= df.height or col >= df.width or row < 0 or col < 0:
                         break
                     v = df.row(row)[col]
@@ -586,7 +672,7 @@ def extract_cells_repeat(
                     out.append(v)
                     col += dc
                     row += dr
-                    if repeat_max and len(out) >= repeat_max:
+                    if len(out) >= cap:
                         break
                 return out
             except Exception:
@@ -597,7 +683,7 @@ def extract_cells_repeat(
     results: list[Any] = []
     delta_col = 1 if repeat_direction == "horizontal" else 0
     delta_row = 1 if repeat_direction == "vertical" else 0
-    for _ in range(repeat_max or 9999):
+    for _ in range(cap):
         _poll_cancel_check(cancel_check)
         cr = _col_row_to_cell_ref(col, row)
         v = extract_cell(p, sheet_name, cr)
@@ -606,7 +692,7 @@ def extract_cells_repeat(
         results.append(v)
         col += delta_col
         row += delta_row
-        if repeat_max and len(results) >= repeat_max:
+        if len(results) >= cap:
             break
     return results
 
@@ -642,15 +728,363 @@ def extract_cell(
     return None
 
 
-def _get_csv_cell(path: Path, cell_ref: str) -> Any:
-    """CSV ファイルから A1 形式のセル参照で値を取得する。"""
+def _csv_path_key(path: Path) -> str:
+    """スコープ内では resolve 結果を frame にキャッシュ（大量セル参照時の resolve コスト削減）。"""
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return str(path.resolve())
+    cache: dict[str, str] = frame.setdefault("csv_path_key_cache", {})
+    raw = str(path)
+    hit = cache.get(raw)
+    if hit is not None:
+        return hit
+    resolved = str(path.resolve())
+    cache[raw] = resolved
+    return resolved
+
+
+def _load_csv_polars_df(path: Path) -> Any | None:
+    """Polars で CSV を1回読む（legacy 互換: utf8-lossy, infer_schema_length=0）。"""
+    pl_mod = _get_polars()
+    if pl_mod is None:
+        return None
+    try:
+        return pl_mod.read_csv(
+            str(path),
+            has_header=False,
+            encoding="utf8-lossy",
+            infer_schema_length=0,
+            try_parse_dates=False,
+        )
+    except Exception as e:
+        logger.debug("[DATA_AGG_EXTRACT] CSV Polars 読込エラー %s: %s", path, e)
+        return None
+
+
+def _load_csv_reader_matrix(path: Path) -> list[list[Any]]:
+    """Polars 不可時: csv.reader（utf-8-sig）。"""
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return [list(row) for row in csv.reader(f)]
+    except Exception as e:
+        logger.debug("[DATA_AGG_EXTRACT] CSV 読込エラー %s: %s", path, e)
+        return []
+
+
+def _materialize_csv_matrix(path: Path) -> list[list[Any]]:
+    """
+    CSV を1回だけ読み、行×列の行列にする（パリティ検証・legacy 参照用）。
+    バッチ hot path では Polars DF キャッシュを使い list 化しない。
+    """
+    df = _load_csv_polars_df(path)
+    if df is not None:
+        return [list(row) for row in df.rows()]
+    return _load_csv_reader_matrix(path)
+
+
+def _df_cell_value(df: Any, col: int, row: int) -> Any:
+    if col < 0 or row < 0 or row >= df.height or col >= df.width:
+        return None
+    return df.row(row)[col]
+
+
+def _df_column_slice(df: Any, col: int, start_row: int, length: int) -> list[Any]:
+    """列 col の start_row から最大 length 件（Polars slice）。"""
+    if col < 0 or col >= df.width or start_row < 0 or length <= 0:
+        return []
+    if start_row >= df.height:
+        return []
+    n = min(length, df.height - start_row)
+    if n <= 0:
+        return []
+    return df[df.columns[col]].slice(start_row, n).to_list()
+
+
+def _ensure_csv_cache(path: Path) -> None:
+    """xlsx_workbook_scope 内: CSV を DF（優先）または行列（Polars 不可時）に1回だけ載せる。"""
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return
+    if path.suffix.lower() != ".csv":
+        return
+    path_key = _csv_path_key(path)
+    dfs: dict[str, Any] = frame.setdefault("csv_dfs", {})
+    mats: dict[str, list[list[Any]]] = frame.setdefault("csv_mats", {})
+    if path_key in dfs or path_key in mats:
+        return
+    try:
+        from svc.data_agg_cancel import poll_active_cancel  # noqa: WPS433
+
+        poll_active_cancel(force=True)
+    except Exception:
+        pass
+    df = _load_csv_polars_df(path)
+    if df is not None:
+        dfs[path_key] = df
+        return
+    mat = _load_csv_reader_matrix(path)
+    if mat:
+        mats[path_key] = mat
+
+
+def _get_csv_df(path: Path, *, create: bool = True) -> Any | None:
+    """スコープ内 Polars DF。create=True で未キャッシュなら _ensure_csv_cache。"""
+    frame = _xlsx_workbook_cache_top()
+    if frame is None or path.suffix.lower() != ".csv":
+        return None
+    path_key = _csv_path_key(path)
+    dfs: dict[str, Any] = frame.setdefault("csv_dfs", {})
+    hit = dfs.get(path_key)
+    if hit is not None or not create:
+        return hit
+    _ensure_csv_cache(path)
+    return dfs.get(path_key)
+
+
+def _get_csv_matrix(path: Path, *, create: bool = True) -> Optional[list[list[Any]]]:
+    """スコープ内 csv.reader 行列（Polars 不可時のみ）。hot path では DF を優先。"""
+    frame = _xlsx_workbook_cache_top()
+    if frame is None or path.suffix.lower() != ".csv":
+        return None
+    path_key = _csv_path_key(path)
+    mats: dict[str, list[list[Any]]] = frame.setdefault("csv_mats", {})
+    mat = mats.get(path_key)
+    if mat is not None or not create:
+        return mat if mat else None
+    _ensure_csv_cache(path)
+    return mats.get(path_key)
+
+
+def _csv_cell_value_rc(path: Path, col: int, row: int) -> Any:
+    """キャッシュ済み CSV から (col,row) 0始まりで1セル。"""
+    df = _get_csv_df(path, create=False)
+    if df is not None:
+        return _df_cell_value(df, col, row)
+    mat = _get_csv_matrix(path, create=False)
+    if mat is not None:
+        return _matrix_cell_value(mat, col, row)
+    return None
+
+
+def _read_repeated_series_from_df(
+    df: Any,
+    *,
+    base_col: int,
+    base_row: int,
+    row_step: int,
+    col_step: int,
+    limit: int,
+    repeat_until_empty: bool,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> list[Any]:
+    """Polars DF から反復系列（縦 step=1 は列 slice 高速経路）。"""
+    if limit <= 0:
+        return []
+    if row_step > 0 and col_step == 0 and row_step == 1:
+        raw = _df_column_slice(df, base_col, base_row, limit)
+        if not repeat_until_empty:
+            return raw[:limit]
+        out: list[Any] = []
+        for v in raw:
+            if v is None or v == "":
+                break
+            out.append(v)
+            if len(out) >= limit:
+                break
+        return out
+    vals: list[Any] = []
+    if row_step == 0 and col_step == 0:
+        v0 = _df_cell_value(df, base_col, base_row)
+        if repeat_until_empty and (v0 is None or v0 == ""):
+            return []
+        return [v0] * limit
+    n = 0
+    while len(vals) < limit:
+        if n % 64 == 0:
+            _poll_cancel_check(cancel_check)
+        if row_step > 0 and col_step == 0:
+            v = _df_cell_value(df, base_col, base_row + row_step * n)
+        elif row_step == 0 and col_step > 0:
+            v = _df_cell_value(df, base_col + col_step * n, base_row)
+        else:
+            break
+        if repeat_until_empty and (v is None or v == ""):
+            break
+        vals.append(v)
+        n += 1
+    return vals
+
+
+def _read_repeated_series_from_csv_cached(
+    path: Path,
+    *,
+    base_col: int,
+    base_row: int,
+    row_step: int,
+    col_step: int,
+    limit: int,
+    repeat_until_empty: bool,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> Optional[list[Any]]:
+    """スコープ内 CSV キャッシュから反復系列。"""
+    df = _get_csv_df(path, create=True)
+    if df is not None:
+        return _read_repeated_series_from_df(
+            df,
+            base_col=base_col,
+            base_row=base_row,
+            row_step=row_step,
+            col_step=col_step,
+            limit=limit,
+            repeat_until_empty=repeat_until_empty,
+            cancel_check=cancel_check,
+        )
+    mat = _get_csv_matrix(path, create=True)
+    if mat is not None:
+        return _read_repeated_series_from_matrix(
+            mat,
+            base_col=base_col,
+            base_row=base_row,
+            row_step=row_step,
+            col_step=col_step,
+            limit=limit,
+            repeat_until_empty=repeat_until_empty,
+            cancel_check=cancel_check,
+        )
+    return None
+
+
+def _matrix_cell_value_at_ref(mat: list[list[Any]], cell_ref: str) -> Any:
+    col, row = _parse_cell_ref(cell_ref)
+    if col is None or row is None:
+        return None
+    return _matrix_cell_value(mat, col, row)
+
+
+def _peek_repeat_cell_from_csv(
+    path: Path,
+    *,
+    base_col: int,
+    base_row: int,
+    row_off: int,
+    col_off: int,
+    index: int,
+) -> Any:
+    col_n = base_col + (col_off * index)
+    row_n = base_row + (row_off * index)
+    if _xlsx_workbook_cache_top() is not None:
+        return _csv_cell_value_rc(path, col_n, row_n)
+    return extract_cell(path, cell_ref=_col_row_to_cell_ref(col_n, row_n))
+
+
+def _peek_repeat_cell_from_matrix(
+    mat: list[list[Any]],
+    *,
+    base_col: int,
+    base_row: int,
+    row_off: int,
+    col_off: int,
+    index: int,
+) -> Any:
+    """反復系列 index 番目の peek（打ち切り検知用）。"""
+    return _matrix_cell_value(mat, base_col + (col_off * index), base_row + (row_off * index))
+
+
+def _finish_repeated_cell_vals(
+    *,
+    vals: list[Any],
+    results: list[Any],
+    cell_start: int,
+    cell_source_spans_out: Optional[dict[int, tuple[int, int]]],
+    si: int,
+    limit: int,
+    repeat_until_empty: bool,
+    file_path: str | Path,
+    item_label: str,
+    item_id: Optional[str],
+    positions: dict[str, tuple[int, int]],
+    cell_ref: str,
+    row_off: int,
+    col_off: int,
+    ui_blk: dict[str, Any] | None,
+    src: dict[str, Any],
+    max_primary_rows: Optional[int],
+    peek_v: Any,
+    skip_trunc_peek: bool = False,
+) -> None:
+    """縦/横反復の主値抽出後処理（xlsx / CSV 共通）。"""
+    if vals:
+        n_last = len(vals) - 1
+        cell_ref_last = _resolve_cell_with_offset(cell_ref, row_off * n_last, col_off * n_last)
+        c0, r0 = _parse_cell_ref(cell_ref_last)
+        if c0 is not None and r0 is not None and item_id:
+            positions[item_id] = (c0, r0)
+        if not skip_trunc_peek:
+            record_extract_truncation_if_needed(
+                vals,
+                limit=limit,
+                peek_next=peek_v,
+                file_path=file_path,
+                item_label=item_label,
+                source_index=si,
+            )
+    _append_postprocessed_cell_vals(
+        results,
+        vals,
+        ui_blk,
+        src,
+        max_primary_rows=max_primary_rows,
+    )
+    if cell_source_spans_out is not None:
+        cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
+
+
+def precache_csv_matrix_for_file(
+    file_path: str | Path,
+    *,
+    progress_hook: Optional[Callable[[str], None]] = None,
+) -> None:
+    """xlsx_workbook_scope 内で CSV を先にキャッシュ（Polars DF 優先）。"""
+    if _xlsx_workbook_cache_top() is None:
+        return
+    p_abs = Path(file_path).resolve()
+    if p_abs.suffix.lower() != ".csv":
+        return
+    if progress_hook is not None:
+        try:
+            progress_hook("CSV読込中: %s" % p_abs.name)
+        except Exception:
+            pass
+    _ensure_csv_cache(p_abs)
+    path_key = _csv_path_key(p_abs)
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return
+    ok = path_key in frame.get("csv_dfs", {}) or path_key in frame.get("csv_mats", {})
+    if not ok and p_abs.is_file():
+        raise DataAggCsvReadError("CSV キャッシュに失敗しました: %s" % p_abs)
+
+
+def _csv_cache_loaded(path: Path) -> bool:
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return False
+    path_key = _csv_path_key(path)
+    return path_key in frame.get("csv_dfs", {}) or path_key in frame.get("csv_mats", {})
+
+
+def _get_csv_cell_legacy_file_read(path: Path, cell_ref: str) -> Any:
+    """スコープ外の従来経路: セル参照のたびにファイルを読む（互換・テスト用）。"""
+    if _xlsx_workbook_cache_top() is not None:
+        raise DataAggCsvReadError(
+            "バッチスコープ内で CSV ファイル再読込（legacy）は禁止: %s" % path
+        )
     col, row = _parse_cell_ref(cell_ref)
     if col is None or row is None:
         return None
     try:
-        pl_mod = _get_polars()
-        if pl_mod is not None:
-            df = pl_mod.read_csv(str(path), has_header=False, encoding="utf8-lossy")
+        df = _load_csv_polars_df(path)
+        if df is not None:
             if 0 <= row < df.height and 0 <= col < df.width:
                 return df.row(row)[col]
         with path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -660,6 +1094,21 @@ def _get_csv_cell(path: Path, cell_ref: str) -> Any:
     except Exception as e:
         logger.debug("[DATA_AGG_EXTRACT] CSV 読込エラー %s: %s", path, e)
     return None
+
+
+def _get_csv_cell(path: Path, cell_ref: str) -> Any:
+    """CSV ファイルから A1 形式のセル参照で値を取得する。"""
+    if _xlsx_workbook_cache_top() is not None:
+        _ensure_csv_cache(path)
+        if not _csv_cache_loaded(path) and path.is_file():
+            raise DataAggCsvReadError(
+                "CSV キャッシュ未取得（バッチ処理中）: %s" % path
+            )
+        col, row = _parse_cell_ref(cell_ref)
+        if col is None or row is None:
+            return None
+        return _csv_cell_value_rc(path, col, row)
+    return _get_csv_cell_legacy_file_read(path, cell_ref)
 
 
 def _col_row_to_cell_ref(col: int, row: int) -> str:
@@ -826,7 +1275,11 @@ def _collect_xlsx_sheets_for_precache(items: list[dict[str, Any]]) -> set[Option
                 repeat_max = int(src.get("repeat_max")) if src.get("repeat_max") is not None else None
             except (TypeError, ValueError):
                 repeat_max = None
-            limit = repeat_max if (repeat_max is not None and repeat_max > 0) else 9999
+            repeat_until_empty = bool(src.get("repeat_until_empty", True))
+            limit = resolve_extract_repeat_limit(
+                repeat_max=repeat_max,
+                repeat_until_empty=repeat_until_empty,
+            )
             if limit >= _SHEET_PRECACHE_REPEAT_MIN:
                 sheets.add(sheet_key)
     return sheets
@@ -1119,6 +1572,37 @@ def _xlsx_read_repeated_series_open_workbook(
     return vals
 
 
+def _read_cell_at_repeat_index(
+    *,
+    wb_ctx: Any,
+    wb_owned: bool,
+    file_path: str | Path,
+    sheet_name: Optional[str],
+    base_col: int,
+    base_row: int,
+    row_off: int,
+    col_off: int,
+    index: int,
+) -> Any:
+    """反復系列の index 番目（0 始まり）のセル値を読む（打ち切り peek 用）。"""
+    col_n = base_col + (col_off * index)
+    row_n = base_row + (row_off * index)
+    cell_ref_n = _col_row_to_cell_ref(col_n, row_n)
+    p_abs = Path(file_path).resolve()
+    if wb_ctx is None and p_abs.suffix.lower() == ".csv":
+        if _xlsx_workbook_cache_top() is not None:
+            return _csv_cell_value_rc(p_abs, col_n, row_n)
+    if wb_ctx is not None:
+        return _xlsx_cell_value_open_workbook(
+            wb_ctx,
+            sheet_name,
+            cell_ref_n,
+            path=p_abs if not wb_owned else None,
+            ephemeral_sheet_cache=wb_owned,
+        )
+    return extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref_n)
+
+
 def _append_postprocessed_cell_vals(
     results: list[Any],
     vals: list[Any],
@@ -1187,6 +1671,7 @@ def extract_item_values(
     results: list[Any] = []
     sources = item_config.get("sources") or []
     positions = cell_positions if cell_positions is not None else {}
+    item_label = str(item_config.get("name") or item_config.get("id") or item_id or "-")
     if not sources:
         # ソース未設定列は主値を載せない（ファイル名フォールバックは一括で誤出力になるため）
         return [""]
@@ -1298,9 +1783,15 @@ def extract_item_values(
             if repeat_dir in ("vertical", "horizontal"):
                 repeat_until_empty = bool(src.get("repeat_until_empty", True))
                 repeat_max = int(x) if (x := src.get("repeat_max")) is not None else None
-                limit = repeat_max if (repeat_max is not None and repeat_max > 0) else 9999
-                if max_primary_rows is not None and max_primary_rows > 0:
-                    limit = min(limit, max_primary_rows)
+                limit = resolve_extract_repeat_limit(
+                    repeat_max=repeat_max,
+                    repeat_until_empty=repeat_until_empty,
+                    max_primary_rows=max_primary_rows,
+                )
+                skip_trunc_peek = skip_extract_truncation_peek(
+                    repeat_max=repeat_max,
+                    repeat_until_empty=repeat_until_empty,
+                )
                 vals: list[Any] = []
                 base_col, base_row = _parse_cell_ref(cell_ref)
                 if base_col is None or base_row is None:
@@ -1310,6 +1801,101 @@ def extract_item_values(
                 p_abs = Path(file_path).resolve()
                 wb_ctx: Any = None
                 wb_owned = False
+                rd_row_step = row_off if repeat_dir == "vertical" else 0
+                rd_col_step = col_off if repeat_dir == "horizontal" else 0
+                if p_abs.suffix.lower() == ".csv":
+                    if _xlsx_workbook_cache_top() is not None:
+                        vals_opt = _read_repeated_series_from_csv_cached(
+                            p_abs,
+                            base_col=base_col,
+                            base_row=base_row,
+                            row_step=rd_row_step,
+                            col_step=rd_col_step,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            cancel_check=cancel_check,
+                        )
+                        if vals_opt is None:
+                            raise DataAggCsvReadError(
+                                "CSV 一括抽出に失敗しました: %s" % p_abs
+                            )
+                        vals = vals_opt
+                        peek_v = None
+                        if not skip_trunc_peek:
+                            peek_v = _peek_repeat_cell_from_csv(
+                                p_abs,
+                                base_col=base_col,
+                                base_row=base_row,
+                                row_off=row_off,
+                                col_off=col_off,
+                                index=len(vals),
+                            )
+                        _finish_repeated_cell_vals(
+                            vals=vals,
+                            results=results,
+                            cell_start=cell_start,
+                            cell_source_spans_out=cell_source_spans_out,
+                            si=si,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            file_path=file_path,
+                            item_label=item_label,
+                            item_id=item_id,
+                            positions=positions,
+                            cell_ref=cell_ref,
+                            row_off=row_off,
+                            col_off=col_off,
+                            ui_blk=_blk,
+                            src=src,
+                            max_primary_rows=max_primary_rows,
+                            peek_v=peek_v,
+                            skip_trunc_peek=skip_trunc_peek,
+                        )
+                        continue
+                    csv_mat = _get_csv_matrix(p_abs, create=False)
+                    if csv_mat is not None:
+                        vals = _read_repeated_series_from_matrix(
+                            csv_mat,
+                            base_col=base_col,
+                            base_row=base_row,
+                            row_step=rd_row_step,
+                            col_step=rd_col_step,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            cancel_check=cancel_check,
+                        )
+                        peek_v = None
+                        if not skip_trunc_peek:
+                            peek_v = _peek_repeat_cell_from_matrix(
+                                csv_mat,
+                                base_col=base_col,
+                                base_row=base_row,
+                                row_off=row_off,
+                                col_off=col_off,
+                                index=len(vals),
+                            )
+                        _finish_repeated_cell_vals(
+                            vals=vals,
+                            results=results,
+                            cell_start=cell_start,
+                            cell_source_spans_out=cell_source_spans_out,
+                            si=si,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            file_path=file_path,
+                            item_label=item_label,
+                            item_id=item_id,
+                            positions=positions,
+                            cell_ref=cell_ref,
+                            row_off=row_off,
+                            col_off=col_off,
+                            ui_blk=_blk,
+                            src=src,
+                            max_primary_rows=max_primary_rows,
+                            peek_v=peek_v,
+                            skip_trunc_peek=skip_trunc_peek,
+                        )
+                        continue
                 try:
                     if is_openxml_excel_suffix(p_abs.suffix):
                         wb_ctx = _xlsx_workbook_from_cache(p_abs)
@@ -1336,26 +1922,45 @@ def extract_item_values(
                         )
                         if isinstance(vals_fast, list):
                             vals = vals_fast
-                            if vals:
-                                n_last = len(vals) - 1
-                                cell_ref_last = _resolve_cell_with_offset(
-                                    cell_ref,
-                                    row_off * n_last,
-                                    col_off * n_last,
+                            peek_v = None
+                            if not skip_trunc_peek:
+                                peek_v = _read_cell_at_repeat_index(
+                                    wb_ctx=wb_ctx,
+                                    wb_owned=wb_owned,
+                                    file_path=file_path,
+                                    sheet_name=sheet_name,
+                                    base_col=base_col,
+                                    base_row=base_row,
+                                    row_off=row_off,
+                                    col_off=col_off,
+                                    index=len(vals),
                                 )
-                                c0, r0 = _parse_cell_ref(cell_ref_last)
-                                if c0 is not None and r0 is not None and item_id:
-                                    positions[item_id] = (c0, r0)
-                            _append_postprocessed_cell_vals(
-                                results,
-                                vals,
-                                _blk,
-                                src,
+                            _finish_repeated_cell_vals(
+                                vals=vals,
+                                results=results,
+                                cell_start=cell_start,
+                                cell_source_spans_out=cell_source_spans_out,
+                                si=si,
+                                limit=limit,
+                                repeat_until_empty=repeat_until_empty,
+                                file_path=file_path,
+                                item_label=item_label,
+                                item_id=item_id,
+                                positions=positions,
+                                cell_ref=cell_ref,
+                                row_off=row_off,
+                                col_off=col_off,
+                                ui_blk=_blk,
+                                src=src,
                                 max_primary_rows=max_primary_rows,
+                                peek_v=peek_v,
+                                skip_trunc_peek=skip_trunc_peek,
                             )
-                            if cell_source_spans_out is not None:
-                                cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
                             continue
+                    if p_abs.suffix.lower() == ".csv" and _xlsx_workbook_cache_top() is not None:
+                        raise DataAggCsvReadError(
+                            "CSV 一括抽出に失敗（バッチ内逐次ループ禁止）: %s" % p_abs
+                        )
                     # 取得座標 = 基準セル + (行/列オフセット * N)（N は 0 始まり）
                     for n in range(limit):
                         _poll_cancel_check(cancel_check)
@@ -1379,6 +1984,27 @@ def extract_item_values(
                         if repeat_until_empty and (v is None or v == ""):
                             break
                         vals.append(v)
+                    if vals:
+                        if not skip_trunc_peek:
+                            peek_v = _read_cell_at_repeat_index(
+                                wb_ctx=wb_ctx,
+                                wb_owned=wb_owned,
+                                file_path=file_path,
+                                sheet_name=sheet_name,
+                                base_col=base_col,
+                                base_row=base_row,
+                                row_off=row_off,
+                                col_off=col_off,
+                                index=len(vals),
+                            )
+                            record_extract_truncation_if_needed(
+                                vals,
+                                limit=limit,
+                                peek_next=peek_v,
+                                file_path=file_path,
+                                item_label=item_label,
+                                source_index=si,
+                            )
                 finally:
                     if wb_owned and wb_ctx is not None:
                         try:
@@ -1524,8 +2150,8 @@ def _extract_cell_rule_series_fast(
     cancel_check: Optional[Callable[..., None]] = None,
 ) -> Optional[list[Any]]:
     """
-    link/join ルールの反復値を高速取得する（OpenXML Excel の典型セル座標パターン）。
-    非対応時は None を返し、呼び出し側で既存の 1セルずつ取得へフォールバックする。
+    link/join ルールの反復値を高速取得する（OpenXML Excel / CSV の典型セル座標パターン）。
+    非対応時は None を返し、呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバックする。
     """
     if n_src < 1:
         return []
@@ -1533,7 +2159,8 @@ def _extract_cell_rule_series_fast(
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
         return [postprocess_link_rule_value(rule.get("cell"), rule)] * n_src
     p_abs = Path(file_path).resolve()
-    if not is_openxml_excel_suffix(p_abs.suffix):
+    is_csv = p_abs.suffix.lower() == ".csv"
+    if not is_csv and not is_openxml_excel_suffix(p_abs.suffix):
         return None
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
     c0, r0 = _parse_cell_ref(base_cell)
@@ -1547,6 +2174,37 @@ def _extract_cell_rule_series_fast(
         col_step = int(rule.get("col") or 0)
     except (TypeError, ValueError):
         col_step = 0
+    if is_csv:
+        df = _get_csv_df(p_abs, create=True)
+        if df is not None:
+            raw = _read_repeated_series_from_df(
+                df,
+                base_col=c0,
+                base_row=r0,
+                row_step=row_step,
+                col_step=col_step,
+                limit=n_src,
+                repeat_until_empty=False,
+                cancel_check=cancel_check,
+            )
+        else:
+            mat = _get_csv_matrix(p_abs, create=True)
+            if mat is None:
+                return None
+            raw = _read_repeated_series_from_matrix(
+                mat,
+                base_col=c0,
+                base_row=r0,
+                row_step=row_step,
+                col_step=col_step,
+                limit=n_src,
+                repeat_until_empty=False,
+                cancel_check=cancel_check,
+            )
+        out = postprocess_link_rule_value_batch(raw, rule)
+        if len(out) < n_src:
+            out.extend([None] * (n_src - len(out)))
+        return out[:n_src]
     wb_ctx = _xlsx_workbook_from_cache(p_abs)
     wb_owned = False
     if wb_ctx is None:
@@ -1597,10 +2255,10 @@ def _extract_cell_rules_series_fast_map(
     """
     複数 link/join ルールを 1 回の列範囲走査でまとめて取得する高速経路。
     対応条件（厳しめ）:
-      - OpenXML Excel（.xlsx / .xlsm）
+      - OpenXML Excel（.xlsx / .xlsm）または CSV
       - 非固定値ルールはすべて row=1,col=0（縦反復）
       - 非固定値ルールの基準行が同一
-    非対応時は None（呼び出し側で既存経路へフォールバック）。
+    非対応時は None（呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバック）。
     """
     if n_src < 1:
         return {}
@@ -1610,7 +2268,8 @@ def _extract_cell_rules_series_fast_map(
     if n_src < 8:
         return None
     p_abs = Path(file_path).resolve()
-    if not is_openxml_excel_suffix(p_abs.suffix):
+    is_csv = p_abs.suffix.lower() == ".csv"
+    if not is_csv and not is_openxml_excel_suffix(p_abs.suffix):
         return None
     if not isinstance(rules, list) or not rules:
         return {}
@@ -1656,6 +2315,25 @@ def _extract_cell_rules_series_fast_map(
     for i, fv, r in fixed:
         out[i] = [postprocess_link_rule_value(fv, r)] * n_src
     if not non_fixed:
+        return out
+    if is_csv:
+        df = _get_csv_df(p_abs, create=True)
+        row0_csv = base_row_ref or 0
+        if df is not None:
+            for i, c, _r, rule in non_fixed:
+                raw = _df_column_slice(df, c, row0_csv, n_src)
+                if len(raw) < n_src:
+                    raw = raw + [None] * (n_src - len(raw))
+                out[i] = postprocess_link_rule_value_batch(raw[:n_src], rule)
+            return out
+        mat = _get_csv_matrix(p_abs, create=True)
+        if mat is None:
+            return None
+        for i, c, _r, rule in non_fixed:
+            raw = [
+                _matrix_cell_value(mat, c, row0_csv + ri) for ri in range(n_src)
+            ]
+            out[i] = postprocess_link_rule_value_batch(raw, rule)
         return out
     wb_ctx = _xlsx_workbook_from_cache(p_abs)
     wb_owned = False

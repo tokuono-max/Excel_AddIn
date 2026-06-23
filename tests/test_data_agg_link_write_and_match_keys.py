@@ -19,6 +19,12 @@ from svc.svc_data_agg import (  # noqa: E402
     _assign_series_to_rows_by_context,
     compute_batch_table_rows,
 )
+from core.core_join_compare import join_compare_display_key  # noqa: E402
+
+
+def _disp(val: Any) -> str:
+    """table_rows セル値を表示本体で比較する。"""
+    return join_compare_display_key(val)
 
 
 def _active_worksheet(wb: Any) -> Any:
@@ -129,7 +135,7 @@ def test_match_keys_path_carries_linked_column_to_table(tmp_path: Path) -> None:
     )
     ix_mac = headers.index("MAC")
     assert rows
-    assert rows[0][ix_mac] == "DEL"
+    assert _disp(rows[0][ix_mac]) == "DEL"
 
 
 def _join_link_host_item() -> dict[str, Any]:
@@ -307,9 +313,9 @@ def test_cross_file_join_writes_to_anchor_row_only(tmp_path: Path) -> None:
     ix_pt = headers.index("PT番号")
     ix_seq = headers.index("製番")
     assert len(rows) == 1
-    assert rows[0][ix_dev] == "DEV1"
-    assert rows[0][ix_pt] == "PT-001"
-    assert rows[0][ix_seq] == "SEQ-1"
+    assert _disp(rows[0][ix_dev]) == "DEV1"
+    assert _disp(rows[0][ix_pt]) == "PT-001"
+    assert _disp(rows[0][ix_seq]) == "SEQ-1"
 
 
 def test_cross_file_join_writes_all_mac_matches_ignore_iter(tmp_path: Path) -> None:
@@ -410,11 +416,11 @@ def test_cross_file_join_writes_all_mac_matches_ignore_iter(tmp_path: Path) -> N
     ix_pt = headers.index("PT番号")
     ix_seq = headers.index("製番")
     assert len(rows) == 2
-    by_dev = {r[ix_dev]: r for r in rows}
-    assert by_dev["DEV-A"][ix_pt] == "PT-X"
-    assert by_dev["DEV-A"][ix_seq] == "SEQ-X"
-    assert by_dev["DEV-B"][ix_pt] == "PT-Y"
-    assert by_dev["DEV-B"][ix_seq] == "SEQ-Y"
+    by_dev = {_disp(r[ix_dev]): r for r in rows}
+    assert _disp(by_dev["DEV-A"][ix_pt]) == "PT-X"
+    assert _disp(by_dev["DEV-A"][ix_seq]) == "SEQ-X"
+    assert _disp(by_dev["DEV-B"][ix_pt]) == "PT-Y"
+    assert _disp(by_dev["DEV-B"][ix_seq]) == "SEQ-Y"
 
 
 def test_paired_join_respects_iter_index(tmp_path: Path) -> None:
@@ -477,10 +483,10 @@ def test_paired_join_respects_iter_index(tmp_path: Path) -> None:
     ix_k = headers.index("K")
     ix_v = headers.index("V")
     assert len(rows) == 2
-    assert rows[0][ix_k] == "K0"
-    assert rows[0][ix_v] == "V0"
-    assert rows[1][ix_k] == "K1"
-    assert rows[1][ix_v] == "V1"
+    assert _disp(rows[0][ix_k]) == "K0"
+    assert _disp(rows[0][ix_v]) == "V0"
+    assert _disp(rows[1][ix_k]) == "K1"
+    assert _disp(rows[1][ix_v]) == "V1"
 
 
 def test_same_file_single_row_host_join_as30(tmp_path: Path) -> None:
@@ -564,5 +570,5 @@ def test_same_file_single_row_host_join_as30(tmp_path: Path) -> None:
     ix_dev = headers.index("機器番号")
     ix_loc = headers.index("MAC LOC")
     assert len(rows) == 1
-    assert rows[0][ix_dev] == "DEV-001"
-    assert rows[0][ix_loc] == "AA:BB:CC:DD:EE:FF"
+    assert _disp(rows[0][ix_dev]) == "DEV-001"
+    assert _disp(rows[0][ix_loc]) == "AA:BB:CC:DD:EE:FF"

@@ -3,13 +3,15 @@
 Python: 3.10+
 Module: svc/svc_csv_sp.py
 Created: 2026-03-05
-Updated: 2026-06-04
-Version: 2.5.8
+Updated: 2026-06-22
+Version: 2.5.10
 Purpose:
   CSVファイル分割（選択行による範囲分割）。アクティブシートの選択行を境界に分割し、
   各範囲をヘッダ付きで UTF-8(BOM) CSV として保存。データ不足時は Excel 中央でワーニング通知。
 
 History (latest 3):
+  - 2.5.10 (2026-06-22) csv_ld._resolve_book_and_sheet の ptr_s 引数と整合（TypeError 修正）。
+  - 2.5.9 (2026-06-22) 分割保存直前に Book/Sheet を再取得（UI 待ち後の COM 切れ緩和。csv_sv/csv_ld 同経路）。
   - 2.5.8 (2026-06-13) 進捗表示: 保存中→分割保存中。同名確認「分割実施」後に保存されない不具合を修正。
   - 2.5.7 (2026-06-13) 進捗 UI 共通設定（poll/creep）と分割保存開始直前の砂時計 ON。
   - 2.5.6 (2026-06-06) 分割保存ループを suspend(restore_on_exit=False) 内で実行。DONE+wait も suspend 内。
@@ -58,10 +60,14 @@ from core.core_cursor import notify_wait_form_ready, progress_dialog_wait_cursor
 from core.csv_tool_progress_ui import enrich_progress_req_dict
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
+from svc.svc_csv_ld import (  # noqa: E402
+    _capture_book_attach_keys,
+    _resolve_book_and_sheet,
+)
 
 logger = get_logger(__name__)
 _sp_diag = get_diag_logger("hc_csv_tool.diag.csv_sp")
-__version__ = "2.5.8"
+__version__ = "2.5.10"
 
 _SP_CFG_CACHE: dict[str, Any] | None = None
 
@@ -109,6 +115,47 @@ def _watch_ready_ui(ready_path: str, sheet_id: str, t_enter0: float) -> None:
     from svc.svc_csv_ld import _watch_ready
 
     _watch_ready(ready_path, sheet_id, t_enter0)
+
+
+def _progress_write_sheet_unavailable(progress_path: Path, sheet_id: str) -> None:
+    """COM 切れ等でシート解決できないとき。"""
+    detail = (
+        "対象シートに接続できませんでした。\n"
+        "Excel を前面にしたうえで、もう一度 CSV 分割を実行してください。"
+    )
+    if sheet_id:
+        detail += f"\n（GUID={sheet_id}）"
+    _progress_write_retry(
+        progress_path,
+        {
+            "status": "ERROR",
+            "phase": "CSV分割を開始できません",
+            "msg": detail,
+            "detail": detail,
+            "pct": 0,
+        },
+    )
+
+
+def _sp_refresh_sheet_dims(
+    ptr_s: Any,
+    *,
+    use_display_text: bool,
+) -> tuple[int, list[Any], int] | None:
+    """保存直前に列数・ヘッダ・最終行を再取得する。"""
+    ur = getattr(ptr_s, "used_range", None)
+    if ur is None:
+        return None
+    nr = getattr(ur, "rows", None)
+    nc = getattr(ur, "columns", None)
+    if nr is None or nc is None:
+        return None
+    nrows = int(nr.count)
+    ncols = int(nc.count)
+    if nrows < 1 or ncols < 1:
+        return None
+    headers = _sp_read_header_row(ptr_s, ncols, use_display_text=use_display_text)
+    return ncols, headers, nrows
 
 
 def _get_sheet(book: Any, sheet_id: str) -> Any:
@@ -768,6 +815,8 @@ def split_csv(
     except Exception:
         pass
 
+    attach_keys = _capture_book_attach_keys(book)
+
     ptr_s = _get_sheet(book, sheet_id)
     if ptr_s is None:
         logger.warning("[CSV_SP] 対象シートなし sheet_id=%s", sheet_id)
@@ -1076,6 +1125,39 @@ def split_csv(
         _elapsed_ms(t_enter0),
     )
     time.sleep(0.3)
+
+    book_save, ptr_save = _resolve_book_and_sheet(
+        book,
+        str(sheet_id or ""),
+        parent_hwnd,
+        ptr_s=ptr_s,
+        attach_keys=attach_keys,
+    )
+    if ptr_save is None:
+        logger.error(
+            "[CSV_SP] 分割保存直前のシート解決失敗 sheet_id=%s hwnd=%s",
+            sheet_id or "",
+            parent_hwnd,
+        )
+        _progress_write({
+            "status": "ERROR",
+            "phase": "CSV分割を開始できません",
+            "msg": "対象シートに接続できませんでした。",
+            "detail": "対象シートに接続できませんでした。",
+            "pct": 0,
+        })
+        if hwnd and w32:
+            try:
+                w32.bring_to_front(hwnd)
+            except Exception:
+                pass
+        return
+
+    book = book_save if book_save is not None else book
+    ptr_s = ptr_save
+    dims = _sp_refresh_sheet_dims(ptr_s, use_display_text=use_display_text_for_csv_save())
+    if dims is not None:
+        ncols, headers, _nrows_refresh = dims
 
     done_accum = 0
     success_count = 0

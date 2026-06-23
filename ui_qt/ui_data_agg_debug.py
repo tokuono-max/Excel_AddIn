@@ -303,6 +303,21 @@ def _join_detail_lines(join_defs: list[Any]) -> list[str]:
     return lines or ["（結合キー定義なし）"]
 
 
+def _append_extract_primaries_to_col(
+    col_vals: list[str],
+    primary_values: Any,
+    *,
+    max_rows: int,
+) -> None:
+    """主値を列に追加。空の primary_values は行数に数えない。"""
+    if not isinstance(primary_values, list) or not primary_values:
+        return
+    for v in primary_values:
+        if len(col_vals) >= max_rows:
+            break
+        col_vals.append("" if v is None else str(v))
+
+
 def build_debug_scenarios_from_items(
     items: list[dict[str, Any]],
     scan_paths: list[str] | None = None,
@@ -457,6 +472,35 @@ def build_debug_scenarios_from_items(
     return out
 
 
+def _master_debug_csv_precache_progress_hook(
+    batch_hook: Callable[..., None] | None,
+) -> Callable[[str], None] | None:
+    """compute_batch 用 progress_hook を CSV precache 文言 (str) 向けにラップ。"""
+    if batch_hook is None:
+        return None
+
+    def _hook(msg: str) -> None:
+        try:
+            batch_hook(4, str(msg))
+        except Exception:
+            pass
+
+    return _hook
+
+
+def _precache_csv_for_master_debug_extract(
+    file_path: str,
+    *,
+    progress_hook: Callable[[str], None] | None = None,
+) -> None:
+    """xlsx_workbook_scope 内: 本番一括と同様に CSV を先読み（lazy cache と結果同等）。"""
+    if not str(file_path).lower().endswith(".csv"):
+        return
+    from svc.svc_data_agg_extract import precache_csv_matrix_for_file  # noqa: WPS433
+
+    precache_csv_matrix_for_file(file_path, progress_hook=progress_hook)
+
+
 def build_master_items_live(
     items: list[dict[str, Any]],
     scan_paths: list[str] | None,
@@ -470,10 +514,19 @@ def build_master_items_live(
     """
     paths = [str(p).strip() for p in (scan_paths or []) if str(p).strip()]
     try:
-        from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+        from svc.svc_data_agg import filter_file_paths_for_master_preview
+        from svc.svc_data_agg_extract import (
+            extract_item_bundle,
+            file_paths_for_source_extract,
+            xlsx_workbook_scope,
+        )
     except Exception:
         extract_item_bundle = None  # type: ignore[misc, assignment]
+        filter_file_paths_for_master_preview = None  # type: ignore[misc, assignment]
+        file_paths_for_source_extract = None  # type: ignore[misc, assignment]
         xlsx_workbook_scope = None  # type: ignore[misc, assignment]
+    if filter_file_paths_for_master_preview is not None and paths:
+        paths = list(filter_file_paths_for_master_preview(paths, items))
 
     def _empty_slot(msg: str) -> dict[str, Any]:
         return {
@@ -528,19 +581,16 @@ def build_master_items_live(
                         col_vals = ["（検出ファイルがありません。メインで基準フォルダ・拡張子を確認するかデバッグを開き直してください。）"]
                     else:
                         item_id = str(item.get("id") or title)
-                        try:
-                            from svc.svc_data_agg_extract import name_extract_hit_files_ordered
-                        except Exception:
-                            name_extract_hit_files_ordered = None  # type: ignore[misc, assignment]
-                        typ_src = str(src.get("type") or "cell").strip().lower()
-                        paths_iter = paths
-                        if typ_src in ("metadata", "meta", "filename", "name_extract") and name_extract_hit_files_ordered:
-                            paths_iter = name_extract_hit_files_ordered(paths, src)
-                        for fp in paths_iter:
+                        if file_paths_for_source_extract is not None:
+                            paths_list = file_paths_for_source_extract(paths, src)
+                        else:
+                            paths_list = list(paths)
+                        for fp in paths_list:
                             if len(col_vals) >= max_rows:
                                 break
                             with xlsx_workbook_scope():  # type: ignore[misc]
                                 try:
+                                    _precache_csv_for_master_debug_extract(fp)
                                     jp_hdr = str(one.get("name") or one.get("id") or "").strip()
                                     b = extract_item_bundle(
                                         fp,
@@ -550,12 +600,12 @@ def build_master_items_live(
                                         join_path_header=jp_hdr or None,
                                     )
                                 except Exception:
-                                    b = {"primary_values": [None]}
-                            prim = b.get("primary_values") or [None]
-                            for v in prim:
-                                if len(col_vals) >= max_rows:
-                                    break
-                                col_vals.append("" if v is None else str(v))
+                                    b = {"primary_values": []}
+                            _append_extract_primaries_to_col(
+                                col_vals,
+                                b.get("primary_values"),
+                                max_rows=max_rows,
+                            )
                         if not col_vals:
                             col_vals = ["（該当する主値がありません）"]
                 else:
@@ -860,8 +910,10 @@ class DataAggDebugDialog(QDialog):
                     ph = int(getattr(p, "_parent_hwnd", 0) or 0)
                     break
                 p = p.parentWidget()
+            win_cfg = dict(self._cfg.get("WINDOW") or {})
+            win_cfg["CENTER_ON_EXCEL"] = False
             apply_window_config(
-                self, {"WINDOW": self._cfg.get("WINDOW") or {}}, ph, "DEBUG"
+                self, {"WINDOW": win_cfg}, ph, "DEBUG"
             )
         except Exception:
             pass
@@ -871,13 +923,7 @@ class DataAggDebugDialog(QDialog):
     def showEvent(self, event: Any) -> None:
         """親（メイン／シナリオ編集）の中央付近に重ねて表示する。"""
         super().showEvent(event)
-        pw = self.parentWidget()
-        if pw is not None:
-            pr = pw.frameGeometry()
-            gr = self.frameGeometry()
-            x = pr.x() + (pr.width() - gr.width()) // 2
-            y = pr.y() + (pr.height() - gr.height()) // 2
-            self.move(x, y)
+        self._center_on_parent_widget()
         ph = 0
         pwalk: QWidget | None = self.parentWidget()
         while pwalk is not None:
@@ -900,6 +946,18 @@ class DataAggDebugDialog(QDialog):
                 QTimer.singleShot(0, _front0)
             except Exception:
                 pass
+        QTimer.singleShot(0, self._center_on_parent_widget)
+        QTimer.singleShot(160, self._center_on_parent_widget)
+
+    def _center_on_parent_widget(self) -> None:
+        pw = self.parentWidget()
+        if pw is None:
+            return
+        pr = pw.frameGeometry()
+        gr = self.frameGeometry()
+        x = pr.x() + (pr.width() - gr.width()) // 2
+        y = pr.y() + (pr.height() - gr.height()) // 2
+        self.move(x, y)
 
     def _d(self, key: str, default: str) -> str:
         s = _normalize_message_newlines(str(self._cfg.get(key) or default).strip())
@@ -1570,14 +1628,24 @@ class DataAggDebugDialog(QDialog):
         except (TypeError, ValueError):
             return MAX_VALUE_ROWS_DEFAULT
 
-    def _master_preview_read_rows(self) -> int:
+    def _master_preview_read_cap_multiplier(self) -> int:
         try:
-            return max(
-                self._max_value_rows(),
-                int(self._cfg.get("MASTER_PREVIEW_READ_ROWS") or 70),
-            )
+            return max(1, int(self._cfg.get("MASTER_PREVIEW_READ_CAP_MULTIPLIER") or 2))
         except (TypeError, ValueError):
-            return max(self._max_value_rows(), 70)
+            return 2
+
+    def _master_preview_read_cap_rows(self) -> int:
+        """マスタ読込打ち切り: 表示上限 × 倍率（本番には適用しない）。"""
+        disp = self._master_preview_display_rows()
+        cap = disp * self._master_preview_read_cap_multiplier()
+        try:
+            floor = int(self._cfg.get("MASTER_PREVIEW_READ_ROWS") or 70)
+        except (TypeError, ValueError):
+            floor = 70
+        return max(disp, cap, floor, self._max_value_rows())
+
+    def _master_preview_read_rows(self) -> int:
+        return self._master_preview_read_cap_rows()
 
     def _master_preview_display_rows(self) -> int:
         try:
@@ -1745,6 +1813,8 @@ class DataAggDebugDialog(QDialog):
                 self._master_batch_hook_last_nf = 1
             fl = int(getattr(self, "_master_progress_pct_floor", 0) or 0)
             pct = max(fl, raw_pct)
+            if dn < tot:
+                pct = min(pct, 95)
             self._master_progress_pct_floor = pct
             ph = self._debug_parent_hwnd()
             if self._run_progress_dlg is None or self._run_progress_path is None:
@@ -1871,6 +1941,15 @@ class DataAggDebugDialog(QDialog):
             p1 = 37.5 + 50.0 * float(step_end) / float(denom)
             t = min(1.0, max(0.0, float(ii) / float(inn)))
             pct_ov = int(round(p0 + (p1 - p0) * t))
+        elif sub_phase == 4 and row_m:
+            rnn = max(1, int(row_m.group(2)))
+            rr = min(rnn, max(0, int(row_m.group(1))))
+            step_start = (fi - 1) * 4 + 1
+            step_end = (fi - 1) * 4 + 2
+            p0 = 37.5 + 50.0 * float(step_start) / float(denom)
+            p1 = 37.5 + 50.0 * float(step_end) / float(denom)
+            t = min(1.0, max(0.0, float(rr) / float(rnn)))
+            pct_ov = int(round(p0 + (p1 - p0) * t))
         elif sub_phase == 7 and row_m:
             rnn = max(1, int(row_m.group(2)))
             rr = min(rnn, max(0, int(row_m.group(1))))
@@ -1883,6 +1962,7 @@ class DataAggDebugDialog(QDialog):
         else:
             step_k = (fi - 1) * 4 + (sub_phase - 4) + 1
             pct_ov = int(round(37.5 + 50.0 * float(step_k) / float(denom)))
+        pct_ov = min(pct_ov, 95)
         cur_file = self._master_progress_pick_current_file(detail_s, fi, nf)
         show_detail = detail_s.strip()
         if show_detail and show_detail.startswith(phase_head):
@@ -5336,10 +5416,15 @@ class DataAggDebugDialog(QDialog):
             return out
         try:
             from svc.svc_data_agg import filter_file_paths_for_master_preview
-            from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+            from svc.svc_data_agg_extract import (
+                extract_item_bundle,
+                file_paths_for_source_extract,
+                xlsx_workbook_scope,
+            )
         except Exception:
             extract_item_bundle = None  # type: ignore[misc, assignment]
             filter_file_paths_for_master_preview = None  # type: ignore[misc, assignment]
+            file_paths_for_source_extract = None  # type: ignore[misc, assignment]
             xlsx_workbook_scope = None  # type: ignore[misc, assignment]
         paths = [str(p).strip() for p in self._debug_scan_paths if str(p).strip()]
         n_paths_before = len(paths)
@@ -5349,29 +5434,50 @@ class DataAggDebugDialog(QDialog):
             return out
         if filter_file_paths_for_master_preview is not None:
             paths = list(filter_file_paths_for_master_preview(paths, items))
-        n_paths_after = len(paths)
+        n_paths_scenario = len(paths)
         if not paths:
             out = ["（検出ファイルがありません）"]
             self._mpv_extract_cache[key] = list(out)
             return out
         one = {**item, "sources": [copy.deepcopy(src)]}
         item_id = str(item.get("id") or item.get("name") or "").strip()
-        try:
-            from svc.svc_data_agg_extract import name_extract_hit_files_ordered
-        except Exception:
-            name_extract_hit_files_ordered = None  # type: ignore[misc, assignment]
-        typ_src = str(src.get("type") or "cell").strip().lower()
-        paths_iter: Any = paths
-        if typ_src in ("metadata", "meta", "filename", "name_extract") and name_extract_hit_files_ordered:
-            paths_iter = name_extract_hit_files_ordered(paths, src)
-        max_rows = self._max_value_rows()
+        if file_paths_for_source_extract is not None:
+            paths_list = file_paths_for_source_extract(paths, src)
+        else:
+            paths_list = list(paths)
+        n_paths_after = len(paths_list)
+        if not paths_list:
+            out = ["（該当する主値がありません）"]
+            self._mpv_extract_cache[key] = list(out)
+            return out
+        max_rows = self._master_preview_read_cap_rows()
         col_vals: list[str] = []
         _pe_n = 0
-        for fp in paths_iter:
+        _csv_prog = _master_debug_csv_precache_progress_hook(
+            self._mpv_master_dbg_progress_hook_or_none()
+        )
+        _extract_hook = self._mpv_master_dbg_progress_hook_or_none()
+        for i, fp in enumerate(paths_list, start=1):
             if len(col_vals) >= max_rows:
                 break
+            fname = Path(str(fp)).name
+            row_prog = min(len(col_vals) + 1, max_rows)
+            if _extract_hook is not None:
+                try:
+                    _extract_hook(
+                        4,
+                        "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
+                        1,
+                        1,
+                    )
+                except Exception:
+                    pass
             with xlsx_workbook_scope():  # type: ignore[misc]
                 try:
+                    _precache_csv_for_master_debug_extract(
+                        fp,
+                        progress_hook=_csv_prog,
+                    )
                     jp_hdr = str(one.get("name") or one.get("id") or "").strip()
                     b = extract_item_bundle(
                         fp,
@@ -5381,25 +5487,36 @@ class DataAggDebugDialog(QDialog):
                         join_path_header=jp_hdr or None,
                     )
                 except Exception:
-                    b = {"primary_values": [None]}
-            prim = b.get("primary_values") or [None]
-            for v in prim:
-                if len(col_vals) >= max_rows:
-                    break
-                col_vals.append("" if v is None else str(v))
+                    b = {"primary_values": []}
+            _append_extract_primaries_to_col(
+                col_vals,
+                b.get("primary_values"),
+                max_rows=max_rows,
+            )
             _pe_n += 1
-            if _pe_n % 8 == 0:
+            if _extract_hook is not None:
+                try:
+                    _extract_hook(
+                        4,
+                        "行 %s/%s: %s（完了）" % (min(len(col_vals), max_rows), max_rows, fname),
+                        1,
+                        1,
+                    )
+                except Exception:
+                    pass
+            if _pe_n % 4 == 0:
                 self._process_events_light()
         if not col_vals:
             col_vals = ["（該当する主値がありません）"]
         try:
             _data_agg_probe_log.info(
                 "[DATA_AGG_DIAG] mpv_extract mi_idx=%s si=%s src_type=%s "
-                "paths_before=%s paths_after=%s col_count=%s col_head=%s elapsed_ms=%s",
+                "paths_before=%s paths_scenario=%s paths_source=%s col_count=%s col_head=%s elapsed_ms=%s",
                 mi_idx,
                 si,
-                typ_src,
+                str(src.get("type") or "cell").strip().lower(),
                 n_paths_before,
+                n_paths_scenario,
                 n_paths_after,
                 len(col_vals),
                 col_vals[:5],
@@ -6565,8 +6682,8 @@ class DataAggDebugDialog(QDialog):
                 _done0,
                 sub_total,
                 window_title=prog_wt,
-                detail="シナリオ「%s」検出ファイル %s 件"
-                % (sc_title, n_scan),
+                detail="シナリオ「%s」検出 %s 件 — マスタ読込上限 %s 行"
+                % (sc_title, n_scan, self._master_preview_read_cap_rows()),
             )
         else:
             self._show_run_progress(
@@ -6574,8 +6691,8 @@ class DataAggDebugDialog(QDialog):
                 1,
                 sub_total,
                 window_title=prog_wt,
-                detail="シナリオ「%s」検出ファイル %s 件"
-                % (sc_title, n_scan),
+                detail="シナリオ「%s」検出 %s 件 — マスタ読込上限 %s 行"
+                % (sc_title, n_scan, self._master_preview_read_cap_rows()),
             )
         self._process_events_light()
         plab = self._phase_label(gno, sc_title)

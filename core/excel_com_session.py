@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-svc_server の Excel COM セッション方針（A+）。
+svc_server の Excel COM セッション方針（B+）。
 
 不変条件:
-  1. 常駐 svc_server は 1 リクエストあたり最大 1 回の Excel COM セッションとする。
-  2. COM を触る handler の完了後（成功時・COM 系失敗時）は svc_server を終了させる。
-  3. 次リクエスト前に prepare_com_session_before_request が必要なら svc_server を再起動する。
-  4. Book 取得は get_excel_context_from_hwnd（xlc 経路）を優先する。
+  1. 常駐 svc_server は HWND ごとに Book キャッシュ（_book_cache_by_hwnd）でマルチ Excel を扱う。
+  2. COM を触る handler の成功後はプロセスを維持する（warmup / handler キャッシュを再利用）。
+  3. COM セッション汚染と判定した失敗時のみ svc_server を終了（com_recycle）する。
+  4. リクエスト前の事前再起動は行わない（ensure が死んでいれば spawn のみ）。
+  5. Book 取得は get_excel_context_from_hwnd（xlc 経路）を優先する。
 
 update_check は Excel COM に触れないため recycle 対象外。
 新しい svc action を追加するときは本モジュールの action 集合を更新すること。
@@ -83,30 +84,32 @@ def should_schedule_com_recycle_after_handler(
     handler_ok: bool,
     exc: BaseException | None = None,
 ) -> bool:
-    """handler 後に svc_server の COM recycle（自終了）を予約すべきか。"""
+    """handler 後に svc_server の COM recycle（自終了）を予約すべきか。
+
+    成功時は常駐を維持する。COM 汚染とみなす失敗時のみ recycle する。
+    """
     if not action_touches_excel_com(action):
         return False
     if handler_ok:
-        return True
+        return False
     return exc is not None and is_com_session_error(exc)
 
 
 def prepare_com_session_before_request(target_hwnd: int) -> bool:
-    """リクエスト前: 必要なら svc_server を再起動してクリーンな COM を得る。"""
-    from svc.svc_host import restart_svc_server_for_com_if_needed
-
-    return restart_svc_server_for_com_if_needed(int(target_hwnd or 0))
+    """リクエスト前の COM セッション準備（B+: 常駐維持のため事前再起動は行わない）。"""
+    _ = int(target_hwnd or 0)
+    return False
 
 
 def record_com_session_hwnd(hwnd: int) -> None:
-    """COM 接続成功時: 次回 prepare 判定用に HWND を IPC へ記録する。"""
+    """COM 接続成功時: 診断用に HWND を IPC へ記録する。"""
     from svc.svc_host import write_last_svc_com_hwnd
 
     write_last_svc_com_hwnd(int(hwnd or 0))
 
 
 def read_last_com_session_hwnd() -> int:
-    """前回 svc_server が COM 接続した Excel HWND。"""
+    """前回 svc_server が COM 接続した Excel HWND（診断用）。"""
     from svc.svc_host import read_last_svc_com_hwnd
 
     return read_last_svc_com_hwnd()

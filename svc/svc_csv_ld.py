@@ -3,14 +3,16 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-06-13
-Version: 1.3.30
+Updated: 2026-06-14
+Version: 1.3.31
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.32 (2026-06-22) _resolve_book_and_sheet に ptr_s 引数を追加（csv_sp 等との後方互換。挙動は従来どおり）。
+  - 1.3.31 (2026-06-14) オートフィット: ScreenUpdating 復帰後に実行・大容量はヘッダ行のみ。進捗 DONE/ERROR の seq 単調増加を保証。
   - 1.3.30 (2026-06-13) 進捗 UI 共通設定を core.csv_tool_progress_ui に委譲（保存・結合・分割と共有）。
   - 1.3.29 (2026-06-13) ファイル確定直後に progress_dialog_wait_cursor_on（Excel 砂時計の即時反映）。
   - 1.3.28 (2026-06-13) UI責務整理: progress_closed_path ACK 待ち後に restore。bring_to_front 廃止。DONE 後 sleep を ACK に置換。
@@ -70,7 +72,7 @@ from core.core_cursor import (
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.30"
+__version__ = "1.3.32"
 
 
 def _log_jit_breakdown(
@@ -171,6 +173,49 @@ LARGE_FILE_PROGRESS_WRITE_NOTIFY_ROWS: int = 5000
 LARGE_FILE_ROWS_THRESHOLD: int = 500_000
 LARGE_FILE_READ_CHUNK_ROWS: int = 100_000
 LARGE_FILE_WRITE_STEP_ROWS: int = 200_000
+# 全範囲 AutoFit の既定上限（超過時はヘッダ行のみ。進捗「オートフィット」固着の緩和）
+CSV_LD_AUTOFIT_FULL_MAX_ROWS_DEFAULT: int = 5000
+CSV_LD_AUTOFIT_FULL_MAX_CELLS_DEFAULT: int = 200_000
+
+
+def _csv_ld_skip_autofit() -> bool:
+    """HC_CSV_LD_SKIP_AUTOFIT=1 で列幅調整を省略（進捗は工程3→即 DONE）。"""
+    return core_env.truthy(core_env.get("HC_CSV_LD_SKIP_AUTOFIT"))
+
+
+def _csv_ld_autofit_full_max_rows() -> int:
+    raw = core_env.get("HC_CSV_LD_AUTOFIT_MAX_ROWS")
+    if raw is not None:
+        try:
+            return max(1, min(500_000, int(str(raw).strip())))
+        except ValueError:
+            pass
+    return CSV_LD_AUTOFIT_FULL_MAX_ROWS_DEFAULT
+
+
+def _csv_ld_autofit_full_max_cells() -> int:
+    raw = core_env.get("HC_CSV_LD_AUTOFIT_MAX_CELLS")
+    if raw is not None:
+        try:
+            return max(1, min(50_000_000, int(str(raw).strip())))
+        except ValueError:
+            pass
+    return CSV_LD_AUTOFIT_FULL_MAX_CELLS_DEFAULT
+
+
+def _csv_ld_should_use_header_only_autofit(last_row: int, max_col: int) -> bool:
+    lr = max(0, int(last_row))
+    mc = max(0, int(max_col))
+    if lr <= 0 or mc <= 0:
+        return True
+    global_max = int(getattr(cst, "AUTOFIT_MAX_ROWS", 100000) or 100000)
+    if lr > global_max:
+        return True
+    if lr > _csv_ld_autofit_full_max_rows():
+        return True
+    if (lr * mc) > _csv_ld_autofit_full_max_cells():
+        return True
+    return False
 
 def _csv_ld_progress_phase_label(phase_i: int, label: str) -> str:
     """進捗ラベル用: 「N/4 工程名」形式。"""
@@ -378,6 +423,38 @@ def _progress_write(path: Path, obj: dict[str, Any]) -> None:
         pass
 
 
+def _read_progress_last_seq(path: Path | None) -> int:
+    """進捗 pickle の直近 seq（無い・読取失敗時は 0）。"""
+    if path is None:
+        return 0
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return 0
+        d = read_pickle(path)
+        if not isinstance(d, dict):
+            return 0
+        return max(0, int(d.get("seq", 0) or 0))
+    except Exception:
+        return 0
+
+
+def _progress_write_terminal(
+    path: Path | None,
+    *,
+    status: str,
+    seq: int | None = None,
+    **fields: Any,
+) -> int:
+    """終端進捗（DONE/ERROR/CANCEL）を seq 単調増加で書く。戻り値は書き込んだ seq。"""
+    if path is None:
+        return 0
+    next_seq = int(seq) if seq is not None else (_read_progress_last_seq(path) + 1)
+    payload: dict[str, Any] = {"status": str(status or "").strip(), "seq": next_seq}
+    payload.update(fields)
+    _progress_write(path, payload)
+    return next_seq
+
+
 def _capture_book_attach_keys(book: Any) -> tuple[int, str, str]:
     """svc_server 再 attach 用に HWND / fullname / name を保存する。"""
     excel_hwnd = 0
@@ -405,8 +482,13 @@ def _resolve_book_and_sheet(
     sheet_id: str,
     parent_hwnd: int,
     attach_keys: tuple[int, str, str] | None = None,
+    ptr_s: Any | None = None,
 ) -> tuple[Any | None, Any | None]:
-    """対象シートを解決する。ファイルダイアログ待ち後の COM 切れ時は book を再取得する。"""
+    """対象シートを解決する。ファイルダイアログ待ち後の COM 切れ時は book を再取得する。
+
+    ptr_s は csv_sp 等が渡す後方互換用（GUID 解決失敗時のフォールバック参照）。csv_ld 本体は未使用。
+    """
+    _ = ptr_s
     if xlc is None or not sheet_id:
         return book, None
 
@@ -458,20 +540,18 @@ def _resolve_book_and_sheet(
     return book, None
 
 
-def _progress_write_sheet_error(progress_path: Path, sheet_id: str, seq: int = 1) -> None:
+def _progress_write_sheet_error(progress_path: Path, sheet_id: str, seq: int | None = None) -> None:
     """COM 切れ等でシート解決できないとき。即 DONE ではなく ERROR で理由を表示する。"""
-    _progress_write(
+    _progress_write_terminal(
         progress_path,
-        {
-            "status": "ERROR",
-            "phase": "CSV読込を開始できません",
-            "detail": (
-                "対象シートに接続できませんでした。\n"
-                f"（GUID={sheet_id}）\n"
-                "Excel を前面にしたうえで、もう一度 CSV 読込を実行してください。"
-            ),
-            "seq": int(seq),
-        },
+        status="ERROR",
+        seq=seq,
+        phase="CSV読込を開始できません",
+        detail=(
+            "対象シートに接続できませんでした。\n"
+            f"（GUID={sheet_id}）\n"
+            "Excel を前面にしたうえで、もう一度 CSV 読込を実行してください。"
+        ),
     )
 
 
@@ -737,10 +817,11 @@ def _finalize_sheet_context(
 
 
 def _autofit_used_range(sht: Any, last_row: int, max_col: int, sheet_name: str) -> None:
-    """列幅オートフィット。行数が core_cst.AUTOFIT_MAX_ROWS を超えるときはスキップ。"""
+    """列幅オートフィット。大容量はヘッダ行のみ（HC_CSV_LD_AUTOFIT_* / SKIP_AUTOFIT）。"""
     if last_row <= 0 or max_col <= 0:
         return
-    max_rows = int(getattr(cst, "AUTOFIT_MAX_ROWS", 100000) or 100000)
+    if _csv_ld_skip_autofit():
+        return
 
     def _do_autofit_range(rng: Any, label: str) -> bool:
         """rng に対して xlwings の columns.autofit または COM の Columns.AutoFit を実行。成功時 True。"""
@@ -763,49 +844,34 @@ def _autofit_used_range(sht: Any, last_row: int, max_col: int, sheet_name: str) 
             pass
         return False
 
-    if last_row <= max_rows:
+    def _autofit_header_row() -> None:
         try:
-            rng = sht.range((1, 1), (last_row, max_col))
-            if _do_autofit_range(rng, "full_range"):
-                return
+            rng = sht.range((1, 1), (1, max_col))
+            _do_autofit_range(rng, "header_row_fallback")
         except Exception:
             pass
+
+    if _csv_ld_should_use_header_only_autofit(last_row, max_col):
         try:
-            ur = getattr(sht, "used_range", None)
-            if ur is not None and _do_autofit_range(ur, "used_range"):
-                return
+            sht.activate()
         except Exception:
             pass
+        _autofit_header_row()
         return
 
     try:
-        sht.activate()
+        rng = sht.range((1, 1), (last_row, max_col))
+        if _do_autofit_range(rng, "full_range"):
+            return
     except Exception:
         pass
     try:
-        book = getattr(sht, "book", None)
-        app = getattr(book, "app", None) if book else None
-        api = getattr(app, "api", None) if app else None
-        aw = getattr(api, "ActiveWindow", None) if api else None
-        if aw is not None:
-            vis = getattr(aw, "VisibleRange", None)
-            if vis is not None:
-                parent = getattr(vis, "Parent", None)
-                pname = getattr(parent, "Name", "") if parent else ""
-                if pname == sheet_name:
-                    cols = getattr(vis, "Columns", None)
-                    if cols is not None:
-                        autofit_fn = getattr(cols, "AutoFit", None) or getattr(cols, "Autofit", None)
-                        if callable(autofit_fn):
-                            autofit_fn()
-                            return
+        ur = getattr(sht, "used_range", None)
+        if ur is not None and _do_autofit_range(ur, "used_range"):
+            return
     except Exception:
         pass
-    try:
-        rng = sht.range((1, 1), (1, max_col))
-        _do_autofit_range(rng, "header_row_fallback")
-    except Exception:
-        pass
+    _autofit_header_row()
 
 
 def _execute_jit_import(
@@ -1112,7 +1178,7 @@ def _execute_jit_import(
                 processed_chunk_idx += rows_to_write
                 _emit_write_progress(val_accum_total)
 
-        # 更新停止のまま: 最終シートのクリア・確定 → オートフィット → その後 with を抜けて更新開始
+        # 更新停止のまま: 最終シートのクリア・確定（オートフィットは with 外で ScreenUpdating 復帰後に実行）
         if sh_target is not None:
             t_fin0 = time.perf_counter()
             if max_col > 0:
@@ -1126,105 +1192,110 @@ def _execute_jit_import(
             )
             ms_finalize += _elapsed_ms(t_fin0)
 
-        # 工程3: 列幅調整（オートフィット）。更新停止中に実行し、with 抜けで更新開始
-        if progress_path is not None:
-            _af_pct = calc_progress_pct(3, prog_row_total, prog_row_total)
-            _progress_write(
-                progress_path,
-                {
-                    "status": "RUN",
-                    "phase_i": 3,
-                    "phase": _csv_ld_progress_phase_label(3, "列幅調整中"),
-                    "detail": _csv_ld_progress_detail(
-                        done=prog_row_total,
-                        total=prog_row_total,
-                        pct=_af_pct,
-                        extra="オートフィット",
-                    ),
-                    "done": prog_row_total,
-                    "total": prog_row_total,
-                    "pct": _af_pct,
-                    "current_file": str_fname,
-                    "seq": progress_seq,
-                },
-            )
-            progress_seq += 1
-        if max_col > 0:
-            total_parts = curr_part_idx
-            for part_i in range(1, curr_part_idx + 1):
-                sheet_name = _csv_ld_target_sheet_name(
-                    str_base_resolved, part_i, is_split_mode
-                )
-                if progress_path is not None and total_parts > 1:
-                    _af_pct_p = calc_progress_pct(3, prog_row_total, prog_row_total)
-                    _progress_write(
-                        progress_path,
-                        {
-                            "status": "RUN",
-                            "phase_i": 3,
-                            "phase": _csv_ld_progress_phase_label(
-                                3, f"列幅調整中 ({part_i}/{total_parts} シート)"
-                            ),
-                            "detail": _csv_ld_progress_detail(
-                                done=prog_row_total,
-                                total=prog_row_total,
-                                pct=_af_pct_p,
-                                extra=f"シート: {sheet_name}",
-                            ),
-                            "done": prog_row_total,
-                            "total": prog_row_total,
-                            "pct": _af_pct_p,
-                            "current_file": str_fname,
-                            "seq": progress_seq,
-                        },
-                    )
-                    progress_seq += 1
-                try:
-                    t_af0 = time.perf_counter()
-                    last_row_i = MAX_ROWS_PER_SHEET if part_i < curr_part_idx else val_accum_in_sheet
-                    for s in book.sheets:
-                        if getattr(s, "name", "") != sheet_name:
-                            continue
-                        _autofit_used_range(s, last_row_i, max_col, sheet_name)
-                        break
-                    ms_autofit += _elapsed_ms(t_af0)
-                except Exception:
-                    pass
-                if xlc:
-                    xlc.yield_to_excel()
+    if xlc:
+        xlc.restore_screen_updating(book)
+        xlc.yield_to_excel()
 
-        if progress_path is not None:
-            logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
-            data_rows = max(0, val_total - 1)
-            done_detail_text = (
-                f"シート名：{str_base_resolved}\n"
-                f"ファイル名：{str_fname or 'loaded.csv'}\n"
-                f"容量：{val_size_lbl}\n"
-                f"文字コード：{str_enc_lbl}\n"
-                f"データ：{data_rows} 行\n"
-                f"総数(ヘッダ含)：{val_total} 行"
+    # 工程3: 列幅調整（オートフィット）
+    if progress_path is not None:
+        _af_pct = calc_progress_pct(3, prog_row_total, prog_row_total)
+        _af_extra = "オートフィット省略" if _csv_ld_skip_autofit() else "オートフィット"
+        _progress_write(
+            progress_path,
+            {
+                "status": "RUN",
+                "phase_i": 3,
+                "phase": _csv_ld_progress_phase_label(3, "列幅調整中"),
+                "detail": _csv_ld_progress_detail(
+                    done=prog_row_total,
+                    total=prog_row_total,
+                    pct=_af_pct,
+                    extra=_af_extra,
+                ),
+                "done": prog_row_total,
+                "total": prog_row_total,
+                "pct": _af_pct,
+                "current_file": str_fname,
+                "seq": progress_seq,
+            },
+        )
+        progress_seq += 1
+    if max_col > 0 and not _csv_ld_skip_autofit():
+        total_parts = curr_part_idx
+        for part_i in range(1, curr_part_idx + 1):
+            sheet_name = _csv_ld_target_sheet_name(
+                str_base_resolved, part_i, is_split_mode
             )
-            _progress_write(
-                progress_path,
-                {
-                    "status": "DONE",
-                    "phase_i": total_steps,
-                    "phase": _csv_ld_progress_phase_label(total_steps, "完了"),
-                    "done": prog_row_total,
-                    "total": prog_row_total,
-                    "pct": 100,
-                    "current_file": str_fname,
-                    "show_done_dialog": True,
-                    "done_items": [
-                        {"no": 1, "name": str_fname or "loaded.csv", "rows": val_total},
-                    ],
-                    "done_detail_text": done_detail_text,
-                    "done_delay_ms": CSV_LD_DONE_DELAY_MS,
-                    "seq": progress_seq,
-                },
-            )
-            # UI が進捗クローズ＋完了通知表示まで終えるのを ACK で待つ（finally の restore より先に UI を完了させる）
-        jit_total_ms = _elapsed_ms(t_jit_body0)
+            if progress_path is not None and total_parts > 1:
+                _af_pct_p = calc_progress_pct(3, prog_row_total, prog_row_total)
+                _progress_write(
+                    progress_path,
+                    {
+                        "status": "RUN",
+                        "phase_i": 3,
+                        "phase": _csv_ld_progress_phase_label(
+                            3, f"列幅調整中 ({part_i}/{total_parts} シート)"
+                        ),
+                        "detail": _csv_ld_progress_detail(
+                            done=prog_row_total,
+                            total=prog_row_total,
+                            pct=_af_pct_p,
+                            extra=f"シート: {sheet_name}",
+                        ),
+                        "done": prog_row_total,
+                        "total": prog_row_total,
+                        "pct": _af_pct_p,
+                        "current_file": str_fname,
+                        "seq": progress_seq,
+                    },
+                )
+                progress_seq += 1
+            try:
+                t_af0 = time.perf_counter()
+                last_row_i = MAX_ROWS_PER_SHEET if part_i < curr_part_idx else val_accum_in_sheet
+                for s in book.sheets:
+                    if getattr(s, "name", "") != sheet_name:
+                        continue
+                    _autofit_used_range(s, last_row_i, max_col, sheet_name)
+                    break
+                ms_autofit += _elapsed_ms(t_af0)
+            except Exception:
+                pass
+            if xlc:
+                xlc.yield_to_excel()
+
+    if progress_path is not None:
+        logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
+        data_rows = max(0, val_total - 1)
+        done_detail_text = (
+            f"シート名：{str_base_resolved}\n"
+            f"ファイル名：{str_fname or 'loaded.csv'}\n"
+            f"容量：{val_size_lbl}\n"
+            f"文字コード：{str_enc_lbl}\n"
+            f"データ：{data_rows} 行\n"
+            f"総数(ヘッダ含)：{val_total} 行"
+        )
+        _progress_write(
+            progress_path,
+            {
+                "status": "DONE",
+                "phase_i": total_steps,
+                "phase": _csv_ld_progress_phase_label(total_steps, "完了"),
+                "done": prog_row_total,
+                "total": prog_row_total,
+                "pct": 100,
+                "current_file": str_fname,
+                "show_done_dialog": True,
+                "done_items": [
+                    {"no": 1, "name": str_fname or "loaded.csv", "rows": val_total},
+                ],
+                "done_detail_text": done_detail_text,
+                "done_delay_ms": CSV_LD_DONE_DELAY_MS,
+                "seq": progress_seq,
+            },
+        )
+        # UI が進捗クローズ＋完了通知表示まで終えるのを ACK で待つ（finally の restore より先に UI を完了させる）
+    jit_total_ms = _elapsed_ms(t_jit_body0)
     _log_jit_breakdown(
         csv_read_wait_ms=ms_csv_read_wait,
         matrix_tolist_ms=ms_matrix_tolist,
@@ -1349,7 +1420,7 @@ def _do_load_csv(
         )
         if not _message_yesno(parent_hwnd, msg, "CSV読込"):
             logger.info("[CSV_LD] 分割読込ユーザー拒否")
-            _progress_write(progress_path, {"status": "DONE", "seq": 1})
+            _progress_write_terminal(progress_path, status="DONE")
             if progress_ack_expected:
                 wait_progress_closed_ack(progress_closed_path)
             restore_excel_host_after_operation(parent_hwnd, sheet_id)
@@ -1387,7 +1458,12 @@ def _do_load_csv(
     except Exception as ex_fatal:
         logger.error("[CSV_LD] 致命的エラー: %s", ex_fatal, exc_info=True)
         try:
-            _progress_write(progress_path, {"status": "DONE", "seq": 1})
+            _progress_write_terminal(
+                progress_path,
+                status="ERROR",
+                phase="CSV読込エラー",
+                detail=str(ex_fatal),
+            )
         except Exception:
             pass
         try:
