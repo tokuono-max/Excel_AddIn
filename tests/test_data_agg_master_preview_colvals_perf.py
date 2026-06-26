@@ -10,6 +10,8 @@ from svc.data_agg_master_preview_perf import (
     master_preview_item_complete_should_capture_frozen,
     master_preview_item_complete_should_ensure_n_pick1,
     master_preview_item_complete_wait_async_ms,
+    master_preview_single_slot_progress_batch_wait_ms,
+    master_preview_single_slot_sync_wait_ms,
     master_preview_join_chain_targets_prior_item,
     master_preview_join_compute_rows_acceptable,
     master_preview_join_host_column_fill_ratio,
@@ -117,6 +119,17 @@ def test_item_complete_prefetch_wait_only_when_pending() -> None:
     )
     assert 0 < wait_ms <= 10_000
     assert master_preview_item_complete_wait_async_ms() == 0
+
+
+def test_single_slot_prefetch_wait_helpers() -> None:
+    assert (
+        master_preview_single_slot_progress_batch_wait_ms(prefetch_pending=False) == 250
+    )
+    assert (
+        master_preview_single_slot_progress_batch_wait_ms(prefetch_pending=True) == 5000
+    )
+    assert master_preview_single_slot_sync_wait_ms(prefetch_pending=False) == 0
+    assert master_preview_single_slot_sync_wait_ms(prefetch_pending=True) == 5000
 
 
 def test_finalize_skips_force_recompute_when_step_cache_hit() -> None:

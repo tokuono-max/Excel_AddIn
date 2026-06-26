@@ -8,7 +8,12 @@ from typing import Any
 # step0 のブロック待ちは廃止（先読み完了まで最大 60 秒 UI が「準備しています」のままになるため）。
 _SINGLE_SLOT_PREFETCH_WAIT_MS = 0
 # 項目完了時: 先読み進行中のみ短時間ポール（同期 compute の二重実行を避ける）。
-_ITEM_COMPLETE_PREFETCH_WAIT_MS = 2000
+_ITEM_COMPLETE_PREFETCH_WAIT_MS = 5000
+# progress 描画: 先読み進行中の n_pick=1 待ち（短すぎると mpv_progress が二重読込する）。
+_SINGLE_SLOT_PROGRESS_BATCH_WAIT_MS = 250
+_SINGLE_SLOT_PROGRESS_BATCH_PREFETCH_WAIT_MS = 5000
+# ensure 同期 compute 前: 先読み完了待ち（prefetch と single_slot_n_pick1 の二重読込防止）。
+_SINGLE_SLOT_SYNC_PREFETCH_WAIT_MS = 5000
 
 
 def master_preview_colvals_should_call_progress_batch(
@@ -52,6 +57,23 @@ def master_preview_item_complete_prefetch_wait_ms(
     if bool(cache_hit) or not bool(prefetch_pending):
         return 0
     return _ITEM_COMPLETE_PREFETCH_WAIT_MS
+
+
+def master_preview_single_slot_progress_batch_wait_ms(
+    *,
+    prefetch_pending: bool,
+) -> int:
+    """mpv_progress_batch_rows: single_slot n_pick=1 の先読み待ち ms。"""
+    if bool(prefetch_pending):
+        return _SINGLE_SLOT_PROGRESS_BATCH_PREFETCH_WAIT_MS
+    return _SINGLE_SLOT_PROGRESS_BATCH_WAIT_MS
+
+
+def master_preview_single_slot_sync_wait_ms(*, prefetch_pending: bool) -> int:
+    """ensure 同期 compute 前の先読み待ち ms（mpv_single_slot_n_pick1 等）。"""
+    if bool(prefetch_pending):
+        return _SINGLE_SLOT_SYNC_PREFETCH_WAIT_MS
+    return 0
 
 
 def master_preview_item_complete_wait_async_ms() -> int:

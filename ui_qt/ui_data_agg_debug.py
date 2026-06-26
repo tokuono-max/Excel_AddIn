@@ -871,6 +871,8 @@ class DataAggDebugDialog(QDialog):
         )
         # single_slot warmup 投入済みで step キャッシュ未反映（先読み進行中）
         self._mpv_single_slot_prefetch_pending_sk: tuple[Any, ...] | None = None
+        # 進捗 hook の file_index 解決用（compute/extract 実パス。全 scan_paths とは限らない）
+        self._mpv_progress_hook_paths: list[str] | None = None
         # mpv 描画: 項目ごとの progress 行キャッシュ（step_idx, rows）
         self._mpv_progress_rows_by_mi: dict[int, tuple[int, list[list[Any]]]] = {}
         # 直近まで compute 済みの項目（実行可能シナリオなし項目へ移ったときの prog フォールバック用）
@@ -1998,23 +2000,110 @@ class DataAggDebugDialog(QDialog):
         except Exception:
             pass
 
+    def _mpv_effective_progress_hook_paths(self) -> list[str]:
+        hook = getattr(self, "_mpv_progress_hook_paths", None)
+        if hook:
+            return list(hook)
+        return list(self._debug_scan_paths or [])
+
     def _master_progress_pick_current_file(
         self, detail: str, file_index: int, n_files: int
     ) -> str:
         from svc.svc_data_agg import _batch_hook_resolve_current_file  # noqa: WPS433
 
-        paths = list(self._debug_scan_paths or [])
-        name = _batch_hook_resolve_current_file(detail, file_index, paths)
+        detail_s = str(detail or "")
+        row_m = re.search(
+            r"行\s*\d+\s*/\s*\d+\s*:\s*(.+?)(?:\s+読込中|（完了）|$)",
+            detail_s,
+        )
+        if row_m:
+            return row_m.group(1).strip()
+        paths = self._mpv_effective_progress_hook_paths()
+        eff_nf = max(1, len(paths)) if paths else max(1, int(n_files))
+        eff_fi = int(file_index)
+        if paths and 1 <= eff_fi <= len(paths):
+            eff_nf = len(paths)
+        name = _batch_hook_resolve_current_file(detail_s, eff_fi, paths)
         if name:
             return name
-        if n_files > 0 and 1 <= int(file_index) <= len(paths):
+        if eff_nf > 0 and 1 <= eff_fi <= len(paths):
             from pathlib import Path
 
-            return Path(str(paths[int(file_index) - 1])).name
-        m_colon = re.search(r":\s*([^\s—]+)$", str(detail or ""))
+            return Path(str(paths[int(eff_fi) - 1])).name
+        m_colon = re.search(r":\s*([^\s—]+)$", detail_s)
         if m_colon:
             return m_colon.group(1).strip()
         return ""
+
+    def _master_progress_format_extract_detail(
+        self,
+        detail_s: str,
+        *,
+        phase_head: str,
+        fi: int,
+        nf: int,
+        cur_file: str,
+    ) -> str:
+        raw = str(detail_s or "").strip()
+        if raw.startswith(phase_head):
+            raw = raw[len(phase_head) :].strip()
+        item_m = re.search(
+            r"項目\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s*（|$)",
+            raw,
+        )
+        if item_m:
+            label = item_m.group(3).strip()
+            if cur_file and cur_file not in label:
+                return "取り出し: %s — 項目 %s/%s" % (
+                    cur_file,
+                    item_m.group(1),
+                    item_m.group(2),
+                )
+            return "取り出し: 項目 %s/%s — %s" % (
+                item_m.group(1),
+                item_m.group(2),
+                label,
+            )
+        row_m = re.search(
+            r"行\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)\s+読込中",
+            raw,
+        )
+        if row_m:
+            fn = row_m.group(3).strip()
+            return "読込中: %s（%s/%s行）" % (
+                fn,
+                row_m.group(1),
+                row_m.group(2),
+            )
+        row_done = re.search(
+            r"行\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)（完了）",
+            raw,
+        )
+        if row_done:
+            return "読込完了: %s" % row_done.group(3).strip()
+        file_m = re.search(
+            r"ファイル\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s+読込中|（完了）|$)",
+            raw,
+        )
+        if file_m:
+            fn = file_m.group(3).strip()
+            return "読込中 %s/%s: %s" % (
+                file_m.group(1),
+                file_m.group(2),
+                fn,
+            )
+        hook_paths = self._mpv_effective_progress_hook_paths()
+        eff_nf = len(hook_paths) if hook_paths else max(1, int(nf))
+        eff_fi = int(fi)
+        if cur_file:
+            if eff_nf <= 1:
+                return "読込中: %s" % cur_file
+            return "読込中 %s/%s: %s" % (eff_fi, eff_nf, cur_file)
+        if raw:
+            return raw
+        if eff_nf <= 1:
+            return "読込中"
+        return "読込中 %s/%s" % (eff_fi, eff_nf)
 
     def _master_dbg_batch_progress_hook(self, sub_phase: int, detail: str, *rest: Any) -> None:
         """compute_batch_table_rows からのコールバック（phase 4〜7）。rest は file_index, n_files（任意）。"""
@@ -2079,15 +2168,20 @@ class DataAggDebugDialog(QDialog):
             step_k = (fi - 1) * 4 + (sub_phase - 4) + 1
             pct_ov = int(round(37.5 + 50.0 * float(step_k) / float(denom)))
         pct_ov = min(pct_ov, 95)
-        cur_file = self._master_progress_pick_current_file(detail_s, fi, nf)
+        hook_paths = self._mpv_effective_progress_hook_paths()
+        hook_nf = len(hook_paths) if hook_paths else nf
+        cur_file = self._master_progress_pick_current_file(detail_s, fi, hook_nf)
         show_detail = detail_s.strip()
         if show_detail and show_detail.startswith(phase_head):
             show_detail = show_detail[len(phase_head) :].strip()
         if sub_phase == 4:
-            if cur_file:
-                show_detail = "読込中 %s/%s: %s" % (fi, nf, cur_file)
-            elif not show_detail:
-                show_detail = "読込中 %s/%s" % (fi, nf)
+            show_detail = self._master_progress_format_extract_detail(
+                detail_s,
+                phase_head=phase_head,
+                fi=fi,
+                nf=hook_nf,
+                cur_file=cur_file,
+            )
         elif sub_phase == 6:
             join_m = re.search(r"結合\s*(\d+)\s*/\s*(\d+)", detail_s)
             file_m = re.search(r"ファイル\s*(\d+)\s*/\s*(\d+)", detail_s)
@@ -4381,6 +4475,25 @@ class DataAggDebugDialog(QDialog):
             waited = self._mpv_wait_single_slot_n_pick1_cache(max_wait_ms=int(wait_async_ms))
             if waited:
                 return waited
+        if (
+            self._mpv_is_single_slot_active()
+            and n_pick_i == 1
+            and probe_caller != "mpv_progress_prefetch"
+        ):
+            from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+                master_preview_single_slot_sync_wait_ms,
+            )
+
+            if self._mpv_is_single_slot_prefetch_pending():
+                sync_wait = master_preview_single_slot_sync_wait_ms(
+                    prefetch_pending=True
+                )
+                if sync_wait > 0:
+                    waited_sync = self._mpv_wait_single_slot_n_pick1_cache(
+                        max_wait_ms=int(sync_wait)
+                    )
+                    if waited_sync:
+                        return waited_sync
         with self._mpv_prog_compute_lock:
             cached = self._mpv_progress_rows_step_cache.get(sk)
             if (
@@ -4476,6 +4589,26 @@ class DataAggDebugDialog(QDialog):
             if hit is not None:
                 col_from_prog = hit
                 cache_hit = True
+            elif (
+                step_idx == 0
+                and not has_join
+                and self._mpv_is_single_slot_prefetch_pending()
+            ):
+                from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+                    master_preview_single_slot_sync_wait_ms,
+                )
+
+                self._mpv_wait_single_slot_n_pick1_cache(
+                    max_wait_ms=master_preview_single_slot_sync_wait_ms(
+                        prefetch_pending=True
+                    )
+                )
+                hit = self._mpv_try_colvals_from_step_cache(
+                    mi_idx=int(self._mi_idx), n_pick=n_pick_after
+                )
+                if hit is not None:
+                    col_from_prog = hit
+                    cache_hit = True
             elif (
                 step_idx == 0
                 and master_preview_step0_should_block_wait_n_pick1(has_join_defs=has_join)
@@ -5191,14 +5324,29 @@ class DataAggDebugDialog(QDialog):
                 )
             except Exception:
                 pass
-        _h, table_rows, _ev, _jt = run_preview_compute(
-            scen,
-            scan_paths,
-            max_primary_rows=self._master_preview_display_rows(),
-            max_table_rows=self._master_preview_display_rows(),
-            progress_hook=progress_hook,
-            probe_caller=probe_caller,
-        )
+        hook_paths_prev = getattr(self, "_mpv_progress_hook_paths", None)
+        try:
+            from svc.svc_data_agg import filter_file_paths_for_master_preview  # noqa: WPS433
+
+            base_items = list((scenario_base or {}).get("items") or [])
+            dd_hook = scen.get("__debug_diag")
+            self._mpv_progress_hook_paths = list(
+                filter_file_paths_for_master_preview(
+                    list(scan_paths or []),
+                    base_items,
+                    dd_hook if isinstance(dd_hook, dict) else None,
+                )
+            )
+            _h, table_rows, _ev, _jt = run_preview_compute(
+                scen,
+                scan_paths,
+                max_primary_rows=self._master_preview_display_rows(),
+                max_table_rows=self._master_preview_display_rows(),
+                progress_hook=progress_hook,
+                probe_caller=probe_caller,
+            )
+        finally:
+            self._mpv_progress_hook_paths = hook_paths_prev
         rows_out = [list(r) for r in table_rows]
         rows_out = self._mpv_coalesce_join_compute_rows(
             mi_idx=int(mi_idx),
@@ -6259,7 +6407,14 @@ class DataAggDebugDialog(QDialog):
                     pass
                 self._mpv_maybe_enqueue_progress_prefetch()
                 return cached_one
-            waited = self._mpv_wait_single_slot_n_pick1_cache(max_wait_ms=200)
+            from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+                master_preview_single_slot_progress_batch_wait_ms,
+            )
+
+            wait_ms = master_preview_single_slot_progress_batch_wait_ms(
+                prefetch_pending=self._mpv_is_single_slot_prefetch_pending()
+            )
+            waited = self._mpv_wait_single_slot_n_pick1_cache(max_wait_ms=int(wait_ms))
             if waited:
                 self._mpv_display_mi_idx = int(self._mi_idx)
                 self._mpv_progress_rows_cache = (key, waited)
@@ -6275,6 +6430,21 @@ class DataAggDebugDialog(QDialog):
                     pass
                 self._mpv_maybe_enqueue_progress_prefetch()
                 return waited
+            if (
+                int(self._master_step_idx) == 0
+                and self._mpv_is_single_slot_prefetch_pending()
+            ):
+                self._mpv_display_mi_idx = int(self._mi_idx)
+                self._mpv_progress_rows_cache = (key, [])
+                try:
+                    _data_agg_probe_log.info(
+                        "[DATA_AGG_DIAG] mpv_progress skip=defer_prefetch_step0 "
+                        "mi_idx=%s step_idx=0",
+                        self._mi_idx,
+                    )
+                except Exception:
+                    pass
+                return []
         composed_rows = self._mpv_try_compose_progress_rows_from_cache(n_pick=n_pick_req)
         if composed_rows is not None:
             self._mpv_progress_rows_cache = (key, composed_rows)
@@ -6553,55 +6723,64 @@ class DataAggDebugDialog(QDialog):
             self._mpv_master_dbg_progress_hook_or_none()
         )
         _extract_hook = self._mpv_master_dbg_progress_hook_or_none()
-        for i, fp in enumerate(paths_list, start=1):
-            if len(col_vals) >= max_rows:
-                break
-            fname = Path(str(fp)).name
-            row_prog = min(len(col_vals) + 1, max_rows)
-            if _extract_hook is not None:
-                try:
-                    _extract_hook(
-                        4,
-                        "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
-                        1,
-                        1,
-                    )
-                except Exception:
-                    pass
-            with xlsx_workbook_scope():  # type: ignore[misc]
-                try:
-                    _precache_csv_for_master_debug_extract(
-                        fp,
-                        progress_hook=_csv_prog,
-                    )
-                    jp_hdr = str(one.get("name") or one.get("id") or "").strip()
-                    b = extract_item_bundle(
-                        fp,
-                        one,
-                        item_id=item_id or None,
-                        cell_positions={},
-                        join_path_header=jp_hdr or None,
-                    )
-                except Exception:
-                    b = {"primary_values": []}
-            _append_extract_primaries_to_col(
-                col_vals,
-                b.get("primary_values"),
-                max_rows=max_rows,
-            )
-            _pe_n += 1
-            if _extract_hook is not None:
-                try:
-                    _extract_hook(
-                        4,
-                        "行 %s/%s: %s（完了）" % (min(len(col_vals), max_rows), max_rows, fname),
-                        1,
-                        1,
-                    )
-                except Exception:
-                    pass
-            if _pe_n % 4 == 0:
-                self._process_events_light()
+        hook_paths_prev = getattr(self, "_mpv_progress_hook_paths", None)
+        self._mpv_progress_hook_paths = list(paths_list)
+        try:
+            for i, fp in enumerate(paths_list, start=1):
+                if len(col_vals) >= max_rows:
+                    break
+                fname = Path(str(fp)).name
+                row_prog = min(len(col_vals) + 1, max_rows)
+                if _extract_hook is not None:
+                    try:
+                        _extract_hook(
+                            4,
+                            "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
+                            i,
+                            len(paths_list),
+                        )
+                    except Exception:
+                        pass
+                with xlsx_workbook_scope():  # type: ignore[misc]
+                    try:
+                        _precache_csv_for_master_debug_extract(
+                            fp,
+                            progress_hook=_csv_prog,
+                        )
+                        jp_hdr = str(one.get("name") or one.get("id") or "").strip()
+                        b = extract_item_bundle(
+                            fp,
+                            one,
+                            item_id=item_id or None,
+                            cell_positions={},
+                            join_path_header=jp_hdr or None,
+                        )
+                    except Exception:
+                        b = {"primary_values": []}
+                _append_extract_primaries_to_col(
+                    col_vals,
+                    b.get("primary_values"),
+                    max_rows=max_rows,
+                )
+                _pe_n += 1
+                if _extract_hook is not None:
+                    try:
+                        _extract_hook(
+                            4,
+                            "行 %s/%s: %s（完了）" % (
+                                min(len(col_vals), max_rows),
+                                max_rows,
+                                fname,
+                            ),
+                            i,
+                            len(paths_list),
+                        )
+                    except Exception:
+                        pass
+                if _pe_n % 4 == 0:
+                    self._process_events_light()
+        finally:
+            self._mpv_progress_hook_paths = hook_paths_prev
         if not col_vals:
             col_vals = ["（該当する主値がありません）"]
         try:
@@ -7935,8 +8114,18 @@ class DataAggDebugDialog(QDialog):
                 master_preview_item_complete_prefetch_wait_ms,
                 master_preview_item_complete_should_capture_frozen,
                 master_preview_item_complete_should_ensure_n_pick1,
+                master_preview_should_warmup_single_slot,
             )
 
+            if master_preview_should_warmup_single_slot(
+                has_join_defs=self._mpv_current_item_has_join_defs()
+            ) and self._mpv_is_single_slot_prefetch_pending():
+                self._mpv_wait_single_slot_n_pick1_cache(
+                    max_wait_ms=master_preview_item_complete_prefetch_wait_ms(
+                        prefetch_pending=True,
+                        cache_hit=False,
+                    )
+                )
             _cached_done = self._mpv_rows_from_step_cache_n_pick(1)
             _cache_hit_done = bool(_cached_done)
             _need_ensure = master_preview_item_complete_should_ensure_n_pick1(

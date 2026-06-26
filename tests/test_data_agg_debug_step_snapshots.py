@@ -317,6 +317,51 @@ def test_master_dbg_batch_progress_hook_formats_reading_detail(monkeypatch) -> N
         dlg.close()
 
 
+def test_master_dbg_batch_progress_hook_formats_row_extract_detail(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        seen: list[dict[str, str]] = []
+        monkeypatch.setattr(dlg, "_master_run_progress_active", True)
+        monkeypatch.setattr(dlg, "_show_run_progress", lambda *args, **kwargs: seen.append(kwargs))
+        monkeypatch.setattr(dlg, "_process_events_light", lambda: None)
+        dlg._mpv_progress_hook_paths = [r"C:\data\光特性履歴.xlsx"]
+
+        dlg._master_dbg_batch_progress_hook(
+            4,
+            "行 3/100: 光特性履歴.xlsx 読込中",
+            1,
+            1,
+        )
+
+        assert seen
+        assert seen[-1]["detail"] == "読込中: 光特性履歴.xlsx（3/100行）"
+        assert seen[-1]["current_file"] == "光特性履歴.xlsx"
+    finally:
+        dlg.close()
+
+
+def test_master_progress_pick_uses_hook_paths_not_full_scan(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._debug_scan_paths = [
+            "a.xlsx",
+            "b.xlsx",
+            "c.xlsx",
+            "d.xlsx",
+            "e.xlsx",
+        ]
+        dlg._mpv_progress_hook_paths = [r"C:\data\光特性履歴.xlsx"]
+
+        name = dlg._master_progress_pick_current_file(
+            "項目 1/7: 機器番号",
+            1,
+            5,
+        )
+        assert name == "光特性履歴.xlsx"
+    finally:
+        dlg.close()
+
+
 def test_master_dbg_batch_progress_hook_formats_joining_detail(monkeypatch) -> None:
     dlg = _master_dialog()
     try:
