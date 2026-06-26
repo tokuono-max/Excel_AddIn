@@ -370,7 +370,7 @@ def _find_data_agg_main_window(sheet_id: str, excel_hwnd: int) -> QWidget | None
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
-    if app is None:
+    if not isinstance(app, QApplication):
         return None
     candidates: list[QWidget] = []
     for w in app.topLevelWidgets():
@@ -897,6 +897,8 @@ class _DataAggMainWindow(QDialog):
         self._file_list_items: list[str] = []
         self._scan_generation: int = 0
         self._scan_busy: bool = False
+        self._scan_req_auto_mode: bool = True
+        self._scan_req_on_complete: Callable[[int], None] | None = None
         self._scan_thread: QThread | None = None
         self._scan_worker: _FolderScanWorker | None = None
         self._scan_pending_auto: bool = False
@@ -2134,13 +2136,12 @@ class _DataAggMainWindow(QDialog):
     @Slot(int, object)
     def _on_folder_scan_worker_finished(self, generation: int, paths_obj: object) -> None:
         paths = list(paths_obj) if isinstance(paths_obj, list) else []
-        auto_mode = bool(getattr(self, "_scan_req_auto_mode", True))
-        cb = getattr(self, "_scan_req_on_complete", None)
+        auto_mode = bool(self._scan_req_auto_mode)
         self._apply_folder_scan_result(
             generation,
             paths,
             auto_mode=auto_mode,
-            on_complete=cb if callable(cb) else None,
+            on_complete=self._scan_req_on_complete,
         )
         self._scan_thread = None
         self._scan_worker = None
@@ -2150,8 +2151,8 @@ class _DataAggMainWindow(QDialog):
         if not should_apply_folder_scan_result(generation, self._scan_generation):
             return
         self._set_scan_ui_busy(False)
-        auto_mode = bool(getattr(self, "_scan_req_auto_mode", True))
-        cb = getattr(self, "_scan_req_on_complete", None)
+        auto_mode = bool(self._scan_req_auto_mode)
+        cb = self._scan_req_on_complete
         if not auto_mode:
             t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
             show_warning_notice(
@@ -2620,10 +2621,9 @@ class _DataAggMainWindow(QDialog):
         """選択中の行インデックスを昇順で返す。連続・歯抜け選択に対応。"""
         indices: set[int] = set()
         sm = self._item_table.selectionModel()
-        if sm:
-            for rng in sm.selection():
-                for row in range(rng.top(), rng.bottom() + 1):
-                    indices.add(row)
+        if sm is not None:
+            for idx in sm.selectedRows():
+                indices.add(int(idx.row()))
         return sorted(indices)
 
     def _next_scenario_item_numeric_id(self, items: list[dict[str, Any]]) -> str:
@@ -4808,8 +4808,13 @@ class _ScenarioEditDialog(QDialog):
                 )
             scan_paths = list(self._scan_paths_hint)
             parent = self.parentWidget()
-            if parent is not None and hasattr(parent, "_rescan_paths_from_current_form"):
-                scan_paths = parent._rescan_paths_from_current_form()
+            rescan = (
+                getattr(parent, "_rescan_paths_from_current_form", None)
+                if parent is not None
+                else None
+            )
+            if callable(rescan):
+                scan_paths = list(rescan())
             elif not scan_paths:
                 mw = parent
                 while mw is not None:
@@ -4846,12 +4851,18 @@ class _ScenarioEditDialog(QDialog):
         jd["row"].valueChanged.connect(self._on_form_changed)
         jd["col"].valueChanged.connect(self._on_form_changed)
         jd["item_combo"].currentIndexChanged.connect(self._on_form_changed)
+        jvs = jd.get("value_shape_script")
+        if jvs is not None:
+            jvs.textChanged.connect(self._on_form_changed)
+        for cbx in jd.get("checks") or []:
+            cbx.stateChanged.connect(self._on_form_changed)
 
     def _notify_main_scenario_dirty(self) -> None:
         """シナリオ編集の変更をメインのシナリオ保存ダーティに反映する。"""
         w = self.parentWidget()
-        if w is not None and hasattr(w, "_mark_scenario_dirty"):
-            w._mark_scenario_dirty()
+        mark_dirty = getattr(w, "_mark_scenario_dirty", None) if w is not None else None
+        if callable(mark_dirty):
+            mark_dirty()
 
     def _notify_parent_registered(self) -> None:
         """親のデータ集約画面へ、登録時と同様に sources を即時反映する。"""
@@ -4951,6 +4962,11 @@ class _ScenarioEditDialog(QDialog):
             jd["row"].valueChanged.connect(self._on_form_changed)
             jd["col"].valueChanged.connect(self._on_form_changed)
             jd["item_combo"].currentIndexChanged.connect(self._on_form_changed)
+            jvs = jd.get("value_shape_script")
+            if jvs is not None:
+                jvs.textChanged.connect(self._on_form_changed)
+            for cbx in jd.get("checks") or []:
+                cbx.stateChanged.connect(self._on_form_changed)
 
         nr["search_target"].currentIndexChanged.connect(self._on_form_changed)
         nr["search_cond"].currentIndexChanged.connect(self._on_form_changed)
@@ -5595,6 +5611,11 @@ class _ScenarioEditDialog(QDialog):
         for jd in cr["join_defs"]:
             for k in ("cell", "row", "col", "item_combo"):
                 jd[k].blockSignals(block)
+            jvs = jd.get("value_shape_script")
+            if jvs is not None:
+                jvs.blockSignals(block)
+            for cbx in jd.get("checks") or []:
+                cbx.blockSignals(block)
         for w in (
             nr["search_target"],
             nr["search_cond"],
@@ -5769,6 +5790,14 @@ class _ScenarioEditDialog(QDialog):
                         self._combo_select_saved_master_item(
                             jd["item_combo"], str(jlist[i2].get("item") or "")
                         )
+                        jn_vs = jd.get("value_shape_script")
+                        if jn_vs is not None:
+                            jn_vs.setText(str(jlist[i2].get("value_shape_script") or ""))
+                        chk_vals = jlist[i2].get("checks") or []
+                        if not isinstance(chk_vals, list):
+                            chk_vals = []
+                        for ci, cbx in enumerate(jd.get("checks") or []):
+                            cbx.setChecked(self._saved_process_check_at_index(ci, chk_vals))
                 wm_idx = p.get("write_mode_cell_idx")
                 cb_wm = r["write_mode_cell"]
                 if isinstance(wm_idx, int) and 0 <= wm_idx < cb_wm.count():
@@ -6021,6 +6050,12 @@ class _ScenarioEditDialog(QDialog):
                     "row": jd["row"].value(),
                     "col": jd["col"].value(),
                     "item": jd["item_combo"].currentText().strip(),
+                    "checks": [cb.text() for cb in (jd.get("checks") or []) if cb.isChecked()],
+                    "value_shape_script": (
+                        jd["value_shape_script"].text().strip()
+                        if jd.get("value_shape_script") is not None
+                        else ""
+                    ),
                 }
                 for jd in r["join_defs"]
                 if _item_ok(jd["item_combo"].currentText())

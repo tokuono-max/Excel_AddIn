@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
@@ -208,14 +208,14 @@ class ProgressDialog(QDialog):
                     self.setWindowModality(Qt.WindowModality.WindowModal)
             except Exception:
                 try:
-                    self.setWindowModality(Qt.WindowModal)
+                    self.setWindowModality(Qt.WindowModality.WindowModal)
                 except Exception:
                     pass
 
         # 判定: no_native_window が True のときは WA_NativeWindow を付けない（csv_ld 等で枠だけになる問題対策）
         if not bool(req.get("no_native_window", False)):
             try:
-                self.setAttribute(Qt.WA_NativeWindow, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
                 self.winId()
             except Exception:
                 pass
@@ -225,7 +225,7 @@ class ProgressDialog(QDialog):
         self._done_cfg = (_cfg or {}).get("_done_cfg")
         # 変数: DONE 到達時に完了通知を出すかどうかと、その際の items / detail_text（_close_after_done で使用）
         self._pending_show_done_dialog = False
-        self._pending_done_items: list = []
+        self._pending_done_items: list[Any] = []
         self._pending_done_detail_text: Optional[str] = None
         self._pending_output_dir: Optional[str] = None
         # TITLE キーが明示されていて空ならベースタイトル無し（window_title のみ表示用）。
@@ -721,7 +721,10 @@ class ProgressDialog(QDialog):
                     except Exception:
                         pass
                 self._pending_show_done_dialog = bool(d.get("show_done_dialog", False))
-                self._pending_done_items = d.get("done_items") if isinstance(d.get("done_items"), list) else []
+                _raw_done_items = d.get("done_items")
+                self._pending_done_items = (
+                    list(_raw_done_items) if isinstance(_raw_done_items, list) else []
+                )
                 self._pending_done_detail_text = str(d.get("done_detail_text", "") or "").strip() or None
                 self._pending_output_dir = str(d.get("output_dir") or "").strip() or None
                 try:
@@ -937,25 +940,27 @@ class ProgressDialog(QDialog):
                 try:
                     pw = pw_cancel
                     tmpl = self._req.get("partner_csv_sp_reopen_template")
+                    partner_widget = pw
 
                     def _show_partner_cancel() -> None:
                         try:
                             from shiboken6 import Shiboken as _Shiboken  # type: ignore
                         except Exception:
                             _Shiboken = None  # type: ignore
-                        _alive = pw is not None
+                        _alive = partner_widget is not None
                         if _alive and _Shiboken is not None:
                             try:
-                                _alive = bool(_Shiboken.isValid(pw))
+                                _alive = bool(_Shiboken.isValid(partner_widget))
                             except Exception:
                                 _alive = False
-                        if _alive:
+                        if _alive and partner_widget is not None:
+                            pw_show = partner_widget
                             try:
                                 _attr = getattr(Qt.WidgetAttribute, "WA_DontShowOnScreen", None) or getattr(
                                     Qt, "WA_DontShowOnScreen", None
                                 )
                                 if _attr is not None:
-                                    pw.setAttribute(_attr, False)
+                                    pw_show.setAttribute(_attr, False)
                             except Exception as _e1:
                                 if _log is not None:
                                     try:
@@ -963,11 +968,11 @@ class ProgressDialog(QDialog):
                                     except Exception:
                                         pass
                             try:
-                                pw.show()
-                                pw.raise_()
-                                pw.activateWindow()
+                                pw_show.show()
+                                pw_show.raise_()
+                                pw_show.activateWindow()
                                 try:
-                                    _clr = getattr(pw, "clear_sp_progress_partner_phase", None)
+                                    _clr = getattr(pw_show, "clear_sp_progress_partner_phase", None)
                                     if callable(_clr):
                                         _clr()
                                 except Exception:
@@ -976,7 +981,7 @@ class ProgressDialog(QDialog):
                                     try:
                                         _diag_ui.info(
                                             "[UI_PROGRESS_DIAG] partner show() ok type=%s",
-                                            type(pw).__name__,
+                                            type(pw_show).__name__,
                                         )
                                     except Exception:
                                         pass
@@ -1046,8 +1051,10 @@ class ProgressDialog(QDialog):
                     cr = getattr(self, "_cancel_row_widget", None)
                     if cr is not None:
                         cr.setVisible(False)
-                    elif getattr(self, "_btn_cancel", None) is not None:
-                        self._btn_cancel.setVisible(False)
+                    else:
+                        btn_cancel = getattr(self, "_btn_cancel", None)
+                        if btn_cancel is not None:
+                            btn_cancel.setVisible(False)
                     # キャンセル行が無い進捗（hlclr 等）でも stretch ＋固定高さの余白を詰める
                     self._compact_progress_after_cancel_hidden()
             except Exception:
@@ -1068,7 +1075,7 @@ class ProgressDialog(QDialog):
                 svc_pct_explicit = raw_pct is not None
                 if svc_pct_explicit:
                     try:
-                        pct = max(0, min(99, int(raw_pct)))
+                        pct = max(0, min(99, int(raw_pct or 0)))
                     except (TypeError, ValueError):
                         svc_pct_explicit = False
                 if not svc_pct_explicit:
@@ -1232,7 +1239,7 @@ class ProgressDialog(QDialog):
             try:
                 if bool(self._req.get("close_parent_when_done", True)):
                     p = self.parent()
-                    if p is not None and hasattr(p, "close"):
+                    if isinstance(p, QWidget):
                         p.close()
             except Exception:
                 pass
@@ -1250,7 +1257,7 @@ class ProgressDialog(QDialog):
             # 2) 完了通知を表示（前面化は DoneDialog.showEvent に一本化）
             if show_done and (items or detail_text):
                 try:
-                    req = {"items": items}
+                    req: dict[str, Any] = {"items": items}
                     if detail_text:
                         req["detail_text"] = detail_text
                     _od = getattr(self, "_pending_output_dir", None)
@@ -1328,7 +1335,7 @@ def raise_csv_sp_partner_progress(parent_hwnd: int) -> None:
     重複確認モーダルを閉じる直前に呼び、背後に残った進捗と枠の重なり・ゴースト感を抑える。
     """
     app = QApplication.instance()
-    if app is None:
+    if not isinstance(app, QApplication):
         return
     ph = int(parent_hwnd or 0)
     for w in app.topLevelWidgets():

@@ -14,16 +14,15 @@ from svc.svc_data_agg import compute_batch_table_rows  # noqa: E402
 from tests.test_data_agg_batch_stability import _cross_join_mini_scenario  # noqa: E402
 
 
-def test_master_preview_pool_row_cap_stops_early(
+def test_master_preview_display_cap_limits_result_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """マスタプレビュー: プール行数が max_primary_rows に達したらファイル走査を打ち切る。"""
+    """マスタプレビュー: 表示上限で結果 table_rows が打切られる。"""
     data, paths = _cross_join_mini_scenario(tmp_path)
     data["__debug_diag"] = {
         "enabled": True,
         "source": "ui_data_agg_debug.master_preview",
     }
-    paths = paths * 8
     monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
     monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
     _h, rows, _ev, _je = compute_batch_table_rows(
@@ -34,7 +33,29 @@ def test_master_preview_pool_row_cap_stops_early(
         probe_caller="test_master_cap",
     )
     dd = data.get("__debug_diag") or {}
-    assert dd.get("master_preview_read_truncated") is True
-    assert int(dd.get("master_preview_pool_row_cap") or 0) == 2
     assert len(rows) <= 2
-    assert int(dd.get("master_preview_files_processed") or 99) < len(paths)
+    assert int(dd.get("master_preview_stats_files_read") or 0) >= 1
+
+
+def test_master_preview_join_full_read_skips_pool_row_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """join 参照ファイル全件読込時は join プール行数上限を設けない。"""
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "master_preview_join_read_full_files": True,
+        "master_preview_join_side_patterns": ["紐づけ"],
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    compute_batch_table_rows(
+        data,
+        paths,
+        max_primary_rows=2,
+        max_table_rows=10,
+        probe_caller="test_master_cap",
+    )
+    dd = data.get("__debug_diag") or {}
+    assert "master_preview_pool_row_cap" not in dd

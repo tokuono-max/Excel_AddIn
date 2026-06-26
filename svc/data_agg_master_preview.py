@@ -22,6 +22,38 @@ MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
 FROZEN_SNAPSHOT_VERSION = 1
 
 
+def table_rows_to_join_search_seed_pool(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    anchor_file_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。"""
+    if not headers or not rows:
+        return []
+    path_h = "file_path" if "file_path" in headers else None
+    anchor_fp = str(anchor_file_path or "").strip()
+    out: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, (list, tuple)):
+            continue
+        d: dict[str, Any] = {}
+        for c, h in enumerate(headers):
+            key = str(h)
+            d[key] = row[c] if c < len(row) else None
+        d["__iter_index"] = int(i)
+        if path_h and d.get(path_h) not in (None, ""):
+            fp = str(d[path_h])
+        elif anchor_fp:
+            fp = anchor_fp
+        else:
+            fp = "mpv_table_seed://%d" % int(i)
+        d["__file_path"] = fp
+        d["__norm_path"] = fp
+        out.append(d)
+    return out
+
+
 def master_preview_one_shot_eligible(
     scenario_base: dict[str, Any],
     mi_idx: int,
@@ -253,6 +285,7 @@ def scenario_for_stepped_preview(
     master_step_idx: int,
     active_slot_indices: list[int],
     use_max_sources_for_current_item: bool = False,
+    carry_forward_completed_items: bool = False,
     frozen_through_mi: int | None = None,
     frozen_prior: dict[str, Any] | None = None,
     frozen_capture_out: dict[str, Any] | None = None,
@@ -266,6 +299,7 @@ def scenario_for_stepped_preview(
 
     use_max_sources_for_current_item が True のとき、現在項目は常に active 内の全ソースを取り込む
     （結合キー探索が無いシナリオ向けの 1 回計算＋ステップ再利用用。caller がガードする）。
+    carry_forward_completed_items が True のとき、j < mi は前段 table_rows seed を使う前提で再抽出しない。
     """
     scen = copy.deepcopy(scenario_base or {})
     items_orig = list(scen.get("items") or [])
@@ -292,7 +326,9 @@ def scenario_for_stepped_preview(
             itc = {"name": "?"}
         sources = list(itc.get("sources") or [])
         if j < mi_idx:
-            if frozen_through_mi is not None and j <= int(frozen_through_mi):
+            if carry_forward_completed_items:
+                itc["sources"] = []
+            elif frozen_through_mi is not None and j <= int(frozen_through_mi):
                 itc["sources"] = []
         elif j == mi_idx:
             if use_max_sources_for_current_item and active:

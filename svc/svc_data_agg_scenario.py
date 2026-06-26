@@ -363,6 +363,14 @@ def validate_scenario(data: dict[str, Any]) -> list[str]:
                                         rv = jd.get(rk, 0)
                                         if not isinstance(rv, (int, float)):
                                             errors.append("items[%s].sources[%s].join_defs[%s].%s は数値です" % (i, j, k, rk))
+                                    jvss = jd.get("value_shape_script")
+                                    if jvss is not None and str(jvss).strip():
+                                        ok_js, msg_js = compile_shape_script(str(jvss))
+                                        if not ok_js:
+                                            errors.append(
+                                                "items[%s].sources[%s].join_defs[%s].value_shape_script: %s"
+                                                % (i, j, k, msg_js)
+                                            )
                             ro = int(src.get("row_offset") or 0)
                             co = int(src.get("col_offset") or 0)
                             ru = bool(src.get("repeat_until_empty", True))

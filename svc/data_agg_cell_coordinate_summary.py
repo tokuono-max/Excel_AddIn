@@ -16,6 +16,20 @@ def _lbl(dc: dict[str, Any], key: str, default: str) -> str:
     return re.sub(r"<[^>]+>", "", t).strip() or default
 
 
+def _rule_def_extra_suffix(rule: dict[str, Any]) -> str:
+    """link_defs / join_defs の加工・DSL を要約行へ付加（設定時のみ）。"""
+    parts: list[str] = []
+    chk = rule.get("checks")
+    if isinstance(chk, list):
+        labels = [str(x).strip() for x in chk if str(x).strip()]
+        if labels:
+            parts.append("加工=%s" % "、".join(labels))
+    vss = str(rule.get("value_shape_script") or "").strip()
+    if vss:
+        parts.append("DSL=%s" % vss)
+    return (" %s" % " ".join(parts)) if parts else ""
+
+
 def cell_coordinate_setting_lines(
     src: dict[str, Any],
     pb: dict[str, Any],
@@ -125,7 +139,7 @@ def cell_coordinate_setting_lines(
             if not isinstance(jd, dict):
                 continue
             lines.append(
-                "%s%s: セル=%s 行=%s 列=%s 項目=%s"
+                "%s%s: セル=%s 行=%s 列=%s 項目=%s%s"
                 % (
                     pfx,
                     jfmt % (i + 1),
@@ -133,6 +147,7 @@ def cell_coordinate_setting_lines(
                     jd.get("row", ""),
                     jd.get("col", ""),
                     jd.get("item", ""),
+                    _rule_def_extra_suffix(jd),
                 )
             )
     else:
@@ -269,13 +284,14 @@ def cell_coordinate_full_detail_lines(
         if not isinstance(jd, dict):
             continue
         join_bodies.append(
-            "5.%d セル=%s 行=%s 列=%s 項目=%s"
+            "5.%d セル=%s 行=%s 列=%s 項目=%s%s"
             % (
                 i + 1,
                 jd.get("cell", ""),
                 jd.get("row", ""),
                 jd.get("col", ""),
                 jd.get("item", ""),
+                _rule_def_extra_suffix(jd),
             )
         )
     _append_section("SEC_JOIN_TITLE", "5. 結合キー", join_bodies)

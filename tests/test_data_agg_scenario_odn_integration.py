@@ -20,6 +20,7 @@ _TEST_DATA_ROOT = Path(
     os.environ.get("DATA_AGG_TEST_DATA_ROOT", r"C:\Project\データ集約テストファイル")
 )
 _ODN164_JSON = _TEST_DATA_ROOT / "ODN164" / "ODN-164出荷履歴試験用.json"
+_ODN164_A_JSON = _TEST_DATA_ROOT / "ODN164" / "ODN-164シナリオ_A.json"
 _ODN375_JSON = _TEST_DATA_ROOT / "ODN375_ALL_1NCM90024.json"
 _ODN375_DEFAULT_XLSX = (
     _TEST_DATA_ROOT / "出荷履歴" / "ODN375_A0512M100000.xlsx"
@@ -247,3 +248,41 @@ def test_odn375_mac_loc_rmt_join_on_matching_device() -> None:
     others = [r for r in rows if r[ix_dev] not in (None, "") and r[ix_dev] != join_dev]
     assert others, "比較用の非一致行が無い"
     assert all(r[ix_loc] in (None, "") for r in others[:5])
+
+
+def _odn164_pack_hist_path() -> str:
+    for f in _odn164_xlsx_files():
+        name = Path(f).name
+        if "梱包" in name or "出荷" in name:
+            return f
+    return ""
+
+
+@pytest.mark.skipif(
+    not _ODN164_A_JSON.is_file() or len(_odn164_xlsx_files()) < 3,
+    reason="ODN-164シナリオ_A または 3種 xlsx が手元に無い",
+)
+def test_odn164_scenario_a_chained_dummy_qr_on_emit_rows() -> None:
+    """②QR→③ダミーQR の連鎖が Excel 出力行に反映される（シナリオ_A）。"""
+    link_f, hist_f = _odn164_link_and_hist_paths()
+    pack_f = _odn164_pack_hist_path()
+    if not link_f or not hist_f or not pack_f:
+        pytest.skip("光特性・紐づけ・梱包の xlsx が揃わない")
+
+    data = _load_json(_ODN164_A_JSON)
+    headers, rows, _, _ = compute_batch_table_rows(
+        data,
+        _odn164_xlsx_files(),
+        max_primary_rows=5000,
+        max_table_rows=5000,
+    )
+    ix_dev = headers.index("機器番号")
+    ix_qr = headers.index("QR装置銘板")
+    ix_dummy = headers.index("ダミーQR機器番号")
+
+    assert len(rows) > 100
+    qr_filled = sum(1 for r in rows if r[ix_qr] not in (None, ""))
+    dummy_filled = sum(1 for r in rows if r[ix_dummy] not in (None, ""))
+    assert qr_filled > 0
+    assert dummy_filled > 0
+    assert dummy_filled <= qr_filled

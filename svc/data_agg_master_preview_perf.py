@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 # step0 のブロック待ちは廃止（先読み完了まで最大 60 秒 UI が「準備しています」のままになるため）。
 _SINGLE_SLOT_PREFETCH_WAIT_MS = 0
 # 項目完了時: 先読み進行中のみ短時間ポール（同期 compute の二重実行を避ける）。
@@ -94,6 +96,20 @@ def master_preview_item_complete_should_capture_frozen(
     return bool(frozen_enabled) and not bool(snapshot_exists)
 
 
+def master_preview_join_step0_should_skip_progress_compute(
+    *,
+    has_join_defs: bool,
+    master_step_idx: int,
+    has_step_cache: bool,
+) -> bool:
+    """結合項目 step0 では mpv_progress の disk compute を避け、mpv_join_step_colvals に任せる。"""
+    if not bool(has_join_defs):
+        return False
+    if int(master_step_idx) != 0:
+        return False
+    return not bool(has_step_cache)
+
+
 def master_preview_join_step0_initial_progress() -> tuple[str, int]:
     """結合項目 step0: 重い compute 前の進捗 (文言, done_1based)。"""
     return "ファイルを読み込み・結合しています", 4
@@ -141,3 +157,182 @@ def master_preview_should_use_prior_join_pool_as_seed(
     if not prior_mi_had_join or int(seed_pool_rows) <= 0:
         return False
     return int(seed_pool_rows) > max(int(file_count), 1)
+
+
+def master_preview_read_cap_rows(
+    *,
+    display_rows: int,
+    read_rows_limit: int,
+) -> int:
+    """マスタプレビュー読込上限（表示上限以上を推奨）。"""
+    return max(1, int(read_rows_limit), int(display_rows))
+
+
+def master_preview_join_pool_row_cap(
+    *,
+    read_rows_limit: int,
+    file_count: int,
+) -> int:
+    """結合プレビュー: 参照ファイル数 × 読込上限（プール合計行数）。"""
+    per = max(1, int(read_rows_limit))
+    fc = max(1, int(file_count))
+    return per * fc
+
+
+def master_preview_per_file_pool_row_cap(*, read_rows_limit: int) -> int:
+    """結合プレビュー: 1 参照ファイルあたりのプール行数上限（読込上限と同じ）。"""
+    return max(1, int(read_rows_limit))
+
+
+def master_preview_join_host_column_fill_ratio(
+    rows: list[list[Any]],
+    col_idx: int,
+) -> float:
+    """結合ホスト列の非空セル比率。"""
+    if not rows or int(col_idx) < 0:
+        return 0.0
+    ci = int(col_idx)
+    filled = 0
+    for r in rows:
+        if ci < len(r) and r[ci] not in (None, ""):
+            filled += 1
+    return float(filled) / float(len(rows))
+
+
+def master_preview_join_result_usable(
+    *,
+    rows: list[list[Any]],
+    col_idx: int,
+    row_count_acceptable: bool,
+) -> bool:
+    """結合 compute 結果を採用できるか（行数＋ホスト列に値があるか）。"""
+    if not row_count_acceptable or not rows:
+        return False
+    ratio = master_preview_join_host_column_fill_ratio(rows, int(col_idx))
+    if ratio >= 0.05:
+        return True
+    return ratio * len(rows) >= 1.0
+
+
+def master_preview_should_use_stacked_join(*, prior_table_rows: int) -> bool:
+    """前項目の表示 table_rows があれば積み上げ join（ホストのみ読込）。"""
+    return int(prior_table_rows) > 0
+
+
+def master_preview_join_read_rows_for_display(
+    *,
+    scan_rows: int,
+    join_ref_rows: int,
+    join_item: bool,
+) -> int:
+    """結合項目の読込行数表示。積み上げ join では join_ref が 0 でも scan を使う。"""
+    if not join_item:
+        return int(scan_rows)
+    ref = int(join_ref_rows)
+    if ref > 0:
+        return ref
+    return int(scan_rows)
+
+
+def master_preview_stacked_join_active(debug_diag: Any) -> bool:
+    """積み上げ join: 表示行を seed にし当ステップのホストファイルだけ読む。"""
+    if not isinstance(debug_diag, dict):
+        return False
+    if bool(debug_diag.get("master_preview_stacked_join")):
+        return True
+    return bool(debug_diag.get("join_search_seed_from_table_rows")) and bool(
+        debug_diag.get("join_search_seed_pool")
+    )
+
+
+def master_preview_should_use_prior_step_table_seed(
+    *,
+    prior_table_rows: int,
+    join_pool_rows: int,
+    file_count: int,
+) -> bool:
+    """前項目の table_rows（段階キャッシュ）を join seed に使うか（汚染プールより優先）。"""
+    pt = int(prior_table_rows)
+    pool = int(join_pool_rows)
+    fc = max(int(file_count), 1)
+    if pt < fc:
+        return False
+    if pool <= 0:
+        return True
+    if pt >= 10 and pool > pt:
+        return True
+    return False
+
+
+def master_preview_join_compute_rows_acceptable(
+    *,
+    new_rows: int,
+    prior_peak_rows: int,
+    item_complete: bool,
+) -> bool:
+    """結合項目の compute 結果を step キャッシュ／完了 mi に採用してよいか。"""
+    if int(new_rows) <= 0:
+        return False
+    prior = int(prior_peak_rows)
+    if prior < 10:
+        return True
+    threshold = max(prior // 4, 2)
+    if int(new_rows) < threshold:
+        return False
+    return True
+
+
+def master_preview_join_search_skip_seed(
+    *,
+    chain_targets_prior: bool,
+    use_prior_pool_seed: bool,
+    use_chain_pool_seed: bool,
+    use_prior_table_seed: bool = False,
+) -> bool:
+    """join_search の seed を使わない（skip）か。連鎖・拡張プール時は skip しない。"""
+    if use_prior_table_seed or use_chain_pool_seed or use_prior_pool_seed:
+        return False
+    if chain_targets_prior:
+        return False
+    return True
+
+
+def master_debug_values_title_rows_busy_text() -> str:
+    """結果一覧見出し: 結合 compute 中の文言。"""
+    return "結合・一覧を計算中…"
+
+
+def master_preview_scan_row_cap() -> int:
+    """mpv 安全弁: 1 ファイルあたり最大走査行（Excel 行上限）。"""
+    return 1_048_576
+
+
+def master_debug_values_title_rows_stats_fmt() -> str:
+    """結果一覧見出し文末: 表示行数・ファイル数・読込行数（各 %s）。"""
+    return "【表示行数：%s/%s　ファイル数：%s　読込行数：%s】"
+
+
+def master_debug_values_title_scan_cap_suffix() -> str:
+    return "（走査上限到達）"
+
+
+def master_debug_format_row_count(n: int) -> str:
+    """結果一覧見出し用の行数表示（千区切り）。"""
+    return f"{int(n):,}"
+
+
+def master_preview_read_pool_display_cap(
+    *,
+    read_rows_limit: int,
+    file_count: int,
+) -> int:
+    """読込行数表示の分母（参照ファイル数 × 1 ファイルあたり読込上限）。"""
+    return master_preview_join_pool_row_cap(
+        read_rows_limit=read_rows_limit,
+        file_count=file_count,
+    )
+
+
+# 後方互換（旧関数名）
+master_preview_res_hint_rows_busy_text = master_debug_values_title_rows_busy_text
+master_preview_res_hint_rows_stats_fmt = master_debug_values_title_rows_stats_fmt

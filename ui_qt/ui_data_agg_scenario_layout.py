@@ -1325,6 +1325,29 @@ def build_scenario_detail_cell_scroll(
         gf_key.addRow(
             _field_lbl(_dcp(cfg, "LABEL_JOIN_COL", "列移動オフセット")), sk
         )
+        j_chk_labels = _dc(cfg, "LINK_CHECK_LABELS", chk_labels)
+        if not isinstance(j_chk_labels, list):
+            j_chk_labels = chk_labels
+        j_chk_labels = [_normalize_message_newlines(str(x).strip()) for x in j_chk_labels]
+        j_chk_tips = _dc(cfg, "CHECKBOX_PROCESS_TOOLTIPS", [])
+        if not isinstance(j_chk_tips, list):
+            j_chk_tips = []
+        j_chk_tips = [str(x) for x in j_chk_tips]
+        join_checks = _add_form_row_label_plus_checks(
+            gf_key,
+            _dcp(cfg, "LABEL_JOIN_CHECKS", _dcp(cfg, "LABEL_LINK_CHECKS", "加工")),
+            j_chk_labels,
+            j_chk_tips,
+            cfg,
+        )
+        le_join_shape = QLineEdit("")
+        le_join_shape.setMinimumWidth(0)
+        le_join_shape.setPlaceholderText(_dcp(cfg, "VALUE_SHAPE_PLACEHOLDER", ""))
+        le_join_shape.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        gf_key.addRow(
+            _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
+            _value_shape_form_field(le_join_shape, cfg),
+        )
         gv.addLayout(gf_key)
         row_jbtn = QHBoxLayout()
         row_jbtn.addStretch(1)
@@ -1334,6 +1357,8 @@ def build_scenario_detail_cell_scroll(
             "row": sj,
             "col": sk,
             "item_combo": cb_join_item,
+            "checks": join_checks,
+            "value_shape_script": le_join_shape,
             "group_box": gb,
         }
         btn_rm_j.clicked.connect(lambda _=False, J=jd: remove_join_group(J))
@@ -1375,6 +1400,21 @@ def build_scenario_detail_cell_scroll(
             "TIP_BTN_JOIN_REMOVE",
             "この結合キー定義を削除します。",
         )
+        for cbx in join_checks:
+            if not (cbx.toolTip() or "").strip():
+                _apply_cfg_tip_force(
+                    cbx,
+                    cfg,
+                    "TIP_JOIN_CHECK_GENERIC",
+                    "結合キー値に対する加工（トリム等）です。",
+                )
+        if not (le_join_shape.toolTip() or "").strip():
+            _apply_cfg_tip_force(
+                le_join_shape,
+                cfg,
+                "TIP_JOIN_VALUE_SHAPE",
+                "結合キー値に適用する整形 DSL です。",
+            )
         return gb, jd
 
     def append_join_group() -> None:

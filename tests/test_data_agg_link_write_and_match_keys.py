@@ -423,6 +423,133 @@ def test_cross_file_join_writes_all_mac_matches_ignore_iter(tmp_path: Path) -> N
     assert _disp(by_dev["DEV-B"][ix_seq]) == "SEQ-Y"
 
 
+def test_cross_file_chained_join_uses_accumulated_emit_row_values(tmp_path: Path) -> None:
+    """
+    ②で光特性行へ入れた QR を ③が照合し、Excel 出力行にダミーQR が載る。
+    旧実装（紐づけ行のみ索引）では出力行のダミーQR が空のままになる。
+    """
+    anchor = tmp_path / "光特性履歴_chain.xlsx"
+    wb = Workbook()
+    ws = _active_worksheet(wb)
+    ws.title = "ﾃﾞｰﾀ"
+    ws["C7"] = "DEV1"
+    ws["M7"] = "MAC-A"
+    wb.save(anchor)
+
+    join_f = tmp_path / "紐づけ履歴_chain.xlsx"
+    wb2 = Workbook()
+    ws2 = _active_worksheet(wb2)
+    ws2.title = "紐付け履歴"
+    ws2["C5"] = "PT-001"
+    ws2["P5"] = "MAC-A"
+    ws2["J5"] = "SEQ-1"
+    ws2["Q5"] = "QR-MATCH"
+    wb2.save(join_f)
+
+    pack_f = tmp_path / "梱包出荷履歴_chain.xlsx"
+    wb3 = Workbook()
+    ws3 = _active_worksheet(wb3)
+    ws3["H4"] = "QR-MATCH"
+    wb3.save(pack_f)
+
+    data: dict[str, Any] = {
+        "id": "cross_chain",
+        "items": [
+            {
+                "id": "i_dev",
+                "name": "機器番号",
+                "write_mode": "append",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "ﾃﾞｰﾀ",
+                        "cell_ref": "C7",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "光特性",
+                            "link_defs": [
+                                {
+                                    "item": "MACアドレス",
+                                    "cell": "M7",
+                                    "mode": "セル座標",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+            {"id": "i_mac", "name": "MACアドレス", "write_mode": "fill_in", "sources": []},
+            {"id": "i_qr", "name": "QR装置銘板", "write_mode": "fill_in", "sources": []},
+            {
+                "id": "i_pt",
+                "name": "PT番号",
+                "write_mode": "overwrite",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "紐付け履歴",
+                        "cell_ref": "C5",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "紐づけ",
+                            "join_defs": [
+                                {"item": "MACアドレス", "cell": "P5", "row": 0, "col": 0}
+                            ],
+                            "link_defs": [
+                                {
+                                    "item": "QR装置銘板",
+                                    "cell": "Q5",
+                                    "mode": "セル座標",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+            {
+                "id": "i_dummy",
+                "name": "ダミーQR機器番号",
+                "write_mode": "fill_in",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "",
+                        "cell_ref": "H4",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "梱包",
+                            "join_defs": [
+                                {"item": "QR装置銘板", "cell": "H4", "row": 0, "col": 0}
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+        ],
+        "match_keys": [],
+    }
+    headers, rows, _, _ = compute_batch_table_rows(
+        data,
+        [str(anchor), str(join_f), str(pack_f)],
+        max_primary_rows=10,
+        max_table_rows=10,
+    )
+    ix_dev = headers.index("機器番号")
+    ix_qr = headers.index("QR装置銘板")
+    ix_dummy = headers.index("ダミーQR機器番号")
+    assert len(rows) == 1
+    assert _disp(rows[0][ix_dev]) == "DEV1"
+    assert _disp(rows[0][ix_qr]) == "QR-MATCH"
+    assert _disp(rows[0][ix_dummy]) == "QR-MATCH"
+
+
 def test_paired_join_respects_iter_index(tmp_path: Path) -> None:
     """n_prim==n_join ではスライス k が __iter_index==k の行だけに書く。"""
     p = tmp_path / "paired.xlsx"

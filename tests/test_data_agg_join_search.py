@@ -10,6 +10,7 @@ if str(_root) not in sys.path:
 
 from svc.svc_data_agg import (  # noqa: E402
     _apply_join_key_search_write,
+    _batch_file_extract_and_merge,
     _build_cross_file_join_search_plan,
     _join_search_pool_scope,
     _join_search_rows_for_slice_with_host_supplement,
@@ -32,6 +33,137 @@ def test_row_satisfies_join_and_apostrophe_mismatch() -> None:
     assert _row_satisfies_join_and(row, jds, {"出荷日": "20220527"})
     assert _row_satisfies_join_and(row, jds, {"出荷日": "'20220527"})
     assert not _row_satisfies_join_and(row, jds, {"出荷日": "20220601"})
+
+
+def test_join_defs_checks_trim_enables_match() -> None:
+    """join_defs の加工（トリム）が抽出後処理に効き、照合に使われる。"""
+    from svc.data_agg_value_post import postprocess_link_rule_value  # noqa: WPS433
+
+    jd = {"item": "K", "checks": ["トリム"]}
+    extracted = postprocess_link_rule_value("  x  ", jd)
+    row = {"K": "'x"}
+    assert _row_satisfies_join_and(row, [jd], {"K": extracted})
+
+
+def test_join_defs_without_checks_unchanged_match() -> None:
+    """checks / value_shape_script 無し join_defs は従来どおり（後方互換）。"""
+    jds = [{"item": "K", "cell": "A1"}]
+    row = {"K": "'02301"}
+    assert _row_satisfies_join_and(row, jds, {"K": "02301"})
+    assert _row_satisfies_join_and(row, jds, {"K": "'02301"})
+
+
+def test_validate_scenario_join_defs_value_shape_script() -> None:
+    from svc.svc_data_agg_scenario import validate_scenario  # noqa: WPS433
+
+    ok = {
+        "items": [
+            {
+                "id": "item_0",
+                "name": "出荷番号",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "cell_ref": "E2",
+                        "row_offset": 1,
+                        "repeat_until_empty": True,
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "x",
+                            "join_defs": [
+                                {
+                                    "cell": "A2",
+                                    "row": 0,
+                                    "col": 0,
+                                    "item": "機器番号",
+                                    "value_shape_script": "wide",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    bad = {
+        "items": [
+            {
+                "id": "item_0",
+                "name": "出荷番号",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "cell_ref": "E2",
+                        "row_offset": 1,
+                        "repeat_until_empty": True,
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "x",
+                            "join_defs": [
+                                {
+                                    "cell": "A2",
+                                    "row": 0,
+                                    "col": 0,
+                                    "item": "機器番号",
+                                    "value_shape_script": "bad_cmd(",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    assert not validate_scenario(ok)
+    errs = validate_scenario(bad)
+    assert any("join_defs" in e and "value_shape_script" in e for e in errs)
+
+
+def test_batch_extract_and_merge_reads_full_rows_for_master_preview_join_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    p = tmp_path / "join_target.xlsx"
+    p.write_text("", encoding="utf-8")
+    item = {
+        "id": "i1",
+        "name": "HostCol",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "Sheet",
+                "cell_ref": "A1",
+                "ui_scenario_source_v1": {"file_pattern": "join_target"},
+            }
+        ],
+    }
+    seen: list[int | None] = []
+
+    def _fake_extract_item_bundle(*args, **kwargs):
+        seen.append(kwargs.get("max_primary_rows"))
+        return {"primary_values": ["HOSTVAL"]}
+
+    from svc import svc_data_agg_extract as extract_mod  # noqa: WPS433
+
+    monkeypatch.setattr(extract_mod, "extract_item_bundle", _fake_extract_item_bundle)
+
+    res = _batch_file_extract_and_merge(
+        p,
+        items=[item],
+        headers=["HostCol"],
+        header_set={"HostCol"},
+        column_modes=["fill_in"],
+        linked_targets=set(),
+        join_targets=set(),
+        path_col="",
+        master_preview_cap_idx=None,
+        master_preview_extract_allow=None,
+        master_preview_join_full_read_patterns=("join_target",),
+        preview_master_mode=True,
+        use_join_search_merge=False,
+        max_primary_rows=500,
+    )
+    from svc.data_agg_master_preview_perf import master_preview_scan_row_cap  # noqa: WPS433
+
+    assert seen == [master_preview_scan_row_cap()]
+    assert join_compare_display_key((res.bundles[0].get("primary_values") or [])[0]) == "HOSTVAL"
 
 
 def test_apply_join_key_search_1_primary_n_join_slices_union() -> None:
@@ -221,7 +353,8 @@ def test_join_search_host_supplement_finds_host_only_match() -> None:
     assert matched[0]["__file_path"] == r"C:\紐づけ_1.xlsx"
 
 
-def test_cross_file_join_plan_builds_side_index_once() -> None:
+def test_cross_file_join_plan_builds_emit_row_index_once() -> None:
+    """横断結合索引は file_pattern 側ではなく Excel 出力対象行のみ（紐づけ専用行は除外）。"""
     global_pool = [
         {"MAC": "x", "PT": None, "__file_path": r"C:\光特性_a.xlsx"},
         {"MAC": "y", "PT": None, "__file_path": r"C:\光特性_b.xlsx"},
@@ -256,6 +389,7 @@ def test_cross_file_join_plan_builds_side_index_once() -> None:
     ]
     plan = _build_cross_file_join_search_plan(global_pool, host_item, items, ["Dev", "PT"])
     assert len(plan.side_rows) == 2
+    assert all("光特性" in str(r.get("__file_path") or "") for r in plan.side_rows)
     assert plan.side_index[0] == ["MAC"]
     assert ("x",) in plan.side_index[1]
 
