@@ -11,6 +11,10 @@
     "ENABLED": false,
     "MAX_ROWS_PER_FILE": 25
   },
+  "EXCEL_WRITE": {
+    "_doc": "マスター書込み後の列幅 AutoFit。出力ブロック行数（ヘッダ含む）がこの値を超えるとヘッダ行のみ AutoFit。省略時は 3000。",
+    "AUTOFIT_FULL_MAX_ROWS": 500000
+  },
   "WINDOW": {
     "RESIZABLE": true,
     "SHOW_MINIMIZE": true,
@@ -66,7 +70,7 @@
       "TOOLTIP_GROUP_EXCEL_JUMP": "実行後に名前ボックスからジャンプできるよう、定義名を登録するかどうかです。登録名は「シート名_連番」で、ブック内で一意になるよう連番を振ります。",
       "TOOLTIP_GROUP_EXCEL_SORT": "マスターへ書き込む直前の並べ替え条件です。行を追加して第1キー・第2キー…のように指定します。項目一覧が空のときは項目コンボも空です。",
       "RADIO_EXCEL_ACTIVE_SHEET": "アクティブシート",
-      "RADIO_EXCEL_NEW_SHEET": "新規シート",
+      "RADIO_EXCEL_NEW_SHEET": "新規シート（ヘッダ表示固定 ＆ オートフィルタ）",
       "TOOLTIP_EXCEL_ACTIVE_SHEET": "現在アクティブなシートへ出力します。書込み方式で追加・上書き・指定セル開始を選べます。",
       "TOOLTIP_EXCEL_NEW_SHEET": "ブック内に新しいシートを作成してそこへ出力します。シート名の付け方は「シート名」で選択します。",
       "LABEL_EXCEL_WRITE_MODE": "書込みモード",
@@ -85,6 +89,10 @@
       "TOOLTIP_EXCEL_CUSTOM_SHEET_NAME": "「シート名入力」を選んだときのみ有効です。Excel で使えない文字（[ ] : * ? / \\）は除去され、最大 31 文字に切り詰められます。同名シートがある場合は末尾に連番を付けます。",
       "CHK_EXCEL_JUMP": "ジャンプ用の名前を登録する",
       "TOOLTIP_EXCEL_JUMP": "オンにすると、実行後に「シート名_連番」形式の定義名（ブック内で重複しない連番）を登録し、名前ボックス／ジャンプ（Ctrl+G）から書き込み範囲へ移動できます。参照先は出力シート上の矩形です。",
+      "CHK_EXCEL_FREEZE_HEADER_ROW": "1行目（ヘッダ）を固定する",
+      "TOOLTIP_EXCEL_FREEZE_HEADER_ROW": "新規シート出力時のみ。ヘッダ行の直下でウィンドウ枠を固定し、縦スクロール時も列見出しを表示したままにします。",
+      "CHK_EXCEL_AUTOFILTER": "オートフィルタを設定する",
+      "TOOLTIP_EXCEL_AUTOFILTER": "新規シート出力時のみ。ヘッダ行を含む出力範囲にオートフィルタを付け、列ごとの絞り込みを行えます。",
       "LABEL_EXCEL_SORT_ITEM": "項目",
       "EXCEL_SORT_ORDER_ASC": "昇順",
       "EXCEL_SORT_ORDER_DESC": "降順",
@@ -332,7 +340,7 @@
       ],
       "SCENARIO_DEBUG_VALUE_ROWS": 50,
       "MASTER_DEBUG_DISPLAY_ROWS": 200,
-      "MASTER_DEBUG_JOIN_MAX_FILES": 250,
+      "MASTER_DEBUG_JOIN_MAX_FILES": 200,
       "MAX_PHASE_SLOTS": 16,
       "SCENARIO_PROGRESS_MIN_FILES": 5,
       "NAME_EXTRACT_DEBUG": {

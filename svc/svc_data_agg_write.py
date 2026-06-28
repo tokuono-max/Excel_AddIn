@@ -41,7 +41,8 @@ __version__ = "0.1.5"
 
 # data_agg は出力行数が大きくなりやすく、全行を対象にした AutoFit が重い。
 # 見た目（列幅）よりも「処理完了→Excel操作復帰」を優先し、一定行数超過時はヘッダ行のみ AutoFit に縮退する。
-_DATA_AGG_AUTOFIT_MAX_ROWS = 3000
+# 上限は config/ui_data_agg.json の EXCEL_WRITE.AUTOFIT_FULL_MAX_ROWS（省略時 3000）。
+AUTOFIT_FULL_MAX_ROWS_DEFAULT = 3000
 
 MODE_APPEND = "append"
 MODE_OVERWRITE = "overwrite"
@@ -56,6 +57,45 @@ def _is_unconditional_append_mode(mode: str) -> bool:
     """照合キーを使わず末尾（または専用分岐）へ追記するモード。"""
     m = (mode or "").strip().lower()
     return m in (MODE_APPEND, MODE_DUPLICATE_APPEND)
+
+
+def excel_write_autofit_full_max_rows(cfg: dict[str, Any] | None = None) -> int:
+    """
+    全行 AutoFit を行う出力ブロック行数（ヘッダ含む）の上限。
+    超過時はヘッダ行のみ AutoFit に縮退する。
+    config/ui_data_agg.json の EXCEL_WRITE.AUTOFIT_FULL_MAX_ROWS を参照する。
+    """
+    raw_cfg = cfg
+    if raw_cfg is None:
+        try:
+            from core import core_cst as cst  # noqa: WPS433
+
+            raw_cfg = cst.get_ui_config_from_file_required("data_agg")
+        except Exception:
+            return AUTOFIT_FULL_MAX_ROWS_DEFAULT
+    ew = raw_cfg.get("EXCEL_WRITE") if isinstance(raw_cfg, dict) else {}
+    if not isinstance(ew, dict):
+        ew = {}
+    try:
+        n = int(ew.get("AUTOFIT_FULL_MAX_ROWS", AUTOFIT_FULL_MAX_ROWS_DEFAULT))
+    except (TypeError, ValueError):
+        n = AUTOFIT_FULL_MAX_ROWS_DEFAULT
+    return max(1, n)
+
+
+def _autofit_max_row_for_block(
+    top_row: int,
+    block_bottom_row: int,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> int:
+    """AutoFit 対象の最終行。ブロック行数が上限超ならヘッダ行のみ。"""
+    tr = max(1, int(top_row))
+    bottom = max(tr, int(block_bottom_row))
+    limit = excel_write_autofit_full_max_rows(cfg)
+    if (bottom - tr + 1) > limit:
+        return tr
+    return bottom
 
 
 def _trim_cell_text(v: Any) -> str:
@@ -953,9 +993,7 @@ def write_master_to_sheet(
                     )
             try:
                 # 行数が大きい場合はヘッダ行のみ AutoFit（Excel完了待ち短縮）
-                max_row_af = max(tr, full_bottom)
-                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
-                    max_row_af = tr
+                max_row_af = _autofit_max_row_for_block(tr, full_bottom)
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
@@ -1034,9 +1072,7 @@ def write_master_to_sheet(
                         sheet, tr, tc, n_rows_rect, ncols
                     )
             try:
-                max_row_af = max(tr, full_bottom)
-                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
-                    max_row_af = tr
+                max_row_af = _autofit_max_row_for_block(tr, full_bottom)
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
@@ -1129,9 +1165,7 @@ def write_master_to_sheet(
                         sheet, tr, tc, len(data_2d), len(prev_headers)
                     )
             try:
-                max_row_af = max(tr, tr + len(data_2d) - 1)
-                if (max_row_af - tr + 1) > _DATA_AGG_AUTOFIT_MAX_ROWS:
-                    max_row_af = tr
+                max_row_af = _autofit_max_row_for_block(tr, max(tr, tr + len(data_2d) - 1))
                 core_xlc.autofit_sheet_columns(
                     sheet,
                     min_row=tr,
@@ -1160,6 +1194,192 @@ def write_master_to_sheet(
         update_count,
     )
     return (append_count, update_count)
+
+
+def _col_1based_to_letters(col: int) -> str:
+    n = max(1, int(col))
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def _a1_cell_1based(row: int, col: int) -> str:
+    return "%s%d" % (_col_1based_to_letters(col), max(1, int(row)))
+
+
+def freeze_sheet_below_header_row(
+    sheet: Any,
+    header_row: int,
+    *,
+    left_col: int = 1,
+) -> None:
+    """ヘッダ行の直下でウィンドウ枠を固定する（header_row=1 で1行目固定）。"""
+    hr = max(1, int(header_row))
+    lc = max(1, int(left_col))
+    freeze_cell = _a1_cell_1based(hr + 1, lc)
+    try:
+        fp = getattr(sheet, "freeze_panes", None)
+        if fp is not None:
+            freeze_at = getattr(fp, "freeze_at", None)
+            if callable(freeze_at):
+                unfreeze = getattr(fp, "unfreeze", None)
+                if callable(unfreeze):
+                    unfreeze()
+                freeze_at(freeze_cell)
+                return
+    except Exception:
+        pass
+    try:
+        api = getattr(sheet, "api", None)
+        if api is None:
+            return
+        book = getattr(sheet, "book", None)
+        xl_app = getattr(book, "app", None) if book else None
+        if xl_app is None:
+            return
+        app_api = getattr(xl_app, "api", None)
+        if app_api is None:
+            return
+        aw = getattr(app_api, "ActiveWindow", None)
+        if aw is None:
+            return
+        aw.FreezePanes = False
+        api.Range(freeze_cell).Select()
+        aw.FreezePanes = True
+    except Exception:
+        pass
+
+
+def _clear_worksheet_autofilter(ws: Any) -> None:
+    """既存オートフィルタを解除する（best-effort）。"""
+    try:
+        if bool(ws.AutoFilterMode):
+            ws.AutoFilter.ShowAllData()
+            return
+    except Exception:
+        pass
+    try:
+        ws.AutoFilterMode = False
+    except Exception:
+        pass
+
+
+def apply_autofilter_to_block(
+    sheet: Any,
+    *,
+    top_row: int,
+    left_col: int,
+    n_rows: int,
+    n_cols: int,
+) -> bool:
+    """矩形範囲の先頭行をヘッダとしてオートフィルタを付ける。成功時 True。"""
+    nr = max(1, int(n_rows))
+    nc = max(1, int(n_cols))
+    tr = max(1, int(top_row))
+    tc = max(1, int(left_col))
+    br = tr + nr - 1
+    bc = tc + nc - 1
+    addr = "%s:%s" % (_a1_cell_1based(tr, tc), _a1_cell_1based(br, bc))
+    try:
+        try:
+            sheet.activate()
+        except Exception:
+            pass
+        ws = getattr(sheet, "api", None)
+        if ws is None:
+            return False
+        _clear_worksheet_autofilter(ws)
+        rng = ws.Range(addr)
+        applied = False
+        try:
+            import pythoncom
+
+            rng.AutoFilter(
+                pythoncom.Missing,
+                pythoncom.Missing,
+                pythoncom.Missing,
+                pythoncom.Missing,
+                pythoncom.Missing,
+            )
+            applied = bool(ws.AutoFilterMode)
+        except Exception:
+            pass
+        if not applied:
+            try:
+                rng.AutoFilter()
+                applied = bool(ws.AutoFilterMode)
+            except Exception:
+                pass
+        if not applied:
+            try:
+                sheet.range(addr).api.AutoFilter()
+                applied = bool(ws.AutoFilterMode)
+            except Exception:
+                pass
+        if not applied:
+            logger.warning(
+                "[DATA_AGG_WRITE] オートフィルタ未適用 addr=%s AutoFilterMode=%s",
+                addr,
+                getattr(ws, "AutoFilterMode", None),
+            )
+        return applied
+    except Exception as e:
+        logger.warning("[DATA_AGG_WRITE] オートフィルタ例外 addr=%s: %s", addr, e)
+        return False
+
+
+def apply_new_sheet_view_options(
+    sheet: Any,
+    *,
+    top_left_row: int = 1,
+    top_left_col: int = 1,
+    n_rows_including_header: int,
+    n_cols: int,
+    freeze_header_row: bool = False,
+    autofilter: bool = False,
+) -> None:
+    """新規シート出力直後: ヘッダ行固定とオートフィルタ（best-effort）。"""
+    if not freeze_header_row and not autofilter:
+        return
+    tr = max(1, int(top_left_row))
+    tc = max(1, int(top_left_col))
+    nr = max(1, int(n_rows_including_header))
+    nc = max(1, int(n_cols))
+    try:
+        sheet.activate()
+    except Exception:
+        pass
+    if autofilter:
+        try:
+            ok_af = apply_autofilter_to_block(
+                sheet,
+                top_row=tr,
+                left_col=tc,
+                n_rows=nr,
+                n_cols=nc,
+            )
+            if ok_af:
+                logger.info(
+                    "[DATA_AGG_WRITE] 新規シート: オートフィルタ rows=%s cols=%s top=(%s,%s)",
+                    nr,
+                    nc,
+                    tr,
+                    tc,
+                )
+        except Exception as e:
+            logger.warning("[DATA_AGG_WRITE] オートフィルタエラー: %s", e)
+    if freeze_header_row:
+        try:
+            freeze_sheet_below_header_row(sheet, tr, left_col=tc)
+            logger.info(
+                "[DATA_AGG_WRITE] 新規シート: ヘッダ行固定 header_row=%s left_col=%s",
+                tr,
+                tc,
+            )
+        except Exception as e:
+            logger.warning("[DATA_AGG_WRITE] ヘッダ行固定エラー: %s", e)
 
 
 def _scenario_export_apply_layout(

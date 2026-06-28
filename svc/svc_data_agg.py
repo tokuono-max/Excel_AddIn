@@ -371,6 +371,42 @@ def _excel_options_log_summary(raw: Any) -> str:
     return "%s / %s" % (out_j, wm_j)
 
 
+def _try_apply_new_sheet_view_options(
+    sheet: Any,
+    excel_opts: dict[str, Any],
+    *,
+    new_sheet_created: bool,
+    top_left_row: int,
+    top_left_col: int,
+    n_data_rows: int,
+    n_cols: int,
+) -> None:
+    """新規シート出力時のみ、ヘッダ固定・オートフィルタを適用する。"""
+    if not new_sheet_created or n_cols < 1:
+        return
+    if str(excel_opts.get("output_target") or "") != "new_sheet":
+        return
+    freeze = bool(excel_opts.get("freeze_header_row"))
+    af = bool(excel_opts.get("autofilter"))
+    if not freeze and not af:
+        return
+    from svc import svc_data_agg_write as write_mod  # noqa: WPS433
+
+    try:
+        sheet.activate()
+    except Exception:
+        pass
+    write_mod.apply_new_sheet_view_options(
+        sheet,
+        top_left_row=int(top_left_row),
+        top_left_col=int(top_left_col),
+        n_rows_including_header=max(1, 1 + int(n_data_rows)),
+        n_cols=int(n_cols),
+        freeze_header_row=freeze,
+        autofilter=af,
+    )
+
+
 def _sheet_name_for_event_log(sheet_obj: Any) -> str:
     try:
         return str(getattr(sheet_obj, "name", "") or "")
@@ -6240,6 +6276,15 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             core_xlc.restore_screen_updating(sheet_out)
         except Exception:
             pass
+    _try_apply_new_sheet_view_options(
+        sheet_out,
+        excel_opts,
+        new_sheet_created=new_sheet_created,
+        top_left_row=tr,
+        top_left_col=tc,
+        n_data_rows=len(table_rows),
+        n_cols=len(headers),
+    )
     dt_write_ms = int((time.perf_counter() - t_write) * 1000)
     dt_total_ms = int((time.perf_counter() - t_batch_wall) * 1000)
     logger.info(
@@ -6767,6 +6812,15 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
         except Exception:
             pass
 
+    _try_apply_new_sheet_view_options(
+        sheet_out,
+        excel_opts,
+        new_sheet_created=new_sheet_created,
+        top_left_row=tr,
+        top_left_col=tc,
+        n_data_rows=len(table_rows),
+        n_cols=len(headers),
+    )
     dt_write_ms = int((time.perf_counter() - t_write) * 1000)
     dt_total_ms = _wall_total_ms()
     cfg = _get_config()

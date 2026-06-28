@@ -1537,6 +1537,30 @@ class _DataAggMainWindow(QDialog):
         row_sn.addStretch(1)
         lay_out.addLayout(row_sn)
 
+        row_view = QVBoxLayout()
+        row_view.setSpacing(2)
+        self._chk_excel_freeze_header = QCheckBox(
+            _u("CHK_EXCEL_FREEZE_HEADER_ROW", "1行目（ヘッダ）を固定する")
+        )
+        _apply_tip(
+            self._chk_excel_freeze_header,
+            "TOOLTIP_EXCEL_FREEZE_HEADER_ROW",
+            "新規シート出力時、ヘッダ行の直下でウィンドウ枠を固定します。",
+        )
+        self._chk_excel_freeze_header.setChecked(True)
+        self._chk_excel_autofilter = QCheckBox(
+            _u("CHK_EXCEL_AUTOFILTER", "オートフィルタを設定する")
+        )
+        _apply_tip(
+            self._chk_excel_autofilter,
+            "TOOLTIP_EXCEL_AUTOFILTER",
+            "新規シート出力時、ヘッダ行を含む出力範囲にオートフィルタを付けます。",
+        )
+        self._chk_excel_autofilter.setChecked(True)
+        row_view.addWidget(self._chk_excel_freeze_header)
+        row_view.addWidget(self._chk_excel_autofilter)
+        lay_out.addLayout(row_view)
+
         vl.addWidget(grp_out)
 
         # --- ジャンプ ---
@@ -1617,6 +1641,8 @@ class _DataAggMainWindow(QDialog):
         self._rad_excel_new.toggled.connect(self._update_excel_output_visibility)
         self._rad_excel_active.toggled.connect(self._mark_scenario_dirty)
         self._rad_excel_new.toggled.connect(self._mark_scenario_dirty)
+        self._chk_excel_freeze_header.toggled.connect(self._mark_scenario_dirty)
+        self._chk_excel_autofilter.toggled.connect(self._mark_scenario_dirty)
         self._combo_excel_write_mode.currentIndexChanged.connect(
             self._update_excel_output_visibility
         )
@@ -1700,6 +1726,14 @@ class _DataAggMainWindow(QDialog):
             self._combo_excel_sheet_name_rule.currentData() == "custom_sheet_name"
         )
         self._edit_excel_custom_sheet_name.setVisible(not active and custom_rule)
+        new_sheet = not active
+        for w in (
+            getattr(self, "_chk_excel_freeze_header", None),
+            getattr(self, "_chk_excel_autofilter", None),
+        ):
+            if w is not None:
+                w.setVisible(new_sheet)
+                w.setEnabled(new_sheet)
 
     def _excel_sort_row_item_names(self) -> list[str]:
         names: list[str] = []
@@ -1844,6 +1878,8 @@ class _DataAggMainWindow(QDialog):
                 (self._edit_excel_custom_sheet_name.text() or "").strip()
             ),
             "jump_register_name": self._chk_excel_jump.isChecked(),
+            "freeze_header_row": self._chk_excel_freeze_header.isChecked(),
+            "autofilter": self._chk_excel_autofilter.isChecked(),
             "sort_keys": sort_keys,
         }
 
@@ -1859,6 +1895,8 @@ class _DataAggMainWindow(QDialog):
         self._edit_excel_anchor_cell.blockSignals(True)
         self._edit_excel_custom_sheet_name.blockSignals(True)
         self._chk_excel_jump.blockSignals(True)
+        self._chk_excel_freeze_header.blockSignals(True)
+        self._chk_excel_autofilter.blockSignals(True)
         try:
             if opt["output_target"] == "new_sheet":
                 self._rad_excel_new.setChecked(True)
@@ -1877,6 +1915,10 @@ class _DataAggMainWindow(QDialog):
                 str(opt.get("new_sheet_custom_name") or "")
             )
             self._chk_excel_jump.setChecked(bool(opt.get("jump_register_name")))
+            self._chk_excel_freeze_header.setChecked(
+                bool(opt.get("freeze_header_row", True))
+            )
+            self._chk_excel_autofilter.setChecked(bool(opt.get("autofilter", True)))
             self._clear_excel_sort_rows()
             sk = opt.get("sort_keys") or []
             if not sk:
@@ -1919,6 +1961,8 @@ class _DataAggMainWindow(QDialog):
             self._edit_excel_anchor_cell.blockSignals(False)
             self._edit_excel_custom_sheet_name.blockSignals(False)
             self._chk_excel_jump.blockSignals(False)
+            self._chk_excel_freeze_header.blockSignals(False)
+            self._chk_excel_autofilter.blockSignals(False)
 
     def _refresh_excel_sort_item_combos(self) -> None:
         rows = getattr(self, "_excel_sort_row_widgets", None)

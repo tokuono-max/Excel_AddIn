@@ -515,6 +515,8 @@ def default_excel_options() -> dict[str, Any]:
         "new_sheet_name_rule": "scenario_name_seq",
         "new_sheet_custom_name": "",
         "jump_register_name": True,
+        "freeze_header_row": True,
+        "autofilter": True,
         "sort_keys": [{"item": "", "order": "asc", "natural": True}],
     }
 
@@ -545,6 +547,10 @@ def normalize_excel_options(raw: Any) -> dict[str, Any]:
         d["new_sheet_custom_name"] = str(raw.get("new_sheet_custom_name") or "").strip()[:210]
     if "jump_register_name" in raw:
         d["jump_register_name"] = bool(raw.get("jump_register_name"))
+    if "freeze_header_row" in raw:
+        d["freeze_header_row"] = bool(raw.get("freeze_header_row"))
+    if "autofilter" in raw:
+        d["autofilter"] = bool(raw.get("autofilter"))
     sk_raw = raw.get("sort_keys")
     if isinstance(sk_raw, list) and sk_raw:
         rows: list[dict[str, Any]] = []

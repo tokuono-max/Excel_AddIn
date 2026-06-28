@@ -13,10 +13,16 @@ from svc.svc_data_agg_scenario import (
 )
 from svc.svc_data_agg_write import (
     EVENT_LOG_HEADERS,
+    _a1_cell_1based,
+    _autofit_max_row_for_block,
     _strip_leading_row_if_matches_header,
     append_start_row_after_region_read,
+    apply_autofilter_to_block,
+    apply_new_sheet_view_options,
+    excel_write_autofit_full_max_rows,
     format_batch_run_summary_row,
     format_elapsed_ms_ja,
+    freeze_sheet_below_header_row,
     parse_a1_to_row_col_1based,
     sanitize_excel_tab_name,
     sort_table_rows_for_excel_options,
@@ -51,6 +57,102 @@ def test_sort_table_rows_multi_key_stable() -> None:
 def test_normalize_excel_options_clear_write() -> None:
     d = normalize_excel_options({"write_mode": "clear_write"})
     assert d["write_mode"] == "clear_write"
+
+
+def test_normalize_excel_options_new_sheet_view_defaults() -> None:
+    d = normalize_excel_options({})
+    assert d["freeze_header_row"] is True
+    assert d["autofilter"] is True
+    d2 = normalize_excel_options({"freeze_header_row": False, "autofilter": False})
+    assert d2["freeze_header_row"] is False
+    assert d2["autofilter"] is False
+
+
+def test_a1_cell_1based() -> None:
+    assert _a1_cell_1based(1, 1) == "A1"
+    assert _a1_cell_1based(5, 3) == "C5"
+
+
+def test_excel_write_autofit_full_max_rows_from_cfg() -> None:
+    assert excel_write_autofit_full_max_rows() == 3000
+    assert excel_write_autofit_full_max_rows({"EXCEL_WRITE": {"AUTOFIT_FULL_MAX_ROWS": 5000}}) == 5000
+    assert excel_write_autofit_full_max_rows({"EXCEL_WRITE": {}}) == 3000
+    assert excel_write_autofit_full_max_rows({"EXCEL_WRITE": {"AUTOFIT_FULL_MAX_ROWS": 0}}) == 1
+
+
+def test_autofit_max_row_for_block_header_only_when_over_limit() -> None:
+    cfg = {"EXCEL_WRITE": {"AUTOFIT_FULL_MAX_ROWS": 100}}
+    assert _autofit_max_row_for_block(1, 50, cfg=cfg) == 50
+    assert _autofit_max_row_for_block(1, 101, cfg=cfg) == 1
+    assert _autofit_max_row_for_block(5, 105, cfg=cfg) == 5
+
+
+def test_apply_new_sheet_view_options_freeze_and_filter() -> None:
+    sheet = MagicMock()
+    sheet.freeze_panes = None
+    sheet.api = MagicMock()
+    sheet.api.AutoFilterMode = False
+    aw = MagicMock()
+    sheet.book.app.api.ActiveWindow = aw
+
+    def _enable_af(*_a: object, **_k: object) -> None:
+        sheet.api.AutoFilterMode = True
+
+    sheet.api.Range.return_value.AutoFilter.side_effect = _enable_af
+    apply_new_sheet_view_options(
+        sheet,
+        top_left_row=1,
+        top_left_col=1,
+        n_rows_including_header=3,
+        n_cols=2,
+        freeze_header_row=True,
+        autofilter=True,
+    )
+    sheet.activate.assert_called()
+    sheet.api.Range.return_value.AutoFilter.assert_called()
+    assert aw.FreezePanes is True
+
+
+def test_apply_new_sheet_view_options_noop_when_disabled() -> None:
+    sheet = MagicMock()
+    sheet.freeze_panes = None
+    apply_new_sheet_view_options(
+        sheet,
+        n_rows_including_header=2,
+        n_cols=2,
+        freeze_header_row=False,
+        autofilter=False,
+    )
+    sheet.api.Range.assert_not_called()
+
+
+def test_freeze_sheet_below_header_row_at_anchor() -> None:
+    sheet = MagicMock()
+    sheet.freeze_panes = None
+    sheet.api = MagicMock()
+    aw = MagicMock()
+    sheet.book.app.api.ActiveWindow = aw
+    freeze_sheet_below_header_row(sheet, 5, left_col=3)
+    sheet.api.Range.assert_called_with("C6")
+    assert aw.FreezePanes is True
+
+
+def test_apply_autofilter_to_block_range() -> None:
+    sheet = MagicMock()
+    sheet.api = MagicMock()
+    sheet.api.AutoFilterMode = False
+
+    def _enable_af(*_a: object, **_k: object) -> None:
+        sheet.api.AutoFilterMode = True
+
+    sheet.api.Range.return_value.AutoFilter.side_effect = _enable_af
+    ok = apply_autofilter_to_block(
+        sheet, top_row=2, left_col=1, n_rows=4, n_cols=3
+    )
+    assert ok is True
+    sheet.activate.assert_called_once()
+    sheet.api.Range.assert_called_with("A2:C5")
+    sheet.api.Range.return_value.AutoFilter.assert_called()
 
 
 def test_com_excel_scalar_int() -> None:
