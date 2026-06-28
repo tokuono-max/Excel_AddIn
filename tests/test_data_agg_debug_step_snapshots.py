@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -312,7 +313,7 @@ def test_master_dbg_batch_progress_hook_formats_reading_detail(monkeypatch) -> N
         dlg._master_dbg_batch_progress_hook(4, "ファイル 2/5: sample.xlsx 読込中", 2, 5)
 
         assert seen
-        assert seen[-1]["detail"] == "読込中 2/5: sample.xlsx"
+        assert seen[-1]["detail"] == "読込 2/5 — sample.xlsx"
     finally:
         dlg.close()
 
@@ -334,8 +335,8 @@ def test_master_dbg_batch_progress_hook_formats_row_extract_detail(monkeypatch) 
         )
 
         assert seen
-        assert seen[-1]["detail"] == "読込中: 光特性履歴.xlsx（3/100行）"
-        assert seen[-1]["current_file"] == "光特性履歴.xlsx"
+        assert seen[-1]["detail"] == "読込 1/1 — 光特性履歴.xlsx · 行 3/100"
+        assert seen[-1].get("current_file", "") == ""
     finally:
         dlg.close()
 
@@ -373,7 +374,147 @@ def test_master_dbg_batch_progress_hook_formats_joining_detail(monkeypatch) -> N
         dlg._master_dbg_batch_progress_hook(6, "sample.xlsx 結合 37/100", 1, 2)
 
         assert seen
-        assert seen[-1]["detail"] == "sample.xlsx: 結合中 37/100"
+        assert seen[-1]["detail"] == "照合 1/2 — sample.xlsx · 結合 37/100"
+        assert seen[-1].get("sub_done") is None
+    finally:
+        dlg.close()
+
+
+def test_master_dbg_batch_progress_hook_overall_count_is_phase_not_file(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        progress_args: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(dlg, "_master_run_progress_active", True)
+        monkeypatch.setattr(
+            dlg,
+            "_show_run_progress",
+            lambda phase, done, total, **kwargs: progress_args.append(
+                (phase, done, total, kwargs)
+            ),
+        )
+        monkeypatch.setattr(dlg, "_process_events_light", lambda: None)
+
+        dlg._master_dbg_batch_progress_hook(
+            6,
+            "ファイル 37/571: sample.xlsx（候補 100 行）",
+            37,
+            571,
+        )
+
+        assert progress_args
+        _phase, done, total, kwargs = progress_args[-1]
+        assert done == 9
+        assert total == 10
+        assert "37/571" in kwargs.get("detail", "")
+    finally:
+        dlg.close()
+
+
+def test_master_dbg_batch_progress_hook_formats_join_prep_detail(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        seen: list[dict[str, str]] = []
+        monkeypatch.setattr(dlg, "_master_run_progress_active", True)
+        monkeypatch.setattr(dlg, "_show_run_progress", lambda *args, **kwargs: seen.append(kwargs))
+        monkeypatch.setattr(dlg, "_process_events_light", lambda: None)
+
+        dlg._master_dbg_batch_progress_hook(
+            6,
+            "結合項目「MAC RMT」 候補プール 100 行",
+            1,
+            571,
+        )
+
+        assert seen
+        assert seen[-1]["detail"] == "候補プール 100 行"
+    finally:
+        dlg.close()
+
+
+def test_master_dbg_batch_progress_hook_formats_merge_detail(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        seen: list[dict[str, str]] = []
+        monkeypatch.setattr(dlg, "_master_run_progress_active", True)
+        monkeypatch.setattr(dlg, "_show_run_progress", lambda *args, **kwargs: seen.append(kwargs))
+        monkeypatch.setattr(dlg, "_process_events_light", lambda: None)
+
+        dlg._master_dbg_batch_progress_hook(
+            5,
+            "行をまとめ中（100 行）",
+            12,
+            571,
+        )
+
+        assert seen
+        assert seen[-1]["detail"] == "ファイル 12/571 — 100 行"
+    finally:
+        dlg.close()
+
+
+def test_master_run_blocking_drains_external_hook_queue(monkeypatch) -> None:
+    import queue
+
+    dlg = _master_dialog()
+    try:
+        seen: list[tuple[Any, ...]] = []
+
+        def real_hook(*args: Any) -> None:
+            seen.append(args)
+
+        hook_q: queue.SimpleQueue = queue.SimpleQueue()
+        bridged = dlg._master_bridge_progress_hook(real_hook, hook_q)
+
+        def worker_fn() -> str:
+            bridged(6, "ファイル 3/10: sample.xlsx（候補 100 行）", 3, 10)
+            return "ok"
+
+        monkeypatch.setattr(dlg, "_process_events_for_master_cancel", lambda: None)
+        monkeypatch.setattr(dlg, "_master_poll_cancel", lambda **_: None)
+
+        result = dlg._master_run_blocking_with_ui_pump(
+            worker_fn,
+            progress_hook=real_hook,
+            hook_q=hook_q,
+        )
+        assert result == "ok"
+        assert seen == [(6, "ファイル 3/10: sample.xlsx（候補 100 行）", 3, 10)]
+    finally:
+        dlg.close()
+
+
+def test_master_finish_step_timing_aggregates_item_total(monkeypatch) -> None:
+    dlg = _master_dialog()
+    try:
+        monkeypatch.setattr(dlg, "_master_refresh_elapsed_ui", lambda: None)
+        dlg._master_step_timing_t0 = time.perf_counter() - 1.5
+        dlg._master_finish_step_timing(0, 0)
+        assert (0, 0) in dlg._master_step_elapsed_sec
+        assert dlg._master_step_elapsed_sec[(0, 0)] >= 1.0
+        assert int(dlg._master_item_elapsed_sec.get(0, 0)) >= 1
+    finally:
+        dlg.close()
+
+
+def test_master_clear_elapsed_timings_resets_state() -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._master_step_elapsed_sec[(0, 0)] = 3.2
+        dlg._master_item_elapsed_sec[0] = 3.2
+        dlg._master_continuous_run_t0 = time.perf_counter()
+        dlg._master_clear_elapsed_timings()
+        assert not dlg._master_step_elapsed_sec
+        assert not dlg._master_item_elapsed_sec
+        assert dlg._master_continuous_run_t0 is None
+    finally:
+        dlg.close()
+
+
+def test_master_format_elapsed_sec() -> None:
+    dlg = _master_dialog()
+    try:
+        assert dlg._master_format_elapsed_sec(12.34) == "12.3"
+        assert dlg._master_format_elapsed_sec(None) == ""
     finally:
         dlg.close()
 
@@ -526,6 +667,252 @@ def test_merge_mpv_column_skipped_for_join_items(monkeypatch) -> None:
         dlg.close()
 
 
+def test_master_snapshot_browse_after_cancel_enables_priority() -> None:
+    dlg = _master_dialog()
+    try:
+        assert not dlg._master_snapshot_priority_active()
+        dlg._master_step_snapshots[(0, 0)] = {
+            "summary_rows": [["x"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell"]],
+            "item_stats": None,
+        }
+        dlg._master_snapshot_browse_after_cancel = True
+        assert dlg._master_snapshot_priority_active()
+        assert dlg._master_snapshot_browseable()
+    finally:
+        dlg.close()
+
+
+def test_browse_after_cancel_incomplete_step_shows_empty() -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._mi_idx = 0
+        dlg._master_step_idx = 2
+        dlg._active_slot_indices = [0, 1, 2]
+        dlg._summary_rows = [["stale"]]
+        dlg._summary_phase_labels = ["S1"]
+        dlg._value_cols = [["stale"]]
+        dlg._value_col_tooltips = [[None]]
+        dlg._value_col_spans = [(0, 0)]
+        dlg.left_steps.setRowCount(3)
+        dlg._master_step_snapshots[(0, 0)] = {
+            "summary_rows": [["done0"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v0"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell0"]],
+            "item_stats": None,
+        }
+        dlg._master_step_snapshots[(0, 1)] = {
+            "summary_rows": [["done1"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v1"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell1"]],
+            "item_stats": None,
+        }
+        dlg._master_snapshot_browse_after_cancel = True
+        dlg._master_cancel_mi = 0
+        dlg._master_cancel_step = 2
+
+        dlg.left_steps.selectRow(1)
+        dlg._apply_selected_master_step_snapshot_if_any()
+        assert dlg._summary_rows == [["done1"]]
+
+        dlg.left_steps.selectRow(2)
+        dlg._apply_selected_master_step_snapshot_if_any()
+        assert dlg._summary_rows == []
+        assert dlg.value_grid.rowCount() == 0
+    finally:
+        dlg.close()
+
+
+def test_browse_after_cancel_future_item_shows_empty() -> None:
+    dlg = _multi_item_dialog(ncols=3)
+    try:
+        dlg._mi_idx = 2
+        dlg._master_snapshot_browse_after_cancel = True
+        dlg._master_cancel_mi = 1
+        dlg._master_cancel_step = 0
+        dlg._summary_rows = [["stale"]]
+        dlg._value_cols = [["stale"]]
+        dlg._apply_master_browse_snapshot_for_mi(2)
+        assert dlg._summary_rows == []
+        assert dlg.value_grid.rowCount() == 0
+    finally:
+        dlg.close()
+
+
+def test_enter_master_snapshot_browse_after_cancel_focuses_first_scenario_item() -> None:
+    dlg = _multi_item_dialog(ncols=3)
+    try:
+        items = [dict(m) for m in dlg._master_table_items()]
+        items[0] = {
+            **items[0],
+            "scenarios": [
+                {
+                    "title": "（シナリオなし）",
+                    "cond_sum": "—",
+                    "slot": {"defined": False, "summary_vals": ["-"] * 5},
+                }
+            ],
+        }
+        dlg._master_items_override = items
+        dlg.left_table.setRowCount(len(items))
+        dlg._mi_idx = 2
+        dlg._master_step_idx = 1
+        dlg._active_slot_indices = [0]
+        dlg.left_table.selectRow(2)
+        dlg._master_item_snapshots[1] = {
+            "empty": False,
+            "summary_rows": [["item1"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v1"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell1"]],
+            "item_stats": None,
+        }
+
+        dlg._enter_master_snapshot_browse_after_cancel()
+
+        assert dlg._master_snapshot_browse_after_cancel
+        assert dlg._master_cancel_mi == 2
+        assert dlg._mi_idx == 1
+        assert dlg._summary_rows == [["item1"]]
+    finally:
+        dlg.close()
+
+
+def test_enter_master_snapshot_browse_after_cancel_focuses_first_item() -> None:
+    dlg = _multi_item_dialog(ncols=3)
+    try:
+        dlg._mi_idx = 2
+        dlg._master_step_idx = 1
+        dlg._active_slot_indices = [0]
+        dlg.left_table.selectRow(2)
+        dlg._master_item_snapshots[0] = {
+            "empty": False,
+            "summary_rows": [["item0"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v0"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell0"]],
+            "item_stats": None,
+        }
+        dlg._master_item_snapshots[1] = {
+            "empty": False,
+            "summary_rows": [["item1"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["v1"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["cell1"]],
+            "item_stats": None,
+        }
+
+        dlg._enter_master_snapshot_browse_after_cancel()
+
+        assert dlg._master_snapshot_browse_after_cancel
+        assert dlg._master_cancel_mi == 2
+        assert dlg._mi_idx == 0
+        assert dlg._summary_rows == [["item0"]]
+    finally:
+        dlg.close()
+
+
+def test_browse_after_cancel_blocks_run_buttons_on_incomplete_step() -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._master_snapshot_browse_after_cancel = True
+        dlg._master_cancel_mi = 0
+        dlg._master_cancel_step = 1
+        dlg.left_steps.setRowCount(2)
+        dlg.left_steps.selectRow(1)
+        dlg._update_run_buttons_state()
+        assert not dlg.btn_run.isEnabled()
+        assert not dlg.btn_run_all.isEnabled()
+        assert not dlg.btn_run_all_master.isEnabled()
+    finally:
+        dlg.close()
+
+
+def test_reset_master_cancel_state_allows_continuous_restart() -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._master_continuous_cancel_requested = True
+        dlg._master_step_cancelled = True
+        dlg._master_cancel_event.set()
+        dlg._ensure_master_run_cancel()
+        from svc.data_agg_cancel import cancel_requested  # noqa: WPS433
+        from ui_qt import ipc_file  # noqa: WPS433
+
+        p = dlg._run_cancel_path
+        assert p is not None
+        ipc_file.write_pickle(p, {"cancel": True, "v": 1})
+        assert cancel_requested(p)
+
+        dlg._reset_master_cancel_state()
+        assert not dlg._master_continuous_cancel_requested
+        assert not dlg._master_step_cancelled
+        assert dlg._run_cancel_path is None
+
+        dlg._continuous_busy = True
+        dlg._continuous_steps_left = 1
+        dlg._reset_master_cancel_state()
+        dlg._ensure_master_run_cancel()
+        p2 = dlg._run_cancel_path
+        assert p2 is not None
+        assert not cancel_requested(p2)
+    finally:
+        dlg.close()
+
+
+def test_enter_master_snapshot_browse_after_cancel_applies_last_done_step() -> None:
+    dlg = _master_dialog()
+    try:
+        dlg._mi_idx = 0
+        dlg._master_step_idx = 1
+        dlg._active_slot_indices = [0, 1]
+        dlg._summary_rows = [["orig"]]
+        dlg._summary_phase_labels = ["S1"]
+        dlg._value_cols = [["orig"]]
+        dlg._value_col_tooltips = [[None]]
+        dlg._value_col_spans = [(0, 0)]
+        dlg.left_steps.setRowCount(3)
+        dlg._master_step_snapshots[(0, 0)] = {
+            "summary_rows": [["snap"]],
+            "summary_phase_labels": ["S1"],
+            "value_cols": [["snap"]],
+            "value_col_tooltips": [[None]],
+            "value_col_spans": [(0, 0)],
+            "grid_headers": ["H"],
+            "grid_rows": [["snap-cell"]],
+            "item_stats": None,
+        }
+
+        dlg._enter_master_snapshot_browse_after_cancel()
+
+        assert dlg._master_snapshot_browse_after_cancel
+        assert dlg._master_showing_row_snapshot()
+        assert dlg._summary_rows == [["snap"]]
+    finally:
+        dlg.close()
+
+
 def test_scenario_file_progress_is_enabled_for_link_and_join_even_without_many_files() -> None:
     _app()
     dlg = DataAggDebugDialog(parent=None, debug_cfg={}, fixed_mode=0)
@@ -533,5 +920,145 @@ def test_scenario_file_progress_is_enabled_for_link_and_join_even_without_many_f
         assert dlg._scenario_wants_file_progress(3, 0) is True
         assert dlg._scenario_wants_file_progress(4, 0) is True
         assert dlg._scenario_wants_file_progress(2, 999) is False
+    finally:
+        dlg.close()
+
+
+def _odn375_like_join_dialog() -> DataAggDebugDialog:
+    _app()
+    cell = {"type": "cell", "sheet_name": "S", "cell_ref": "A1"}
+    join_src = {
+        "type": "cell",
+        "sheet_name": "S",
+        "cell_ref": "AV30",
+        "ui_scenario_source_v1": {
+            "file_pattern": "A0",
+            "join_defs": [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}],
+            "link_defs": [
+                {"item": "MAC", "cell": "", "mode": "固定値", "row": 0, "col": 0}
+            ],
+        },
+    }
+    items = [
+        {
+            "id": "item_0",
+            "name": "品名",
+            "write_mode": "append",
+            "sources": [
+                {**cell, "scenario_name": "品名_ユニット"},
+                {**cell, "scenario_name": "品名_カード"},
+                {**cell, "scenario_name": "品名_PSU"},
+            ],
+        },
+        {"id": "item_1", "name": "機器番号", "sources": [], "write_mode": "append"},
+        {"id": "item_2", "name": "MAC", "sources": [], "write_mode": "append"},
+        {
+            "id": "item_3",
+            "name": "MAC LOC",
+            "write_mode": "overwrite",
+            "sources": [{**join_src, "scenario_name": "MAC LOC_1"}],
+        },
+        {
+            "id": "item_4",
+            "name": "MAC RMT",
+            "write_mode": "overwrite",
+            "sources": [
+                {
+                    **join_src,
+                    "cell_ref": "AV31",
+                    "scenario_name": "MAC RMT_1",
+                }
+            ],
+        },
+    ]
+    scen = {"id": "debug", "name": "debug", "items": items}
+    return DataAggDebugDialog(
+        parent=None,
+        debug_cfg={},
+        live_items=items,
+        scan_paths=["A0312M_test.xlsm"],
+        fixed_mode=1,
+        scenario_for_dry_run=scen,
+    )
+
+
+def test_stacked_join_seed_uses_hinmei_n_act_not_caller_n_pick() -> None:
+    """品名3スロット完了表を MAC LOC seed に使う（n_pick=1 ユニットのみは使わない）。"""
+    dlg = _odn375_like_join_dialog()
+    try:
+        rows_unit = [["ユニット", "AT1", "", "", ""]]
+        rows_psu = [
+            ["ユニット", "AT1", "", "", ""],
+            ["IMX-VCH", "AT1", "", "", ""],
+            ["PSU-0", "PT1", "", "", ""],
+        ]
+        dlg._mi_idx = 0
+        dlg._active_slot_indices = [0, 1, 2]
+        _seed_step_cache(dlg, 1, rows_unit)
+        _seed_step_cache(dlg, 3, rows_psu)
+        dlg._mpv_progress_rows_by_mi[0] = (3, [list(r) for r in rows_psu])
+
+        dlg._mi_idx = 3
+        dlg._active_slot_indices = [0]
+        join_defs = [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}]
+        got = dlg._mpv_prior_rows_for_stacked_join_seed(3, join_defs, n_pick=1)
+        assert got is not None
+        rows, src_mi = got
+        assert src_mi == 0
+        assert len(rows) == 3
+        assert rows[2][0] == "PSU-0"
+    finally:
+        dlg.close()
+
+
+def test_stacked_join_mac_rmt_seed_prefers_immediate_prior_mac_loc() -> None:
+    """MAC RMT seed は品名より直前 MAC LOC 済み表を優先し MAC LOC 列を引き継ぐ。"""
+    dlg = _odn375_like_join_dialog()
+    try:
+        rows_hinmei_unit = [["ユニット", "AT1", "", "", ""]]
+        rows_mac_loc = [
+            ["ユニット", "AT1", "", "AA:BB:CC:DD:EE:FF", ""],
+            ["IMX-VCH", "AT1", "", "11:22:33:44:55:66", ""],
+        ]
+        dlg._mi_idx = 0
+        dlg._active_slot_indices = [0, 1, 2]
+        _seed_step_cache(dlg, 1, rows_hinmei_unit)
+
+        dlg._mi_idx = 3
+        dlg._active_slot_indices = [0]
+        _seed_step_cache(dlg, 1, rows_mac_loc)
+        dlg._mpv_progress_rows_by_mi[3] = (1, [list(r) for r in rows_mac_loc])
+
+        dlg._mi_idx = 4
+        dlg._active_slot_indices = [0]
+        join_defs = [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}]
+        got = dlg._mpv_prior_rows_for_stacked_join_seed(4, join_defs, n_pick=1)
+        assert got is not None
+        rows, src_mi = got
+        assert src_mi == 3
+        assert rows[0][3] == "AA:BB:CC:DD:EE:FF"
+        assert rows[1][3] == "11:22:33:44:55:66"
+    finally:
+        dlg.close()
+
+
+def test_master_left_selected_row_active_background_when_idle() -> None:
+    """実行していなくても選択中マスタ行は濃いベージュ。"""
+    from ui_qt.ui_data_agg_debug import (  # noqa: WPS433
+        _DEBUG_MASTER_ACTIVE_ROW_BG,
+        _DEBUG_MASTER_REGISTERED_ROW_BG,
+    )
+
+    dlg = _multi_item_dialog(ncols=5)
+    try:
+        dlg._mi_idx = 2
+        dlg._continuous_busy = False
+        dlg._master_step_loop_busy = False
+        dlg._apply_master_left_registered_row_style()
+        sel = dlg.left_table.item(2, 0)
+        other = dlg.left_table.item(1, 0)
+        assert sel is not None and other is not None
+        assert sel.background().color() == _DEBUG_MASTER_ACTIVE_ROW_BG
+        assert other.background().color() == _DEBUG_MASTER_REGISTERED_ROW_BG
     finally:
         dlg.close()

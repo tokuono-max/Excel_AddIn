@@ -184,10 +184,10 @@ def test_item_complete_capture_frozen_when_snapshot_missing() -> None:
 
 def test_join_progress_phases_advance_before_compute() -> None:
     phase0, done0 = master_preview_join_step0_initial_progress()
-    assert "結合" in phase0
+    assert phase0 == "読込開始"
     assert done0 == 4
     phase_sync, done_sync = master_preview_join_sync_compute_progress()
-    assert "取り出し" in phase_sync
+    assert phase_sync == "読込開始"
     assert done_sync == 4
 
 

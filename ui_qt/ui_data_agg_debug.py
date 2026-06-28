@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QEventLoop, Qt, QTimer
+from PySide6.QtCore import QEventLoop, Qt, QThread, QTimer
 from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
@@ -151,6 +151,7 @@ _DEBUG_RESULTS_SNAPSHOT_TINT_QCOLOR = QColor(221, 238, 249)
 _DEBUG_SUMMARY_PHASE_COL_BG = QColor(232, 232, 232)
 _DEBUG_MASTER_REGISTERED_NAME_COLOR = QColor(0, 51, 153)  # 濃い青
 _DEBUG_MASTER_REGISTERED_ROW_BG = QColor(245, 240, 232)  # 薄ベージュ（登録行）
+_DEBUG_MASTER_ACTIVE_ROW_BG = QColor(228, 212, 188)  # 濃いベージュ（実行中・選択中）
 
 COND_KEYS_DEFAULT = [
     "ファイル検索",
@@ -483,16 +484,21 @@ def build_debug_scenarios_from_items(
 
 def _master_debug_csv_precache_progress_hook(
     batch_hook: Callable[..., None] | None,
+    *,
+    cancel_check: Callable[..., None] | None = None,
 ) -> Callable[[str], None] | None:
     """compute_batch 用 progress_hook を CSV precache 文言 (str) 向けにラップ。"""
-    if batch_hook is None:
+    if batch_hook is None and cancel_check is None:
         return None
 
     def _hook(msg: str) -> None:
-        try:
-            batch_hook(4, str(msg))
-        except Exception:
-            pass
+        if cancel_check is not None:
+            cancel_check(force=True)
+        if batch_hook is not None:
+            try:
+                batch_hook(4, str(msg))
+            except Exception:
+                pass
 
     return _hook
 
@@ -707,17 +713,22 @@ def _empty_debug_master_items() -> list[dict[str, Any]]:
     ]
 
 
-# マスタ項目ステップ実行の進捗（8 段）。phase_i は 1 始まりで本配列の index+1 に対応。
+# マスタ項目ステップ実行の進捗（10 段）。done/total の total は本配列の長さ。
 _MASTER_DEBUG_PROGRESS_PHASES: tuple[str, ...] = (
-    "準備しています",
-    "サマリー表を更新中",
-    "サマリーに項目の値を表示中",
-    "結果一覧用に取り出し中",
-    "取得データを行にまとめ中",
-    "項目間で照合中",
-    "結果一覧表を組み立て表示中",
-    "完了しました",
+    "準備",
+    "サマリー更新",
+    "値取得",
+    "読込開始",
+    "ファイル読込",
+    "行まとめ",
+    "結合準備",
+    "結合索引",
+    "結合照合",
+    "一覧組立",
 )
+_MASTER_DEBUG_PROGRESS_PHASE_DONE = "完了"
+# compute_batch の progress_hook sub 4〜7 が担う UI 段（読込開始〜一覧組立）
+_MASTER_DEBUG_BATCH_UI_PHASE_COUNT = 7
 
 # シナリオデバッグ: 連携(3)／結合(4)フェーズで、検出ファイルがこの件数以上のときだけファイル単位進捗を表示
 # （SCREENS.DEBUG.SCENARIO_PROGRESS_MIN_FILES で上書き可。0＝閾値なしで常に進捗フック）
@@ -885,6 +896,8 @@ class DataAggDebugDialog(QDialog):
         self._mpv_join_search_pool_seed: list[dict[str, Any]] | None = None
         self._mpv_join_search_pool_seed_paths_count: int = -1
         self._mpv_join_pool_by_mi: dict[int, list[dict[str, Any]]] = {}
+        # 積み上げ join seed 用: 項目ごとの table_rows 行に対応する参照元ファイルパス
+        self._mpv_row_file_paths_by_mi: dict[int, list[str]] = {}
         # 全項目完了後の結果一覧（file_path + iter_index 順の本番同等行）
         self._mpv_final_table_rows: list[list[Any]] | None = None
         # 描画時に「現在列」として扱う項目 index（フォールバック表示整合用）
@@ -911,13 +924,31 @@ class DataAggDebugDialog(QDialog):
         self._continuous_was_full_master: bool = False
         self._master_full_continuous_allowed: bool = True
         self._master_step_pass_complete: bool = False
+        self._master_snapshot_browse_after_cancel: bool = False
+        self._master_cancel_mi: int = 0
+        self._master_cancel_step: int = 0
         self._run_progress_dlg: Any | None = None
         self._run_progress_path: Path | None = None
+        self._run_cancel_path: Path | None = None
+        self._master_cancel_check: Callable[..., None] | None = None
+        self._master_cancel_scope_cm: Any | None = None
+        self._master_step_cancelled: bool = False
+        self._master_continuous_cancel_requested: bool = False
+        self._master_cancel_event = threading.Event()
+        self._master_cancel_pump_timer: QTimer | None = None
+        self._master_step_exec_depth: int = 0
+        self._master_cooperative_abort_retries: int = 0
+        self._master_abort_in_progress: bool = False
         self._run_progress_seq: int = 0
         self._debug_progress_locked: bool = False
         self._master_item_snapshots: dict[int, dict[str, Any]] = {}
         self._master_item_snapshot_done: set[int] = set()
         self._master_step_snapshots: dict[tuple[int, int], dict[str, Any]] = {}
+        # マスタ実行時間（秒）: (mi_idx, step_idx) / mi_idx 合計 / 連続実行全体
+        self._master_step_elapsed_sec: dict[tuple[int, int], float] = {}
+        self._master_item_elapsed_sec: dict[int, float] = {}
+        self._master_step_timing_t0: float | None = None
+        self._master_continuous_run_t0: float | None = None
 
         self._build_ui()
         try:
@@ -1670,6 +1701,10 @@ class DataAggDebugDialog(QDialog):
             ),
         )
 
+    def _master_debug_join_max_files(self) -> int:
+        """結合項目のファイル読込上限。0 で無制限。"""
+        return self._cfg_debug_int("MASTER_DEBUG_JOIN_MAX_FILES", 20)
+
     def _mpv_begin_join_compute(self) -> None:
         self._mpv_join_compute_busy = int(getattr(self, "_mpv_join_compute_busy", 0)) + 1
         self._update_values_title_master()
@@ -1889,6 +1924,14 @@ class DataAggDebugDialog(QDialog):
         return ph
 
     def _process_events_light(self) -> None:
+        """進捗表示中はユーザ入力（キャンセルボタン等）も処理する。"""
+        if bool(
+            getattr(self, "_master_run_progress_active", False)
+            or getattr(self, "_debug_progress_locked", False)
+            or getattr(self, "_continuous_busy", False)
+        ):
+            self._process_events_for_master_cancel()
+            return
         try:
             QApplication.processEvents(
                 QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
@@ -1899,11 +1942,587 @@ class DataAggDebugDialog(QDialog):
             except Exception:
                 pass
 
+    def _process_events_for_master_cancel(self) -> None:
+        """進捗ダイアログのキャンセル等を届けるため、ユーザ入力込みでイベントを処理する。"""
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            flags = QEventLoop.ProcessEventsFlag.AllEvents
+        except AttributeError:
+            flags = QEventLoop.AllEvents  # type: ignore[attr-defined]
+        try:
+            app.processEvents(flags, 50)
+            app.processEvents(flags, 50)
+        except TypeError:
+            try:
+                app.processEvents()
+            except Exception:
+                pass
+        except Exception:
+            try:
+                app.processEvents()
+            except Exception:
+                pass
+
+    def _show_master_run_cancel_notice(self, *, continuous: bool = False) -> None:
+        """進捗キャンセル後の短い通知（ログ欄とは別）。"""
+        try:
+            from ui_qt.ui_common import show_info_notice
+
+            title = self._d(
+                "DIALOG_MASTER_RUN_CANCEL_TITLE",
+                self._d("DIALOG_RUN_ALL_DONE_TITLE", "データ集約 デバッグ"),
+            )
+            if continuous:
+                body = self._d(
+                    "MSG_MASTER_RUN_CANCEL_CONTINUOUS_NOTICE",
+                    "連続実行を中止しました。",
+                )
+            else:
+                body = self._d(
+                    "MSG_MASTER_RUN_CANCEL_NOTICE",
+                    "実行を中止しました。",
+                )
+            show_info_notice(self, title, _normalize_message_newlines(body))
+        except Exception:
+            pass
+
+    def _activate_master_run_progress_for_cancel(self, dlg: Any | None = None) -> None:
+        """進捗表示直後: デバッグではなく進捗を前面化し、キャンセルボタンへフォーカスする。"""
+        if dlg is None:
+            dlg = getattr(self, "_run_progress_dlg", None)
+        if dlg is None:
+            return
+        try:
+            dlg.raise_()
+            dlg.activateWindow()
+            btn = getattr(dlg, "_btn_cancel", None)
+            if btn is not None and btn.isEnabled() and btn.isVisible():
+                btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+
+    def _ensure_master_cancel_pump_timer(self) -> None:
+        t = getattr(self, "_master_cancel_pump_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setInterval(30)
+            t.timeout.connect(self._master_cancel_pump_tick)  # type: ignore[attr-defined]
+            self._master_cancel_pump_timer = t
+        if not t.isActive():
+            t.start()
+
+    def _stop_master_cancel_pump_timer(self) -> None:
+        t = getattr(self, "_master_cancel_pump_timer", None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+
+    def _master_cancel_pump_tick(self) -> None:
+        if not (
+            getattr(self, "_master_run_progress_active", False)
+            or getattr(self, "_debug_progress_locked", False)
+            or getattr(self, "_continuous_busy", False)
+        ):
+            self._stop_master_cancel_pump_timer()
+            return
+        self._process_events_for_master_cancel()
+        from svc.data_agg_cancel import DataAggCancelled, cancel_requested  # noqa: WPS433
+
+        p = self._run_cancel_path
+        if p is not None and (
+            self._master_cancel_event.is_set() or cancel_requested(p)
+        ):
+            self._master_note_cancel_requested()
+            self._master_sync_run_progress_after_cancel_signal()
+            self._master_schedule_cooperative_abort()
+            return
+        try:
+            self._master_poll_cancel(force=True)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            self._master_schedule_cooperative_abort()
+            return
+        self._master_sync_run_progress_after_cancel_signal()
+
+    def _trigger_master_run_cancel(self, *, source: str = "ui") -> None:
+        """協調キャンセル pickle / Event を立て、連続実行も止める。"""
+        self._ensure_master_run_cancel()
+        p = self._run_cancel_path
+        if p is not None:
+            try:
+                ipc_file.write_pickle(p, {"cancel": True, "v": 1})
+            except Exception:
+                pass
+        pp = self._run_progress_path
+        if pp is not None:
+            try:
+                from svc.data_agg_cancel import write_progress_cancel_status  # noqa: WPS433
+
+                write_progress_cancel_status(pp)
+            except Exception:
+                pass
+        try:
+            self._master_cancel_event.set()
+        except Exception:
+            pass
+        self._master_note_cancel_requested()
+        try:
+            from core.core_log import get_logger  # noqa: WPS433
+
+            get_logger(__name__).info(
+                "[DATA_AGG] master_debug cancel triggered source=%s path=%s",
+                str(source or "ui"),
+                str(p or ""),
+            )
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(0, self._master_sync_run_progress_after_cancel_signal)
+        except Exception:
+            pass
+        self._master_schedule_cooperative_abort()
+
+    def _master_schedule_cooperative_abort(self) -> None:
+        """協調キャンセル着信後、ステップ中断をイベントループ境界で試みる。"""
+        if not self._master_cancel_pending():
+            return
+        try:
+            QTimer.singleShot(0, self._master_cooperative_abort_tick)
+        except Exception:
+            pass
+
+    def _master_cooperative_abort_tick(self) -> None:
+        """Qt タイマー／ボタン経由のキャンセルで abort まで到達させる（再入安全）。"""
+        if not self._master_cancel_pending():
+            self._master_cooperative_abort_retries = 0
+            return
+        if getattr(self, "_master_abort_in_progress", False):
+            return
+        depth = int(getattr(self, "_master_step_exec_depth", 0) or 0)
+        if depth > 0:
+            retries = int(getattr(self, "_master_cooperative_abort_retries", 0) or 0)
+            if retries < 60:
+                self._master_cooperative_abort_retries = retries + 1
+                try:
+                    QTimer.singleShot(50, self._master_cooperative_abort_tick)
+                except Exception:
+                    pass
+                return
+        self._master_cooperative_abort_retries = 0
+        if depth <= 0 and not (
+            getattr(self, "_continuous_busy", False)
+            or getattr(self, "_debug_progress_locked", False)
+            or getattr(self, "_master_run_progress_active", False)
+        ):
+            return
+        self._master_abort_step_after_cancel()
+
+    def _master_sync_run_progress_after_cancel_signal(self) -> None:
+        """進捗 pickle の CANCEL でダイアログだけ閉じたとき、親側の進捗フラグを同期する。"""
+        dlg = getattr(self, "_run_progress_dlg", None)
+        try:
+            closed = dlg is None
+            if dlg is not None:
+                try:
+                    closed = not dlg.isVisible()
+                except Exception:
+                    closed = True
+            if closed and getattr(self, "_master_run_progress_active", False):
+                self._master_run_progress_active = False
+                self._run_progress_dlg = None
+        except Exception:
+            pass
+
     def _set_debug_progress_locked(self, locked: bool) -> None:
         if self._mode != 1:
             return
         self._debug_progress_locked = locked
         self._refresh_master_nav_lock_state()
+
+    def _reset_master_cancel_state(self) -> None:
+        """キャンセル協調状態を初期化（再実行前・キャンセル完了後）。"""
+        self._master_step_cancelled = False
+        self._master_continuous_cancel_requested = False
+        self._master_cooperative_abort_retries = 0
+        try:
+            self._master_cancel_event.clear()
+        except Exception:
+            pass
+        self._stop_master_cancel_pump_timer()
+        self._clear_master_run_cancel()
+
+    def _ensure_master_run_cancel(self) -> None:
+        """マスタ実行中の協調キャンセル pickle（進捗ダイアログのキャンセルボタン用）。"""
+        from svc.data_agg_cancel import (  # noqa: WPS433
+            cancel_request_path_data_agg_master_debug,
+            make_cancel_check,
+            reset_cancel_path,
+        )
+
+        if self._run_cancel_path is not None and self._master_cancel_check is not None:
+            try:
+                reset_cancel_path(self._run_cancel_path)
+            except Exception:
+                pass
+            try:
+                self._master_cancel_event.clear()
+            except Exception:
+                pass
+            return
+        tok = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        p = cancel_request_path_data_agg_master_debug(ipc_file.get_ipc_root(), token=tok)
+        reset_cancel_path(p)
+        self._run_cancel_path = p
+        try:
+            self._master_cancel_event.clear()
+        except Exception:
+            pass
+        base_check = make_cancel_check(p, min_interval_sec=0.0)
+        evt = self._master_cancel_event
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        def _combined_cancel_check(*, force: bool = False) -> None:
+            if evt.is_set():
+                raise DataAggCancelled()
+            if base_check is not None:
+                base_check(force=force)
+
+        self._master_cancel_check = _combined_cancel_check
+        if getattr(self, "_master_cancel_scope_cm", None) is None:
+            from svc.data_agg_cancel import batch_cancel_scope  # noqa: WPS433
+
+            cm = batch_cancel_scope(self._master_cancel_check)
+            cm.__enter__()
+            self._master_cancel_scope_cm = cm
+
+    def _clear_master_run_cancel(self) -> None:
+        from svc.data_agg_cancel import reset_cancel_path  # noqa: WPS433
+
+        cm = getattr(self, "_master_cancel_scope_cm", None)
+        if cm is not None:
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._master_cancel_scope_cm = None
+        p = self._run_cancel_path
+        self._run_cancel_path = None
+        self._master_cancel_check = None
+        try:
+            self._master_cancel_event.clear()
+        except Exception:
+            pass
+        if p is not None:
+            try:
+                reset_cancel_path(p)
+            except Exception:
+                pass
+
+    def _master_run_cancel_check(self) -> Callable[..., None] | None:
+        return getattr(self, "_master_cancel_check", None)
+
+    def _master_poll_cancel(self, *, force: bool = False) -> None:
+        if getattr(self, "_master_run_progress_active", False):
+            self._process_events_for_master_cancel()
+        chk = self._master_run_cancel_check()
+        if chk is not None:
+            chk(force=force)
+
+    def _on_master_progress_cancel_clicked(self) -> None:
+        """進捗ダイアログのキャンセル押下（pickle は ProgressDialog 側で書込済み）。"""
+        self._trigger_master_run_cancel(source="progress_dialog")
+
+    def _master_on_ui_thread(self) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return threading.current_thread() is threading.main_thread()
+        try:
+            return QThread.currentThread() is app.thread()
+        except Exception:
+            return threading.current_thread() is threading.main_thread()
+
+    def _master_should_offthread_compute(self, probe_caller: str) -> bool:
+        if str(probe_caller or "") == "mpv_progress_prefetch":
+            return False
+        return self._master_on_ui_thread()
+
+    def _master_bridge_progress_hook(
+        self,
+        real_hook: Callable[..., None] | None,
+        hook_q: queue.SimpleQueue,
+    ) -> Callable[..., None] | None:
+        if real_hook is None:
+            return None
+
+        def _bridged(*args: Any, **kwargs: Any) -> None:
+            hook_q.put((args, kwargs))
+
+        return _bridged
+
+    def _master_drain_progress_hook_queue(
+        self,
+        hook_q: queue.SimpleQueue,
+        real_hook: Callable[..., None] | None,
+    ) -> None:
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        while True:
+            try:
+                args, kwargs = hook_q.get_nowait()
+            except queue.Empty:
+                break
+            if real_hook is None:
+                continue
+            try:
+                real_hook(*args, **kwargs)
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                raise
+
+    def _master_run_blocking_with_ui_pump(
+        self,
+        fn: Callable[[], Any],
+        *,
+        progress_hook: Callable[..., None] | None = None,
+        hook_q: queue.SimpleQueue | None = None,
+    ) -> Any:
+        """compute 中もメインスレッドで Qt イベントを処理し、キャンセルボタンを有効にする。"""
+        import contextvars
+
+        drain_q = hook_q if hook_q is not None else queue.SimpleQueue()
+        result_box: list[Any] = []
+        exc_box: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                result_box.append(fn())
+            except BaseException as exc:
+                exc_box.append(exc)
+
+        ctx = contextvars.copy_context()
+        t = threading.Thread(
+            target=lambda: ctx.run(worker),
+            daemon=True,
+            name="master_dbg_compute",
+        )
+        t.start()
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        cancelled_early = False
+        while t.is_alive():
+            try:
+                self._master_drain_progress_hook_queue(drain_q, progress_hook)
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                cancelled_early = True
+                break
+            self._process_events_for_master_cancel()
+            if self._master_cancel_pending():
+                cancelled_early = True
+                break
+            try:
+                self._master_poll_cancel(force=True)
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                cancelled_early = True
+                break
+            time.sleep(0.005)
+        if cancelled_early or self._master_cancel_pending():
+            raise DataAggCancelled()
+        try:
+            self._master_drain_progress_hook_queue(drain_q, progress_hook)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            raise
+        if self._master_cancel_pending():
+            raise DataAggCancelled()
+        if exc_box:
+            exc = exc_box[0]
+            if isinstance(exc, DataAggCancelled):
+                self._master_note_cancel_requested()
+            raise exc
+        return result_box[0]
+
+    def _master_note_cancel_requested(self) -> None:
+        """協調キャンセル検知時: 連続実行も止める。"""
+        self._master_step_cancelled = True
+        self._master_continuous_cancel_requested = True
+        self._bump_mpv_prefetch_cancel()
+
+    def _master_cancel_pending(self) -> bool:
+        return bool(
+            getattr(self, "_master_step_cancelled", False)
+            or getattr(self, "_master_continuous_cancel_requested", False)
+        )
+
+    def _master_raise_if_cancelled(self, *, force_poll: bool = False) -> None:
+        """キャンセル保留または協調 pickle を検知したら即 DataAggCancelled。"""
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        if self._master_cancel_pending():
+            raise DataAggCancelled()
+        if force_poll or getattr(self, "_master_run_progress_active", False) or getattr(
+            self, "_continuous_busy", False
+        ):
+            self._master_poll_cancel(force=True)
+
+    def _master_abort_step_after_cancel(self) -> tuple[bool, bool]:
+        """ステップ実行をキャンセルで打ち切り（途中 upsert はロールバックしない）。"""
+        if getattr(self, "_master_abort_in_progress", False):
+            return False, False
+        self._master_abort_in_progress = True
+        try:
+            self._master_step_cancelled = False
+            self._master_cooperative_abort_retries = 0
+            try:
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] master_step_abort reason=cancel mi_idx=%s step_idx=%s",
+                    self._mi_idx,
+                    self._master_step_idx,
+                )
+            except Exception:
+                pass
+            try:
+                _diag_logger.info(
+                    "[DATA_AGG] master_step_abort reason=cancel mi_idx=%s step_idx=%s",
+                    self._mi_idx,
+                    self._master_step_idx,
+                )
+            except Exception:
+                pass
+            self._log_append(
+                self._d("MSG_MASTER_RUN_CANCEL", "（実行を中止しました）")
+            )
+            self._show_master_run_cancel_notice(
+                continuous=bool(getattr(self, "_continuous_busy", False))
+            )
+            try:
+                from core.hc_cursor import progress_dialog_wait_cursor_off  # noqa: WPS433
+
+                progress_dialog_wait_cursor_off(cancel_reason="master_debug_cancel")
+            except Exception:
+                pass
+            self._close_run_progress(cancelled=True)
+            if getattr(self, "_continuous_busy", False):
+                self._finish_continuous_run()
+            else:
+                self._stop_master_cancel_pump_timer()
+                self._clear_master_run_cancel()
+            self._reset_master_cancel_state()
+            self._enter_master_snapshot_browse_after_cancel()
+            return False, False
+        finally:
+            self._master_abort_in_progress = False
+            self._master_step_exec_depth_leave()
+            self._master_step_timing_t0 = None
+
+    def _master_return_if_step_cancelled(self) -> tuple[bool, bool] | None:
+        if self._master_cancel_pending():
+            return self._master_abort_step_after_cancel()
+        return None
+
+    def _mpv_store_row_file_paths_for_mi(
+        self,
+        mi_idx: int,
+        rows: list[list[Any]],
+        *,
+        iteration_contexts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """積み上げ join seed 用に、table_rows 行ごとの参照元ファイルパスを保持する。"""
+        from svc.data_agg_master_preview import (  # noqa: WPS433
+            table_row_file_paths_for_stacked_seed,
+        )
+
+        n = len(rows or [])
+        if n <= 0:
+            return
+        stored: list[str] | None = None
+        if iteration_contexts:
+            fps = [
+                str(ctx.get("file_path") or "").strip()
+                for ctx in iteration_contexts
+                if isinstance(ctx, dict)
+            ]
+            if len(fps) >= n and any(fps[:n]):
+                stored = fps[:n]
+        paths = table_row_file_paths_for_stacked_seed(
+            self._mpv_preview_headers(),
+            list(rows),
+            scan_paths=list(self._debug_scan_paths or []),
+            stored_row_paths=stored,
+        )
+        if not (paths and any(paths)):
+            return
+        from svc.data_agg_master_preview import row_file_paths_real_count  # noqa: WPS433
+
+        prev = (getattr(self, "_mpv_row_file_paths_by_mi", {}) or {}).get(int(mi_idx))
+        if isinstance(prev, list) and len(prev) == len(paths):
+            if row_file_paths_real_count(prev) > row_file_paths_real_count(paths):
+                return
+        self._mpv_row_file_paths_by_mi[int(mi_idx)] = list(paths)
+
+    def _mpv_find_row_file_paths_for_stacked_seed(
+        self,
+        n_rows: int,
+        *,
+        start_mi: int | None = None,
+    ) -> list[str] | None:
+        """積み上げ seed: 前段 mi から synthetic でない行パスを遡って取得。"""
+        from svc.data_agg_master_preview import row_file_paths_real_count  # noqa: WPS433
+
+        n = max(0, int(n_rows))
+        if n <= 0:
+            return None
+        begin = int(start_mi) if start_mi is not None else len(
+            (getattr(self, "_mpv_row_file_paths_by_mi", {}) or {})
+        )
+        for mi in range(begin, -1, -1):
+            prev = (getattr(self, "_mpv_row_file_paths_by_mi", {}) or {}).get(mi)
+            if not isinstance(prev, list) or len(prev) < n:
+                continue
+            chunk = [str(p) for p in prev[:n]]
+            if row_file_paths_real_count(chunk) > 0:
+                return chunk
+        return None
+
+    def _mpv_row_file_paths_for_stacked_seed(
+        self,
+        n_rows: int,
+        prows: list[list[Any]] | None = None,
+        headers: list[str] | None = None,
+        *,
+        source_mi: int | None = None,
+    ) -> list[str]:
+        """積み上げ join seed: 前段 table_rows 行ごとの __file_path。"""
+        from svc.data_agg_master_preview import (  # noqa: WPS433
+            table_row_file_paths_for_stacked_seed,
+        )
+
+        n = max(0, int(n_rows))
+        if n <= 0:
+            return []
+        hdrs = list(headers or [])
+        rows = list(prows or [])[:n]
+        stored = self._mpv_find_row_file_paths_for_stacked_seed(
+            n,
+            start_mi=int(source_mi) if source_mi is not None else None,
+        )
+        paths = table_row_file_paths_for_stacked_seed(
+            hdrs,
+            rows,
+            scan_paths=list(self._debug_scan_paths or []),
+            stored_row_paths=stored,
+        )
+        if paths:
+            return paths[:n]
+        scan = list(self._debug_scan_paths or [])
+        if not scan:
+            return []
+        return [str(p) for p in scan[:n]]
 
     def _show_run_progress(
         self,
@@ -1935,6 +2554,7 @@ class DataAggDebugDialog(QDialog):
             self._master_progress_pct_floor = pct
             ph = self._debug_parent_hwnd()
             if self._run_progress_dlg is None or self._run_progress_path is None:
+                self._ensure_master_run_cancel()
                 pdir = ipc_file.get_ipc_root() / "progress"
                 pdir.mkdir(parents=True, exist_ok=True)
                 self._run_progress_path = pdir / (
@@ -1948,10 +2568,18 @@ class DataAggDebugDialog(QDialog):
                     "excel_lock": False,
                     "no_native_window": True,
                     "close_parent_when_done": False,
-                    "non_modal_progress": True,
+                    "non_modal_progress": False,
                     "done_delay_ms": 220,
+                    "progress_poll_ms": 120,
                     "center_on_parent_widget": True,
+                    "bring_excel_first": False,
                 }
+                cr = str(getattr(self, "_run_cancel_path", "") or "").strip()
+                if cr:
+                    req["cancel_request_path"] = cr
+                    req["master_debug_cancel_cb"] = (
+                        self._on_master_progress_cancel_clicked
+                    )
                 cfg = {}
                 try:
                     import json
@@ -1972,29 +2600,38 @@ class DataAggDebugDialog(QDialog):
                     req, ph, self, progress_cfg=cfg
                 )
                 self._run_progress_dlg.show()
+                try:
+                    QTimer.singleShot(
+                        0,
+                        self._activate_master_run_progress_for_cancel,
+                    )
+                except Exception:
+                    pass
                 self._run_progress_seq = 0
                 self._set_debug_progress_locked(True)
                 self._master_run_progress_active = True
+                self._ensure_master_cancel_pump_timer()
             self._run_progress_seq += 1
             wt = str(window_title or "").strip()
             det = str(detail or "").strip()
             curf = str(current_file or "").strip()
+            payload: dict[str, Any] = {
+                "status": "RUN",
+                "seq": int(self._run_progress_seq),
+                "phase_total": tot,
+                "phase_i": max(1, dn) if dn > 0 else 1,
+                "phase": str(phase or "実行中"),
+                "done": dn,
+                "total": tot,
+                "pct": pct,
+                "current_file": curf,
+                "window_title": wt,
+                "msg": det,
+                "detail": det,
+            }
             ipc_file.write_pickle(
                 self._run_progress_path,
-                {
-                    "status": "RUN",
-                    "seq": int(self._run_progress_seq),
-                    "phase_total": tot,
-                    "phase_i": max(1, dn) if dn > 0 else 1,
-                    "phase": str(phase or "実行中"),
-                    "done": dn,
-                    "total": tot,
-                    "pct": pct,
-                    "current_file": curf,
-                    "window_title": wt,
-                    "msg": det,
-                    "detail": det,
-                },
+                payload,
             )
             self._process_events_light()
         except Exception:
@@ -2035,31 +2672,84 @@ class DataAggDebugDialog(QDialog):
             return m_colon.group(1).strip()
         return ""
 
+    def _master_batch_hook_ui_phase(self, sub_phase: int, detail_s: str) -> int:
+        """compute_batch の sub 4〜7 を UI 段 done=4..10 に割り当てる。"""
+        s = str(detail_s or "")
+        if sub_phase == 4:
+            if (
+                "結合準備中" in s
+                or re.search(r"^0/\d+", s.strip())
+                or s.strip() == "0 件"
+            ):
+                return 4
+            return 5
+        if sub_phase == 5:
+            return 6
+        if sub_phase == 6:
+            if "結合索引" in s:
+                return 8
+            if re.search(r"結合項目", s) and "候補プール" in s:
+                return 7
+            return 9
+        if sub_phase == 7:
+            return 10
+        return max(4, min(10, int(sub_phase) + 1))
+
+    def _master_batch_hook_pct(
+        self,
+        ui_done: int,
+        *,
+        fi: int,
+        nf: int,
+        intra: float = 0.0,
+    ) -> int:
+        tot = len(_MASTER_DEBUG_PROGRESS_PHASES)
+        ui = max(1, min(tot, int(ui_done)))
+        nf_m = max(1, int(nf))
+        fi_m = max(1, min(nf_m, int(fi)))
+        batch_lo = 4
+        if ui < batch_lo:
+            return min(95, int(round(100.0 * ui / tot)))
+        batch_idx = ui - batch_lo
+        denom = max(1, _MASTER_DEBUG_BATCH_UI_PHASE_COUNT * nf_m)
+        step_pos = (fi_m - 1) * _MASTER_DEBUG_BATCH_UI_PHASE_COUNT + batch_idx
+        step_pos += min(1.0, max(0.0, float(intra)))
+        frac = min(1.0, step_pos / float(denom))
+        lo = int(round(100.0 * (batch_lo - 1) / tot))
+        hi = 95
+        return min(hi, int(round(lo + (hi - lo) * frac)))
+
+    def _master_progress_format_read_start_detail(
+        self, *, fi: int, nf: int, raw: str
+    ) -> str:
+        if nf > 0:
+            return "0/%s — 開始" % nf
+        r = str(raw or "").strip()
+        return r if r else "開始"
+
     def _master_progress_format_extract_detail(
         self,
         detail_s: str,
         *,
-        phase_head: str,
         fi: int,
         nf: int,
         cur_file: str,
     ) -> str:
         raw = str(detail_s or "").strip()
-        if raw.startswith(phase_head):
-            raw = raw[len(phase_head) :].strip()
+        eff_nf = max(1, int(nf))
+        eff_fi = int(fi)
+        fn = str(cur_file or "").strip()
         item_m = re.search(
             r"項目\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s*（|$)",
             raw,
         )
         if item_m:
             label = item_m.group(3).strip()
-            if cur_file and cur_file not in label:
-                return "取り出し: %s — 項目 %s/%s" % (
-                    cur_file,
-                    item_m.group(1),
-                    item_m.group(2),
-                )
-            return "取り出し: 項目 %s/%s — %s" % (
+            base = "読込 %s/%s" % (eff_fi, eff_nf)
+            if fn:
+                base = "%s — %s" % (base, fn)
+            return "%s · 項目 %s/%s %s" % (
+                base,
                 item_m.group(1),
                 item_m.group(2),
                 label,
@@ -2069,9 +2759,11 @@ class DataAggDebugDialog(QDialog):
             raw,
         )
         if row_m:
-            fn = row_m.group(3).strip()
-            return "読込中: %s（%s/%s行）" % (
-                fn,
+            rfn = row_m.group(3).strip()
+            return "読込 %s/%s — %s · 行 %s/%s" % (
+                eff_fi,
+                eff_nf,
+                rfn,
                 row_m.group(1),
                 row_m.group(2),
             )
@@ -2080,44 +2772,146 @@ class DataAggDebugDialog(QDialog):
             raw,
         )
         if row_done:
-            return "読込完了: %s" % row_done.group(3).strip()
+            return "読込完了 — %s" % row_done.group(3).strip()
         file_m = re.search(
             r"ファイル\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s+読込中|（完了）|$)",
             raw,
         )
         if file_m:
-            fn = file_m.group(3).strip()
-            return "読込中 %s/%s: %s" % (
+            return "読込 %s/%s — %s" % (
                 file_m.group(1),
                 file_m.group(2),
-                fn,
+                file_m.group(3).strip(),
             )
-        hook_paths = self._mpv_effective_progress_hook_paths()
-        eff_nf = len(hook_paths) if hook_paths else max(1, int(nf))
-        eff_fi = int(fi)
-        if cur_file:
-            if eff_nf <= 1:
-                return "読込中: %s" % cur_file
-            return "読込中 %s/%s: %s" % (eff_fi, eff_nf, cur_file)
+        if fn:
+            return "読込 %s/%s — %s" % (eff_fi, eff_nf, fn)
         if raw:
             return raw
-        if eff_nf <= 1:
-            return "読込中"
-        return "読込中 %s/%s" % (eff_fi, eff_nf)
+        return "読込 %s/%s" % (eff_fi, eff_nf)
+
+    def _master_progress_format_merge_detail(
+        self,
+        detail_s: str,
+        *,
+        fi: int,
+        nf: int,
+        cur_file: str,
+    ) -> str:
+        raw = str(detail_s or "").strip()
+        eff_nf = max(1, int(nf))
+        eff_fi = int(fi)
+        row_n = re.search(r"（\s*(\d+)\s*行\s*）", raw)
+        if row_n:
+            return "ファイル %s/%s — %s 行" % (
+                eff_fi,
+                eff_nf,
+                row_n.group(1),
+            )
+        if cur_file:
+            return "ファイル %s/%s — %s" % (eff_fi, eff_nf, cur_file)
+        if raw:
+            return "ファイル %s/%s — %s" % (eff_fi, eff_nf, raw)
+        return "ファイル %s/%s" % (eff_fi, eff_nf)
+
+    def _master_progress_format_join_prep_detail(self, detail_s: str) -> str:
+        raw = str(detail_s or "").strip()
+        pool_m = re.search(r"候補プール\s*(\d+)\s*行", raw)
+        if pool_m:
+            return "候補プール %s 行" % pool_m.group(1)
+        return raw or "結合準備中"
+
+    def _master_progress_format_join_index_detail(self, detail_s: str) -> str:
+        raw = str(detail_s or "").strip()
+        pool_m = re.search(r"候補プール\s*(\d+)\s*行", raw)
+        if pool_m:
+            return "索引構築中（%s 行）" % pool_m.group(1)
+        return raw or "索引構築中"
+
+    def _master_progress_format_join_match_detail(
+        self,
+        detail_s: str,
+        *,
+        fi: int,
+        nf: int,
+        cur_file: str,
+    ) -> str:
+        raw = str(detail_s or "").strip()
+        eff_nf = max(1, int(nf))
+        eff_fi = int(fi)
+        fn = str(cur_file or "").strip()
+        if not fn:
+            lead_m = re.match(r"^(.+?)\s+結合\s*\d", raw)
+            if lead_m:
+                fn = lead_m.group(1).strip()
+        join_m = re.search(r"結合\s*(\d+)\s*/\s*(\d+)", raw)
+        if join_m:
+            base = "照合 %s/%s" % (eff_fi, eff_nf)
+            if fn:
+                base = "%s — %s" % (base, fn)
+            return "%s · 結合 %s/%s" % (
+                base,
+                join_m.group(1),
+                join_m.group(2),
+            )
+        file_m = re.search(r"ファイル\s*(\d+)\s*/\s*(\d+)", raw)
+        if file_m:
+            eff_fi = int(file_m.group(1))
+            eff_nf = max(1, int(file_m.group(2)))
+        if fn:
+            return "照合 %s/%s — %s" % (eff_fi, eff_nf, fn)
+        return "照合 %s/%s" % (eff_fi, eff_nf)
+
+    def _master_progress_format_assemble_detail(
+        self,
+        detail_s: str,
+        *,
+        fi: int,
+        nf: int,
+        cur_file: str,
+    ) -> str:
+        raw = str(detail_s or "").strip()
+        eff_nf = max(1, int(nf))
+        eff_fi = int(fi)
+        fn = str(cur_file or "").strip()
+        row_m = re.search(r"一覧行\s*(\d+)\s*/\s*(\d+)", raw)
+        if row_m:
+            base = "一覧 %s/%s" % (row_m.group(1), row_m.group(2))
+            if fn:
+                return "%s — %s" % (base, fn)
+            return base
+        file_m = re.search(
+            r"一覧行を組立\s*(\d+)\s*/\s*(\d+).*?（\s*(\d+)\s*行）",
+            raw,
+        )
+        if file_m:
+            if fn:
+                return "一覧 %s/%s — %s" % (
+                    file_m.group(1),
+                    file_m.group(2),
+                    fn,
+                )
+            return "一覧 %s/%s" % (file_m.group(1), file_m.group(2))
+        if fn:
+            return "一覧 %s/%s — %s" % (eff_fi, eff_nf, fn)
+        if raw:
+            return "一覧 %s/%s — %s" % (eff_fi, eff_nf, raw)
+        return "一覧 %s/%s" % (eff_fi, eff_nf)
 
     def _master_dbg_batch_progress_hook(self, sub_phase: int, detail: str, *rest: Any) -> None:
         """compute_batch_table_rows からのコールバック（phase 4〜7）。rest は file_index, n_files（任意）。"""
-        dlg = getattr(self, "_run_progress_dlg", None)
-        try:
-            dlg_open = dlg is not None and dlg.isVisible()
-        except Exception:
-            dlg_open = False
-        if not getattr(self, "_master_run_progress_active", False) and not dlg_open:
-            return
+        self._master_poll_cancel(force=True)
+        if not (
+            getattr(self, "_master_run_progress_active", False)
+            or getattr(self, "_debug_progress_locked", False)
+        ):
+            try:
+                dlg = getattr(self, "_run_progress_dlg", None)
+                if dlg is None or not dlg.isVisible():
+                    return
+            except Exception:
+                return
         if not (4 <= sub_phase <= 7):
             return
-        phase_head = _MASTER_DEBUG_PROGRESS_PHASES[sub_phase - 1]
-        wt = getattr(self, "_master_progress_window_title", "") or ""
         detail_s = str(detail or "")
         if len(rest) >= 2:
             self._master_batch_hook_last_fi = max(1, int(rest[0]))
@@ -2131,108 +2925,105 @@ class DataAggDebugDialog(QDialog):
                 self._master_batch_hook_last_fi = 1
                 self._master_batch_hook_last_nf = 1
         fi = int(getattr(self, "_master_batch_hook_last_fi", 1) or 1)
-        nf = int(getattr(self, "_master_batch_hook_last_nf", 1) or 1)
-        nf = max(1, nf)
-        denom = max(1, 4 * nf)
+        nf = max(1, int(getattr(self, "_master_batch_hook_last_nf", 1) or 1))
+        ui_done = self._master_batch_hook_ui_phase(sub_phase, detail_s)
+        phase_head = _MASTER_DEBUG_PROGRESS_PHASES[ui_done - 1]
+        wt = getattr(self, "_master_progress_window_title", "") or ""
         mi_m = re.search(r"項目\s*(\d+)\s*/\s*(\d+)", detail_s)
         row_m = re.search(r"行\s*(\d+)\s*/\s*(\d+)", detail_s)
-        pct_ov: int
-        if sub_phase == 4 and mi_m:
+        join_m = re.search(r"結合\s*(\d+)\s*/\s*(\d+)", detail_s)
+        intra = 0.0
+        if ui_done == 5 and mi_m:
             inn = max(1, int(mi_m.group(2)))
-            ii = min(inn, max(0, int(mi_m.group(1))))
-            step_start = (fi - 1) * 4 + 1
-            step_end = (fi - 1) * 4 + 2
-            p0 = 37.5 + 50.0 * float(step_start) / float(denom)
-            p1 = 37.5 + 50.0 * float(step_end) / float(denom)
-            t = min(1.0, max(0.0, float(ii) / float(inn)))
-            pct_ov = int(round(p0 + (p1 - p0) * t))
-        elif sub_phase == 4 and row_m:
+            intra = min(1.0, max(0.0, int(mi_m.group(1)) / float(inn)))
+        elif ui_done == 5 and row_m:
             rnn = max(1, int(row_m.group(2)))
-            rr = min(rnn, max(0, int(row_m.group(1))))
-            step_start = (fi - 1) * 4 + 1
-            step_end = (fi - 1) * 4 + 2
-            p0 = 37.5 + 50.0 * float(step_start) / float(denom)
-            p1 = 37.5 + 50.0 * float(step_end) / float(denom)
-            t = min(1.0, max(0.0, float(rr) / float(rnn)))
-            pct_ov = int(round(p0 + (p1 - p0) * t))
-        elif sub_phase == 7 and row_m:
+            intra = min(1.0, max(0.0, int(row_m.group(1)) / float(rnn)))
+        elif ui_done == 9 and join_m:
+            jnn = max(1, int(join_m.group(2)))
+            intra = min(1.0, max(0.0, int(join_m.group(1)) / float(jnn)))
+        elif ui_done == 10 and row_m:
             rnn = max(1, int(row_m.group(2)))
-            rr = min(rnn, max(0, int(row_m.group(1))))
-            step_start = (fi - 1) * 4 + 3
-            step_end = (fi - 1) * 4 + 4
-            p0 = 37.5 + 50.0 * float(step_start) / float(denom)
-            p1 = 37.5 + 50.0 * float(step_end) / float(denom)
-            t = min(1.0, max(0.0, float(rr) / float(rnn)))
-            pct_ov = int(round(p0 + (p1 - p0) * t))
-        else:
-            step_k = (fi - 1) * 4 + (sub_phase - 4) + 1
-            pct_ov = int(round(37.5 + 50.0 * float(step_k) / float(denom)))
-        pct_ov = min(pct_ov, 95)
+            intra = min(1.0, max(0.0, int(row_m.group(1)) / float(rnn)))
+        pct_ov = self._master_batch_hook_pct(ui_done, fi=fi, nf=nf, intra=intra)
         hook_paths = self._mpv_effective_progress_hook_paths()
         hook_nf = len(hook_paths) if hook_paths else nf
         cur_file = self._master_progress_pick_current_file(detail_s, fi, hook_nf)
-        show_detail = detail_s.strip()
-        if show_detail and show_detail.startswith(phase_head):
-            show_detail = show_detail[len(phase_head) :].strip()
-        if sub_phase == 4:
-            show_detail = self._master_progress_format_extract_detail(
-                detail_s,
-                phase_head=phase_head,
-                fi=fi,
-                nf=hook_nf,
-                cur_file=cur_file,
+        if ui_done == 4:
+            show_detail = self._master_progress_format_read_start_detail(
+                fi=fi, nf=nf, raw=detail_s
             )
-        elif sub_phase == 6:
-            join_m = re.search(r"結合\s*(\d+)\s*/\s*(\d+)", detail_s)
-            file_m = re.search(r"ファイル\s*(\d+)\s*/\s*(\d+)", detail_s)
-            if join_m:
-                show_detail = "結合中 %s/%s" % (join_m.group(1), join_m.group(2))
-                if cur_file:
-                    show_detail = "%s: %s" % (cur_file, show_detail)
-            elif file_m:
-                show_detail = "結合中 %s/%s: %s" % (
-                    file_m.group(1),
-                    file_m.group(2),
-                    cur_file or show_detail or "-",
-                )
-            elif cur_file:
-                show_detail = "結合中 %s/%s: %s" % (fi, nf, cur_file)
-            elif not show_detail:
-                show_detail = "結合中 %s/%s" % (fi, nf)
-        if wt and cur_file and cur_file not in show_detail:
-            show_detail = (
-                ("%s — %s" % (cur_file, show_detail))
-                if show_detail
-                else cur_file
+        elif ui_done == 5:
+            show_detail = self._master_progress_format_extract_detail(
+                detail_s, fi=fi, nf=nf, cur_file=cur_file
+            )
+        elif ui_done == 6:
+            show_detail = self._master_progress_format_merge_detail(
+                detail_s, fi=fi, nf=nf, cur_file=cur_file
+            )
+        elif ui_done == 7:
+            show_detail = self._master_progress_format_join_prep_detail(detail_s)
+        elif ui_done == 8:
+            show_detail = self._master_progress_format_join_index_detail(detail_s)
+        elif ui_done == 9:
+            show_detail = self._master_progress_format_join_match_detail(
+                detail_s, fi=fi, nf=nf, cur_file=cur_file
+            )
+        else:
+            show_detail = self._master_progress_format_assemble_detail(
+                detail_s, fi=fi, nf=nf, cur_file=cur_file
             )
         self._show_run_progress(
             phase_head,
-            sub_phase,
+            ui_done,
             len(_MASTER_DEBUG_PROGRESS_PHASES),
             window_title=wt,
             pct_override=pct_ov,
             detail=show_detail,
-            current_file=cur_file if not wt else "",
+            current_file="",
         )
         self._process_events_light()
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
 
-    def _close_run_progress(self) -> None:
+        try:
+            self._master_poll_cancel(force=True)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            raise
+
+    def _close_run_progress(self, *, cancelled: bool = False) -> None:
         dlg = self._run_progress_dlg
         try:
             if self._run_progress_path is not None:
                 self._run_progress_seq += 1
-                ipc_file.write_pickle(
-                    self._run_progress_path,
-                    {
-                        "status": "DONE",
-                        "seq": int(self._run_progress_seq),
-                        "phase_i": 8,
-                        "phase": "完了しました",
-                        "done": 8,
-                        "total": 8,
-                        "pct": 100,
-                    },
-                )
+                if cancelled:
+                    from svc.data_agg_cancel import write_progress_cancel_status  # noqa: WPS433
+
+                    try:
+                        write_progress_cancel_status(self._run_progress_path)
+                    except Exception:
+                        ipc_file.write_pickle(
+                            self._run_progress_path,
+                            {
+                                "status": "CANCEL",
+                                "seq": int(self._run_progress_seq),
+                                "phase": "中止",
+                                "pct": 5,
+                            },
+                        )
+                else:
+                    ipc_file.write_pickle(
+                        self._run_progress_path,
+                        {
+                            "status": "DONE",
+                            "seq": int(self._run_progress_seq),
+                            "phase_i": 8,
+                            "phase": _MASTER_DEBUG_PROGRESS_PHASE_DONE,
+                            "done": 8,
+                            "total": 8,
+                            "pct": 100,
+                        },
+                    )
             QApplication.processEvents()
             if dlg is not None:
                 try:
@@ -2244,8 +3035,11 @@ class DataAggDebugDialog(QDialog):
         finally:
             self._set_debug_progress_locked(False)
             self._master_run_progress_active = False
+            self._stop_master_cancel_pump_timer()
             self._run_progress_dlg = None
             self._run_progress_path = None
+            if not getattr(self, "_continuous_busy", False):
+                self._clear_master_run_cancel()
             try:
                 self._update_run_buttons_state()
                 self._update_clear_buttons()
@@ -2736,7 +3530,30 @@ class DataAggDebugDialog(QDialog):
     def _master_showing_row_snapshot(self) -> bool:
         if not self._master_snapshot_browseable():
             return False
-        return int(self._mi_idx) in self._master_item_snapshots
+        mi = int(self._mi_idx)
+        if mi in self._master_item_snapshots:
+            return True
+        if getattr(self, "_master_snapshot_browse_after_cancel", False):
+            lr = self.left_steps.currentRow()
+            if lr >= 0:
+                cancel_mi = int(getattr(self, "_master_cancel_mi", mi))
+                cancel_step = int(getattr(self, "_master_cancel_step", 0))
+                if (
+                    not self._master_item_has_no_scenario_at_mi(mi)
+                    and mi < cancel_mi
+                    and self._master_step_snapshot_key(mi, lr)
+                    in self._master_step_snapshots
+                ):
+                    return True
+                if (
+                    not self._master_item_has_no_scenario_at_mi(mi)
+                    and mi == cancel_mi
+                    and lr < cancel_step
+                    and self._master_step_snapshot_key(mi, lr)
+                    in self._master_step_snapshots
+                ):
+                    return True
+        return False
 
     def _value_grid_corner_background_for_state(self) -> str:
         if self._master_snapshot_browseable():
@@ -2789,8 +3606,27 @@ class DataAggDebugDialog(QDialog):
         except Exception:
             pass
 
+    def _master_left_row_run_active(self) -> bool:
+        """マスタ一覧: 実行中（連続／ステップ／進捗ロック）か。"""
+        if self._mode != 1:
+            return False
+        return bool(
+            getattr(self, "_continuous_busy", False)
+            or getattr(self, "_master_step_loop_busy", False)
+            or getattr(self, "_debug_progress_locked", False)
+            or self._run_progress_dialog_blocking()
+        )
+
+    def _master_left_row_executing(self, row_idx: int) -> bool:
+        """登録行のうち、現在実行中のマスタ項目行か。"""
+        return self._master_left_row_run_active() and int(row_idx) == int(self._mi_idx)
+
+    def _master_left_row_selected(self, row_idx: int) -> bool:
+        """登録行のうち、現在選択中のマスタ項目行か（実行中でなくても濃色）。"""
+        return int(row_idx) == int(self._mi_idx)
+
     def _apply_master_left_registered_row_style(self) -> None:
-        """マスタ一覧: 実行可能シナリオ登録ありの行は薄ベージュ＋項目名列を青太字。スナップショット示唆は結果一覧のみ。"""
+        """マスタ一覧: 登録行は薄ベージュ。選択中（実行中含む）は濃いベージュ＋項目名は青太字。"""
         if self._mode != 1:
             return
         try:
@@ -2800,23 +3636,34 @@ class DataAggDebugDialog(QDialog):
             clear_bg = QBrush()
             default_fg = QBrush()
             beige = QBrush(_DEBUG_MASTER_REGISTERED_ROW_BG)
+            active_beige = QBrush(_DEBUG_MASTER_ACTIVE_ROW_BG)
             blue = QBrush(_DEBUG_MASTER_REGISTERED_NAME_COLOR)
             for ri in range(nr):
                 reg = (
                     ri < len(mit)
                     and self._master_active_count_for_item(mit[ri]) > 0
                 )
+                selected = reg and self._master_left_row_selected(ri)
                 for ci in range(nc):
                     it = self.left_table.item(ri, ci)
                     if it is None:
                         continue
                     if reg:
-                        it.setBackground(beige)
+                        it.setBackground(active_beige if selected else beige)
                         if ci == 1:
                             f = it.font()
                             f.setBold(True)
                             it.setFont(f)
                             it.setForeground(blue)
+                        elif ci == 2:
+                            f = it.font()
+                            f.setBold(False)
+                            it.setFont(f)
+                            it.setForeground(default_fg)
+                            it.setTextAlignment(
+                                Qt.AlignmentFlag.AlignRight
+                                | Qt.AlignmentFlag.AlignVCenter
+                            )
                         else:
                             f = it.font()
                             f.setBold(False)
@@ -2978,6 +3825,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_join_search_pool_seed = None
         self._mpv_join_search_pool_seed_paths_count = -1
         self._mpv_join_pool_by_mi.clear()
+        self._mpv_row_file_paths_by_mi.clear()
         self._mpv_final_table_rows = None
         self._last_master_completed_mi_idx = None
         self._mpv_display_mi_idx = None
@@ -3159,11 +4007,12 @@ class DataAggDebugDialog(QDialog):
                 _lh0 = self.left_table.horizontalHeader()
                 _lh0.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             else:
-                self.left_table.setColumnCount(2)
+                self.left_table.setColumnCount(3)
                 self.left_table.setHorizontalHeaderLabels(
                     [
                         self._d("LEFT_TABLE_COL_INDEX", "#"),
                         self._d("LEFT_TABLE_HEADER_MASTER", "項目名"),
+                        self._d("LEFT_TABLE_COL_ELAPSED", "時間(秒)"),
                     ]
                 )
                 mit = self._master_table_items()
@@ -3173,10 +4022,23 @@ class DataAggDebugDialog(QDialog):
                     self.left_table.setItem(
                         i, 1, QTableWidgetItem(str(m.get("title") or ""))
                     )
+                    reg = self._master_active_count_for_item(m) > 0
+                    it_el = QTableWidgetItem(
+                        self._master_format_elapsed_sec(
+                            self._master_item_elapsed_sec.get(int(i))
+                        )
+                        if reg
+                        else ""
+                    )
+                    it_el.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    self.left_table.setItem(i, 2, it_el)
                 self.left_table.selectRow(self._mi_idx)
                 _lh = self.left_table.horizontalHeader()
                 _lh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
                 _lh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+                _lh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         finally:
             self.left_table.blockSignals(False)
         if self._mode == 1:
@@ -3217,22 +4079,33 @@ class DataAggDebugDialog(QDialog):
             self._recompute_active_slot_indices()
             self._rebuild_left_steps()
             self._paint_left_steps_executed()
-            if self._master_snapshot_priority_active() and r in self._master_item_snapshots:
+            if getattr(self, "_master_snapshot_browse_after_cancel", False):
+                self._apply_master_browse_snapshot_for_mi(r)
+            elif self._master_snapshot_priority_active() and r in self._master_item_snapshots:
                 self._apply_master_item_snapshot(r)
             else:
                 self._sync_summary_table_from_lists()
                 self._rebuild_value_grid()
-            self._apply_selected_master_step_snapshot_if_any()
+            if getattr(self, "_master_snapshot_browse_after_cancel", False) or (
+                self._master_snapshot_priority_active()
+                and r in self._master_item_snapshots
+            ):
+                self._apply_selected_master_step_snapshot_if_any()
         if self._mode == 1:
             self._update_left_detail()
         self._paint_result_highlights()
         self._update_run_buttons_state()
         self._update_clear_buttons()
+        if self._mode == 1:
+            self._apply_master_left_registered_row_style()
 
     def _clear_master_item_snapshots(self) -> None:
         self._master_item_snapshots.clear()
         self._master_item_snapshot_done.clear()
         self._master_step_snapshots.clear()
+        self._master_snapshot_browse_after_cancel = False
+        self._master_cancel_mi = 0
+        self._master_cancel_step = 0
         self._refresh_master_snapshot_chrome()
 
     def _master_snapshot_priority_active(self) -> bool:
@@ -3241,7 +4114,109 @@ class DataAggDebugDialog(QDialog):
         items = self._master_table_items()
         if not items:
             return False
+        if getattr(self, "_master_snapshot_browse_after_cancel", False):
+            return bool(
+                self._master_item_snapshots or self._master_step_snapshots
+            )
         return len(self._master_item_snapshot_done) >= len(items)
+
+    def _master_has_step_snapshots_for_mi(self, mi: int) -> bool:
+        mi_i = int(mi)
+        return any(k[0] == mi_i for k in self._master_step_snapshots)
+
+    def _master_item_has_no_scenario_at_mi(self, mi: int) -> bool:
+        items = self._master_table_items()
+        if mi < 0 or mi >= len(items):
+            return True
+        return self._master_active_count_for_item(items[mi]) <= 0
+
+    def _master_first_scenario_registered_mi(self) -> int:
+        """シナリオが登録されている先頭マスタ項目の行番号。"""
+        for i, m in enumerate(self._master_table_items()):
+            if self._master_active_count_for_item(m) > 0:
+                return int(i)
+        return 0
+
+    def _apply_master_empty_display(self) -> None:
+        self._summary_rows.clear()
+        self._summary_phase_labels.clear()
+        self._value_cols.clear()
+        self._value_col_tooltips.clear()
+        self._value_col_spans.clear()
+        self._sync_summary_table_from_lists()
+        self._reset_value_grid()
+        self._mpv_join_table_active = False
+        self._mpv_join_table_ncols = 0
+        self._mpv_apply_item_stats_snapshot(None)
+        self._update_values_title_master()
+        self._refresh_master_snapshot_chrome()
+        self._paint_result_highlights()
+
+    def _apply_master_browse_snapshot_for_mi(self, mi: int) -> None:
+        """キャンセル後閲覧: 完了項目・ステップのみスナップショット、それ以外は空欄。"""
+        mi_i = int(mi)
+        if self._master_item_has_no_scenario_at_mi(mi_i):
+            self._apply_master_empty_display()
+            return
+        cancel_mi = int(getattr(self, "_master_cancel_mi", mi_i))
+        if mi_i > cancel_mi:
+            self._apply_master_empty_display()
+            return
+        if mi_i < cancel_mi:
+            if mi_i in self._master_item_snapshots:
+                self._apply_master_item_snapshot(mi_i)
+            else:
+                self._apply_master_empty_display()
+            return
+        if not self._apply_selected_master_step_snapshot_if_any():
+            self._apply_master_empty_display()
+
+    def _master_snapshot_browse_step_for_mi(self, mi: int) -> int:
+        """閲覧開始時に選択するステップ行（その項目で最後に完了したステップ）。"""
+        mi_i = int(mi)
+        cancel_mi = int(getattr(self, "_master_cancel_mi", 0))
+        cancel_step = int(getattr(self, "_master_cancel_step", 0))
+        if mi_i < cancel_mi:
+            best = -1
+            for k in self._master_step_snapshots:
+                if k[0] == mi_i and int(k[1]) > best:
+                    best = int(k[1])
+            return max(0, best)
+        if mi_i == cancel_mi:
+            return max(0, cancel_step - 1)
+        return 0
+
+    def _focus_master_snapshot_browse_first_item(self) -> int:
+        """キャンセル後閲覧: シナリオ登録済みの先頭マスタ項目を選択する。"""
+        browse_mi = self._master_first_scenario_registered_mi()
+        if int(self._mi_idx) != browse_mi:
+            self._bump_mpv_prefetch_cancel()
+            self._mpv_deferred_value_grid_mi = None
+            self._mi_idx = browse_mi
+            self._master_step_idx = 0
+            self._master_session_start_step = 0
+            self._master_exec_armed = False
+            self._master_global_row_idx = self._master_global_row_base_for_mi(browse_mi)
+            if self.left_table.rowCount() > browse_mi:
+                self.left_table.blockSignals(True)
+                try:
+                    self.left_table.selectRow(browse_mi)
+                finally:
+                    self.left_table.blockSignals(False)
+            self._update_left_detail()
+            self._reload_conditions()
+            self._recompute_active_slot_indices()
+            self._rebuild_left_steps()
+            self._paint_left_steps_executed()
+        step_row = self._master_snapshot_browse_step_for_mi(browse_mi)
+        if self.left_steps.rowCount() > 0 and step_row >= 0:
+            wr = min(step_row, self.left_steps.rowCount() - 1)
+            self.left_steps.blockSignals(True)
+            try:
+                self.left_steps.selectRow(wr)
+            finally:
+                self.left_steps.blockSignals(False)
+        return browse_mi
 
     def _flush_deferred_master_value_grid_if_mi(self, mi: int) -> None:
         dm = getattr(self, "_mpv_deferred_value_grid_mi", None)
@@ -3367,6 +4342,21 @@ class DataAggDebugDialog(QDialog):
             rows = [list(r) for r in self._mpv_last_valid_table_rows]
         return self._mpv_stringify_table_rows(list(rows or []), ncols=ncols)
 
+    def _enter_master_snapshot_browse_after_cancel(self) -> None:
+        if self._mode != 1:
+            return
+        if not (self._master_item_snapshots or self._master_step_snapshots):
+            return
+        self._master_cancel_mi = int(self._mi_idx)
+        self._master_cancel_step = int(self._master_step_idx)
+        self._master_snapshot_browse_after_cancel = True
+        browse_mi = self._focus_master_snapshot_browse_first_item()
+        self._apply_master_browse_snapshot_for_mi(browse_mi)
+        self._refresh_master_snapshot_chrome()
+        self._paint_result_highlights()
+        self._update_run_buttons_state()
+        self._update_clear_buttons()
+
     def _capture_master_step_snapshot(
         self,
         mi: int,
@@ -3464,7 +4454,29 @@ class DataAggDebugDialog(QDialog):
         lr = self.left_steps.currentRow()
         if lr < 0:
             return False
-        return self._apply_master_step_snapshot(int(self._mi_idx), int(lr))
+        mi = int(self._mi_idx)
+        step_row = int(lr)
+        if getattr(self, "_master_snapshot_browse_after_cancel", False):
+            if self._master_item_has_no_scenario_at_mi(mi):
+                self._apply_master_empty_display()
+                return True
+            cancel_mi = int(getattr(self, "_master_cancel_mi", mi))
+            if mi > cancel_mi:
+                self._apply_master_empty_display()
+                return True
+            if mi < cancel_mi:
+                key = self._master_step_snapshot_key(mi, step_row)
+                if key in self._master_step_snapshots:
+                    return self._apply_master_step_snapshot(mi, step_row)
+                if mi in self._master_item_snapshots:
+                    self._apply_master_item_snapshot(mi)
+                    return True
+                self._apply_master_empty_display()
+                return True
+            if step_row >= int(getattr(self, "_master_cancel_step", 0)):
+                self._apply_master_empty_display()
+                return True
+        return self._apply_master_step_snapshot(mi, step_row)
 
     def _apply_value_grid_from_snapshot(self, headers: list[str], rows: list[list[str]]) -> None:
         self._mpv_join_table_active = False
@@ -3550,6 +4562,7 @@ class DataAggDebugDialog(QDialog):
                 self.mode_combo.setEnabled(not locked)
         except Exception:
             pass
+        self._apply_master_left_registered_row_style()
 
     def _rebuild_active_slots(self) -> None:
         self._recompute_active_slot_indices()
@@ -3642,6 +4655,16 @@ class DataAggDebugDialog(QDialog):
         try:
             self.left_steps.setRowCount(0)
             if self._mode == 0:
+                self.left_steps.setColumnCount(2)
+                self.left_steps.setHorizontalHeaderLabels(
+                    [
+                        self._d("COND_COL_NO", "番号"),
+                        self._d("COND_COL_ITEM", "大項目"),
+                    ]
+                )
+                _ls_h = self.left_steps.horizontalHeader()
+                _ls_h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+                _ls_h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
                 slots = self._scenario_slots()
                 keys = self._cond_keys()
                 cs = self._current_scenario()
@@ -3665,7 +4688,20 @@ class DataAggDebugDialog(QDialog):
                     self.left_steps.setItem(r, 0, it0)
                     self.left_steps.setItem(r, 1, it1)
             else:
+                self.left_steps.setColumnCount(3)
+                self.left_steps.setHorizontalHeaderLabels(
+                    [
+                        self._d("COND_COL_NO", "番号"),
+                        self._d("COND_COL_ITEM", "大項目"),
+                        self._d("COND_COL_ELAPSED", "時間(秒)"),
+                    ]
+                )
+                _ls_h = self.left_steps.horizontalHeader()
+                _ls_h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+                _ls_h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+                _ls_h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
                 m = self._current_master()
+                mi = int(self._mi_idx)
                 for _li, si in enumerate(self._active_slot_indices):
                     sc = m["scenarios"][si]
                     slot = sc["slot"]
@@ -3675,17 +4711,33 @@ class DataAggDebugDialog(QDialog):
                     step_txt = str(sc["title"] or "シナリオ")
                     it0 = QTableWidgetItem(str(self._display_step_no(r)))
                     it1 = QTableWidgetItem(step_txt)
-                    for it in (it0, it1):
-                        it.setTextAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+                    it2 = QTableWidgetItem(
+                        self._master_format_elapsed_sec(
+                            self._master_step_elapsed_sec.get((mi, int(r)))
+                        )
+                    )
+                    it2.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    for it in (it0, it1, it2):
+                        it.setTextAlignment(
+                            Qt.AlignmentFlag.AlignTop
+                            | (
+                                Qt.AlignmentFlag.AlignRight
+                                if it is it2
+                                else Qt.AlignmentFlag.AlignLeft
+                            )
+                        )
                     src1 = sc.get("source")
                     if isinstance(src1, dict):
                         row_tip = scenario_source_tooltip_plain(src1, dn, detail_cell_cfg=dcell)
                     else:
                         row_tip = _format_condition_step_tooltip(step_txt, slot)
-                    for it in (it0, it1):
+                    for it in (it0, it1, it2):
                         it.setToolTip(row_tip)
                     self.left_steps.setItem(r, 0, it0)
                     self.left_steps.setItem(r, 1, it1)
+                    self.left_steps.setItem(r, 2, it2)
         finally:
             self.left_steps.blockSignals(False)
         self.left_steps.resizeRowsToContents()
@@ -3704,6 +4756,8 @@ class DataAggDebugDialog(QDialog):
     def _on_step_sel(self) -> None:
         if self._mode == 1:
             self._apply_selected_master_step_snapshot_if_any()
+            if getattr(self, "_master_snapshot_browse_after_cancel", False):
+                self._update_run_buttons_state()
         self._paint_result_highlights()
 
     def _summary_row_for_left_row(self, left_row: int) -> int:
@@ -4279,6 +5333,13 @@ class DataAggDebugDialog(QDialog):
                 )
                 return rows
             self._process_events_light()
+            from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+            try:
+                self._master_poll_cancel(force=True)
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                raise
             time.sleep(0.05)
         if self._mpv_is_single_slot_prefetch_pending():
             try:
@@ -4348,6 +5409,11 @@ class DataAggDebugDialog(QDialog):
         return col
 
     def _mpv_master_dbg_progress_hook_or_none(self) -> Any:
+        if bool(
+            getattr(self, "_master_run_progress_active", False)
+            or getattr(self, "_debug_progress_locked", False)
+        ):
+            return self._master_dbg_batch_progress_hook
         try:
             _pd = getattr(self, "_run_progress_dlg", None)
             if _pd is not None and _pd.isVisible():
@@ -4368,7 +5434,15 @@ class DataAggDebugDialog(QDialog):
             getattr(self, "_master_progress_window_title", None)
             or self._scenario_progress_window_title()
         )
-        self._show_run_progress(phase, done, sub_total, window_title=wt)
+        hook_paths = self._mpv_effective_progress_hook_paths()
+        file_total = len(hook_paths) if hook_paths else 0
+        self._show_run_progress(
+            phase,
+            done,
+            sub_total,
+            window_title=wt,
+            detail="0/%s — 開始" % file_total if file_total else "開始",
+        )
         self._process_events_light()
 
     def _mpv_sync_progress_cache_from_step_n_pick(self, n_pick: int) -> bool:
@@ -4437,6 +5511,42 @@ class DataAggDebugDialog(QDialog):
             return prows
         return None
 
+    def _master_mpv_compute_lock_acquire_ui(self) -> None:
+        """GUI スレッド: ロック待ち中も Qt イベントとキャンセルを処理する。"""
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        lock = self._mpv_prog_compute_lock
+        if not self._master_on_ui_thread():
+            while True:
+                if lock.acquire(blocking=False):
+                    return
+                if self._master_cancel_pending():
+                    raise DataAggCancelled()
+                chk = self._master_run_cancel_check()
+                if chk is not None:
+                    try:
+                        chk(force=True)
+                    except DataAggCancelled:
+                        self._master_note_cancel_requested()
+                        raise
+                time.sleep(0.01)
+            return
+        while True:
+            if lock.acquire(blocking=False):
+                return
+            if self._master_cancel_pending():
+                raise DataAggCancelled()
+            self._process_events_for_master_cancel()
+            try:
+                self._master_poll_cancel(force=True)
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                raise
+            time.sleep(0.01)
+
+    def _master_mpv_compute_lock_release_ui(self) -> None:
+        self._mpv_prog_compute_lock.release()
+
     def _mpv_ensure_step_n_pick_cached(
         self,
         *,
@@ -4447,6 +5557,9 @@ class DataAggDebugDialog(QDialog):
         probe_caller: str = "mpv_step_n_pick",
     ) -> list[list[Any]] | None:
         """指定 n_pick の progress 行を最大1回だけ確保（single/multi スロット共通）。"""
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        self._master_raise_if_cancelled()
         n_pick_i = int(n_pick)
         n_act = len(self._active_slot_indices or [])
         if n_act <= 0 or n_pick_i <= 0:
@@ -4494,7 +5607,29 @@ class DataAggDebugDialog(QDialog):
                     )
                     if waited_sync:
                         return waited_sync
-        with self._mpv_prog_compute_lock:
+        if (
+            self._mpv_is_single_slot_active()
+            and n_pick_i == 1
+            and probe_caller != "mpv_progress_prefetch"
+            and self._mpv_is_single_slot_prefetch_pending()
+        ):
+            waited_long = self._mpv_wait_single_slot_n_pick1_cache(max_wait_ms=120_000)
+            if waited_long:
+                return waited_long
+        while (
+            self._mpv_is_single_slot_active()
+            and n_pick_i == 1
+            and probe_caller != "mpv_progress_prefetch"
+            and self._mpv_is_single_slot_prefetch_pending()
+        ):
+            hit_pf = self._mpv_rows_from_step_cache_n_pick(1)
+            if hit_pf:
+                return [list(r) for r in hit_pf]
+            self._master_raise_if_cancelled(force_poll=True)
+            self._process_events_for_master_cancel()
+            time.sleep(0.05)
+        self._master_mpv_compute_lock_acquire_ui()
+        try:
             cached = self._mpv_progress_rows_step_cache.get(sk)
             if (
                 cached is not None
@@ -4532,9 +5667,13 @@ class DataAggDebugDialog(QDialog):
                     probe_caller=probe_caller,
                     frozen_capture_out=frozen_capture_out,
                 )
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                raise
             finally:
                 if join_busy:
                     self._mpv_end_join_compute()
+            self._master_raise_if_cancelled()
             self._mpv_store_step_cache(
                 sk,
                 rows,
@@ -4548,6 +5687,8 @@ class DataAggDebugDialog(QDialog):
             ):
                 self._mpv_clear_single_slot_prefetch_pending(sk)
             return rows
+        finally:
+            self._master_mpv_compute_lock_release_ui()
 
     def _mpv_resolve_master_step_colvals(self, si: int) -> list[str]:
         """
@@ -4561,6 +5702,8 @@ class DataAggDebugDialog(QDialog):
             master_preview_step0_should_block_wait_n_pick1,
             master_preview_step0_wait_async_ms,
         )
+
+        self._master_raise_if_cancelled()
 
         if not self._scenario_for_dry_run or not self._debug_scan_paths:
             m = self._current_master()
@@ -4677,6 +5820,7 @@ class DataAggDebugDialog(QDialog):
             except Exception:
                 pass
             self._mpv_show_join_compute_progress()
+            self._master_raise_if_cancelled()
             self._mpv_ensure_step_n_pick_cached(
                 n_pick=n_pick_after,
                 progress_hook=hook,
@@ -4684,6 +5828,7 @@ class DataAggDebugDialog(QDialog):
                 wait_async_ms=0,
                 probe_caller="mpv_join_step_colvals",
             )
+            self._master_raise_if_cancelled()
             self._mpv_sync_progress_cache_from_step_n_pick(n_pick_after)
             hit = self._mpv_try_colvals_from_step_cache(
                 mi_idx=int(self._mi_idx), n_pick=n_pick_after
@@ -4919,6 +6064,40 @@ class DataAggDebugDialog(QDialog):
                 best = max(best, len(ent[1]))
         return best
 
+    def _mpv_completed_table_rows_for_prior_mi(
+        self,
+        prior_mi: int,
+        *,
+        by_mi: dict[int, tuple[int, list[list[Any]]]] | None = None,
+    ) -> list[list[Any]] | None:
+        """前項目 mi の全スロット完了相当 table_rows。呼び出し側 n_pick は使わない。"""
+        by_mi = by_mi if by_mi is not None else (
+            getattr(self, "_mpv_progress_rows_by_mi", {}) or {}
+        )
+        mi_saved = int(self._mi_idx)
+        step_saved = int(self._master_step_idx)
+        try:
+            self._mi_idx = int(prior_mi)
+            self._rebuild_active_slots()
+            n_act = len(self._active_slot_indices or [])
+            if n_act > 0:
+                prev = by_mi.get(int(prior_mi))
+                if prev is not None and prev[1]:
+                    po = int(prev[0])
+                    if po >= n_act:
+                        return [list(r) for r in prev[1]]
+                rows = self._mpv_rows_from_step_cache_n_pick(n_act)
+                if rows:
+                    return [list(r) for r in rows]
+            ent = by_mi.get(int(prior_mi))
+            if ent and ent[1]:
+                return [list(r) for r in ent[1]]
+            return None
+        finally:
+            self._mi_idx = mi_saved
+            self._master_step_idx = step_saved
+            self._rebuild_active_slots()
+
     def _mpv_best_prior_table_rows_for_seed(
         self,
         before_mi: int,
@@ -4926,6 +6105,7 @@ class DataAggDebugDialog(QDialog):
         n_pick: int | None = None,
     ) -> tuple[list[list[Any]], int] | None:
         """before_mi より前の項目で行数最大の table_rows を返す (rows, source_mi)。同数なら mi 大を優先。"""
+        del n_pick  # 前項目参照では現項目の n_pick を使わない
         by_mi = getattr(self, "_mpv_progress_rows_by_mi", {}) or {}
         peaks = getattr(self, "_mpv_progress_row_peak_by_mi", {}) or {}
         best_mi: int | None = None
@@ -4945,28 +6125,126 @@ class DataAggDebugDialog(QDialog):
                 best_mi = mi
         if best_mi is None or best_rows <= 0:
             return None
+        rows = self._mpv_completed_table_rows_for_prior_mi(int(best_mi), by_mi=by_mi)
+        if rows:
+            return ([list(r) for r in rows], int(best_mi))
+        return None
+
+    def _mpv_prior_rows_for_stacked_join_seed(
+        self,
+        before_mi: int,
+        join_defs: list[dict],
+        *,
+        n_pick: int | None = None,
+    ) -> tuple[list[list[Any]], int] | None:
+        """積み上げ join: 結合比較列が埋まった前段 table_rows を優先して返す (rows, source_mi)。"""
+        from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+            master_preview_join_target_headers,
+            master_preview_stacked_seed_join_targets_fill_ratio,
+            master_preview_stacked_seed_usable,
+        )
+
+        del n_pick  # 前項目参照では現項目の n_pick を使わない
+        targets = master_preview_join_target_headers(list(join_defs or []))
+        headers = self._mpv_preview_headers()
+        if not targets or not headers:
+            return self._mpv_best_prior_table_rows_for_seed(int(before_mi))
+        by_mi = getattr(self, "_mpv_progress_rows_by_mi", {}) or {}
+        prior_join_mi = int(before_mi) - 1
+        if prior_join_mi >= 0 and self._mpv_current_item_has_join_defs(prior_join_mi):
+            prior_rows = self._mpv_completed_table_rows_for_prior_mi(
+                prior_join_mi, by_mi=by_mi
+            )
+            if prior_rows and master_preview_stacked_seed_usable(
+                prior_rows, headers, targets
+            ):
+                try:
+                    _data_agg_probe_log.info(
+                        "[DATA_AGG_DIAG] mpv_stacked_seed_prior_pick "
+                        "mi_idx=%s src_mi=%s rows=%s fill_ratio=%.4f targets=%s "
+                        "reason=immediate_prior_join",
+                        before_mi,
+                        prior_join_mi,
+                        len(prior_rows),
+                        master_preview_stacked_seed_join_targets_fill_ratio(
+                            prior_rows, headers, targets
+                        ),
+                        targets,
+                    )
+                except Exception:
+                    pass
+                return ([list(r) for r in prior_rows], int(prior_join_mi))
+        peaks = getattr(self, "_mpv_progress_row_peak_by_mi", {}) or {}
+        best_mi: int | None = None
+        best_ratio = -1.0
+        best_rows = 0
         mi_saved = int(self._mi_idx)
         step_saved = int(self._master_step_idx)
         try:
-            self._mi_idx = int(best_mi)
-            self._rebuild_active_slots()
-            n_act = len(self._active_slot_indices or [])
-            rows: list[list[Any]] | None = None
-            if n_pick is not None and int(n_pick) > 0:
-                rows = self._mpv_rows_from_step_cache_n_pick(int(n_pick))
-            if not rows and n_act > 0:
-                rows = self._mpv_rows_from_step_cache_n_pick(n_act)
-            if not rows:
-                ent = by_mi.get(best_mi)
+            for mi in range(int(before_mi)):
+                peak = int(peaks.get(mi, 0))
+                ent = by_mi.get(mi)
+                nrow = peak
                 if ent and ent[1]:
-                    rows = [list(r) for r in ent[1]]
-            if rows:
-                return ([list(r) for r in rows], int(best_mi))
+                    nrow = max(nrow, len(ent[1]))
+                if nrow <= 0:
+                    continue
+                rows = self._mpv_completed_table_rows_for_prior_mi(int(mi), by_mi=by_mi)
+                if not rows:
+                    continue
+                ratio = master_preview_stacked_seed_join_targets_fill_ratio(
+                    rows, headers, targets
+                )
+                if ratio > best_ratio or (
+                    abs(ratio - best_ratio) < 1e-9
+                    and nrow > best_rows
+                ) or (
+                    abs(ratio - best_ratio) < 1e-9
+                    and nrow == best_rows
+                    and (best_mi is None or int(mi) > int(best_mi))
+                ):
+                    best_ratio = ratio
+                    best_rows = nrow
+                    best_mi = int(mi)
+            if best_mi is None:
+                return self._mpv_best_prior_table_rows_for_seed(int(before_mi))
+            rows_out = self._mpv_completed_table_rows_for_prior_mi(
+                int(best_mi), by_mi=by_mi
+            )
+            if not rows_out:
+                return self._mpv_best_prior_table_rows_for_seed(int(before_mi))
+            if not master_preview_stacked_seed_usable(
+                rows_out, headers, targets
+            ):
+                try:
+                    _data_agg_probe_log.info(
+                        "[DATA_AGG_DIAG] mpv_stacked_seed_prior_weak "
+                        "mi_idx=%s src_mi=%s fill_ratio=%.4f targets=%s",
+                        before_mi,
+                        best_mi,
+                        best_ratio,
+                        targets,
+                    )
+                except Exception:
+                    pass
+                return ([list(r) for r in rows_out], int(best_mi))
+            try:
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] mpv_stacked_seed_prior_pick "
+                    "mi_idx=%s src_mi=%s rows=%s fill_ratio=%.4f targets=%s",
+                    before_mi,
+                    best_mi,
+                    len(rows_out),
+                    best_ratio,
+                    targets,
+                )
+            except Exception:
+                pass
+            return ([list(r) for r in rows_out], int(best_mi))
         finally:
             self._mi_idx = mi_saved
             self._master_step_idx = step_saved
             self._rebuild_active_slots()
-        return None
 
     def _mpv_join_item_complete(
         self,
@@ -5086,6 +6364,8 @@ class DataAggDebugDialog(QDialog):
             int(mi_idx),
             n_pick=int(n_pick),
         )
+        if prior and self._mpv_current_item_has_join_defs(int(mi_idx)) and rows:
+            return rows
         if prior:
             prows, src_mi = prior
             if self._mpv_join_result_usable(
@@ -5176,36 +6456,70 @@ class DataAggDebugDialog(QDialog):
         )
         use_prior_table_seed = False
         prior_seed_pool: list[dict[str, Any]] = []
-        prior_tbl = self._mpv_best_prior_table_rows_for_seed(
+        headers = self._mpv_preview_headers()
+        join_targets = [
+            str(d.get("item") or "").strip()
+            for d in join_defs
+            if str(d.get("item") or "").strip()
+        ]
+        prior_tbl = self._mpv_prior_rows_for_stacked_join_seed(
             int(mi_idx),
+            join_defs,
             n_pick=int(n_pick),
         )
         if prior_tbl:
             prows, src_mi = prior_tbl
             if master_preview_should_use_stacked_join(prior_table_rows=len(prows)):
-                headers = self._mpv_preview_headers()
-                anchor_fp = self._mpv_anchor_file_path_for_seed(int(mi_idx))
+                row_fps = self._mpv_row_file_paths_for_stacked_seed(
+                    len(prows),
+                    prows=prows,
+                    headers=headers,
+                    source_mi=int(src_mi),
+                )
                 prior_seed_pool = table_rows_to_join_search_seed_pool(
                     headers,
                     prows,
-                    anchor_file_path=anchor_fp or None,
+                    row_file_paths=row_fps,
+                    stacked_join=True,
                 )
-                use_prior_table_seed = bool(prior_seed_pool)
+                from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+                    master_preview_stacked_seed_usable,
+                )
+
+                seed_ok = master_preview_stacked_seed_usable(
+                    prows,
+                    headers,
+                    join_targets,
+                )
+                use_prior_table_seed = bool(prior_seed_pool) and seed_ok
                 try:
                     _data_agg_probe_log.info(
                         "[DATA_AGG_DIAG] mpv_join_seed_prior_table mi_idx=%s "
-                        "src_mi=%s prior_rows=%s pool_rows=%s stacked=1",
+                        "src_mi=%s prior_rows=%s pool_rows=%s stacked=1 seed_ok=%s",
                         mi_idx,
                         src_mi,
                         len(prows),
-                        seed_rows,
+                        len(prior_seed_pool),
+                        seed_ok,
                     )
                 except Exception:
                     pass
-                dd["preview_anchor_row_keys"] = [
-                    [str(r.get("__file_path") or ""), int(r.get("__iter_index", 0))]
-                    for r in prior_seed_pool
-                ]
+                if prior_seed_pool and seed_ok:
+                    dd["preview_anchor_row_keys"] = [
+                        [str(r.get("__file_path") or ""), int(r.get("__iter_index", 0))]
+                        for r in prior_seed_pool
+                    ]
+                elif prior_seed_pool and not seed_ok:
+                    try:
+                        _data_agg_probe_log.info(
+                            "[DATA_AGG_DIAG] mpv_join_seed_fallback=production_table_rows "
+                            "mi_idx=%s src_mi=%s targets=%s",
+                            mi_idx,
+                            src_mi,
+                            join_targets,
+                        )
+                    except Exception:
+                        pass
         skip_seed = master_preview_join_search_skip_seed(
             chain_targets_prior=chain_targets,
             use_prior_pool_seed=use_prior_seed,
@@ -5219,6 +6533,12 @@ class DataAggDebugDialog(QDialog):
             dd["master_preview_stacked_join"] = True
             dd["preview_extract_item_allowlist"] = [int(mi_idx)]
             dd["master_preview_join_read_full_files"] = False
+        elif prior_seed_pool and not use_prior_table_seed:
+            dd.pop("join_search_seed_pool", None)
+            dd.pop("master_preview_stacked_join", None)
+            dd.pop("join_search_seed_from_table_rows", None)
+            dd["preview_use_production_table_rows"] = True
+            dd["master_preview_join_read_full_files"] = True
         elif not skip_seed and seed_pool:
             dd.pop("master_preview_stacked_join", None)
             dd["join_search_seed_pool"] = [
@@ -5280,6 +6600,9 @@ class DataAggDebugDialog(QDialog):
         join_pool_out: list[dict[str, Any]] = []
         dd = scen.get("__debug_diag")
         if isinstance(dd, dict):
+            cap_jf = self._master_debug_join_max_files()
+            if cap_jf > 0:
+                dd["master_preview_join_max_files"] = int(cap_jf)
             base_items = list((scenario_base or {}).get("items") or [])
             if base_items:
                 dd["preview_join_topology_items"] = copy.deepcopy(base_items)
@@ -5337,14 +6660,44 @@ class DataAggDebugDialog(QDialog):
                     dd_hook if isinstance(dd_hook, dict) else None,
                 )
             )
-            _h, table_rows, _ev, _jt = run_preview_compute(
-                scen,
-                scan_paths,
-                max_primary_rows=self._master_preview_display_rows(),
-                max_table_rows=self._master_preview_display_rows(),
-                progress_hook=progress_hook,
-                probe_caller=probe_caller,
-            )
+            hook_q: queue.SimpleQueue | None = None
+            eff_hook = progress_hook
+            if self._master_should_offthread_compute(str(probe_caller or "")):
+                hook_q = queue.SimpleQueue()
+                eff_hook = self._master_bridge_progress_hook(progress_hook, hook_q)
+
+            def _do_preview_compute() -> tuple[
+                list[str], list[list[Any]], list[list[Any]], int
+            ]:
+                iter_ctx: list[dict[str, Any]] = []
+                result = run_preview_compute(
+                    scen,
+                    scan_paths,
+                    max_primary_rows=self._master_preview_display_rows(),
+                    max_table_rows=self._master_preview_display_rows(),
+                    progress_hook=eff_hook,
+                    probe_caller=probe_caller,
+                    cancel_check=self._master_run_cancel_check(),
+                    iteration_contexts_out=iter_ctx,
+                )
+                if iter_ctx:
+                    dd_local = scen.get("__debug_diag")
+                    if isinstance(dd_local, dict):
+                        dd_local["_mpv_iteration_contexts"] = list(iter_ctx)
+                return result
+
+            try:
+                if hook_q is not None:
+                    _h, table_rows, _ev, _jt = self._master_run_blocking_with_ui_pump(
+                        _do_preview_compute,
+                        progress_hook=progress_hook,
+                        hook_q=hook_q,
+                    )
+                else:
+                    _h, table_rows, _ev, _jt = _do_preview_compute()
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                raise
         finally:
             self._mpv_progress_hook_paths = hook_paths_prev
         rows_out = [list(r) for r in table_rows]
@@ -5354,6 +6707,19 @@ class DataAggDebugDialog(QDialog):
             master_step_idx=int(master_step_idx),
             n_pick=int(n_pick),
         )
+        iter_ctx: list[dict[str, Any]] = []
+        if isinstance(dd, dict):
+            raw_ctx = dd.get("_mpv_iteration_contexts")
+            if isinstance(raw_ctx, list):
+                iter_ctx = [c for c in raw_ctx if isinstance(c, dict)]
+        n_act_paths = len(active_slot_indices or [])
+        item_complete_paths = n_act_paths <= 0 or int(master_step_idx) >= n_act_paths
+        if item_complete_paths and not join_item:
+            self._mpv_store_row_file_paths_for_mi(
+                int(mi_idx),
+                rows_out,
+                iteration_contexts=iter_ctx or None,
+            )
         self._mpv_note_item_stats(scen)
         if frozen_capture_out is not None and not join_item:
             self._mpv_store_frozen_snapshot(frozen_capture_out)
@@ -5482,6 +6848,9 @@ class DataAggDebugDialog(QDialog):
             int(master_step_idx),
             list(rows),
         )
+        # 結合項目は seed の __file_path を維持。品名等は全スロット完了時のみ行パスを確定。
+        if not join_item and item_complete:
+            self._mpv_store_row_file_paths_for_mi(int(mi_idx), list(rows))
         self._mpv_note_progress_row_peak(int(mi_idx), len(rows))
         if rows and item_complete:
             if join_item:
@@ -5696,9 +7065,11 @@ class DataAggDebugDialog(QDialog):
                 schedule_backfill = False
             if cancel_gen != self._mpv_prefetch_cancel_gen:
                 continue
+            dlg = self
+            if dlg._master_cancel_pending():
+                continue
             if sk_next in self._mpv_progress_rows_step_cache:
                 continue
-            dlg = self
             if not dlg._mpv_prog_compute_lock.acquire(blocking=True, timeout=2.5):
                 try:
                     _data_agg_probe_log.info(
@@ -5718,6 +7089,8 @@ class DataAggDebugDialog(QDialog):
             apply_after = False
             try:
                 if cancel_gen != dlg._mpv_prefetch_cancel_gen:
+                    pass
+                elif dlg._master_cancel_pending():
                     pass
                 elif sk_next in dlg._mpv_progress_rows_step_cache:
                     pass
@@ -5937,10 +7310,16 @@ class DataAggDebugDialog(QDialog):
 
     def _mpv_finalize_target_mi(self) -> int | None:
         """連続実行完了時の最終 compute 対象 mi（最後に到達した項目を優先）。"""
+        disp = self._mpv_last_completed_mi_for_display()
         fb = getattr(self, "_last_master_completed_mi_idx", None)
         if fb is not None and int(fb) >= 0:
+            if disp is None or int(fb) >= int(disp):
+                return int(fb)
+        if disp is not None:
+            return int(disp)
+        if fb is not None and int(fb) >= 0:
             return int(fb)
-        return self._mpv_last_completed_mi_for_display()
+        return None
 
     def _mpv_finalize_step_cache_acceptable(self) -> bool:
         """連続実行完了時に step キャッシュで最終表示できるか。"""
@@ -6000,28 +7379,39 @@ class DataAggDebugDialog(QDialog):
 
         by_mi = getattr(self, "_mpv_progress_rows_by_mi", {}) or {}
         fb = getattr(self, "_last_master_completed_mi_idx", None)
-        if fb is not None and int(fb) >= 0:
-            for mi in range(int(fb), -1, -1):
-                ent = by_mi.get(mi)
-                if not ent or not ent[1]:
-                    continue
-                prior_peak = self._mpv_prior_peak_rows_before_mi(mi)
-                if not self._mpv_current_item_has_join_defs(int(mi)):
-                    if master_preview_join_compute_rows_acceptable(
-                        new_rows=len(ent[1]),
-                        prior_peak_rows=prior_peak,
-                        item_complete=True,
-                    ):
-                        return int(mi)
-                    continue
-                if self._mpv_join_result_usable(
-                    ent[1],
-                    mi_idx=int(mi),
-                    prior_peak_rows=prior_peak,
-                ):
-                    return int(mi)
-        peaks = getattr(self, "_mpv_progress_row_peak_by_mi", {}) or {}
         best_mi: int | None = None
+
+        def _mi_usable(mi: int, ent: tuple[int, list[list[Any]]]) -> bool:
+            if not ent or not ent[1]:
+                return False
+            prior_peak = self._mpv_prior_peak_rows_before_mi(int(mi))
+            if not self._mpv_current_item_has_join_defs(int(mi)):
+                return master_preview_join_compute_rows_acceptable(
+                    new_rows=len(ent[1]),
+                    prior_peak_rows=prior_peak,
+                    item_complete=True,
+                )
+            return self._mpv_join_result_usable(
+                ent[1],
+                mi_idx=int(mi),
+                prior_peak_rows=prior_peak,
+            )
+
+        scan_from = int(fb) if fb is not None and int(fb) >= 0 else -1
+        for mi in range(scan_from, -1, -1):
+            ent = by_mi.get(mi)
+            if _mi_usable(mi, ent):
+                best_mi = int(mi)
+                break
+        if best_mi is None:
+            for mi in sorted(by_mi.keys(), reverse=True):
+                ent = by_mi.get(int(mi))
+                if _mi_usable(int(mi), ent):
+                    best_mi = int(mi)
+                    break
+        if best_mi is not None:
+            return best_mi
+        peaks = getattr(self, "_mpv_progress_row_peak_by_mi", {}) or {}
         best_peak = 0
         for mi, peak in peaks.items():
             p = int(peak)
@@ -6226,13 +7616,29 @@ class DataAggDebugDialog(QDialog):
         )
 
     def _mpv_progress_batch_rows(self) -> list[list[Any]]:
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
         try:
             rows = self._mpv_progress_batch_rows_impl()
             return self._mpv_apply_aggregation_row_order(rows)
+        except DataAggCancelled:
+            cache = getattr(self, "_mpv_progress_rows_cache", None)
+            if cache is not None and cache[1]:
+                return [list(r) for r in cache[1]]
+            last = list(getattr(self, "_mpv_last_valid_table_rows", None) or [])
+            return [list(r) for r in last]
         finally:
-            self._mpv_request_progress_prefetch_debounced()
+            if not getattr(self, "_master_abort_in_progress", False):
+                self._mpv_request_progress_prefetch_debounced()
 
     def _mpv_progress_batch_rows_impl(self) -> list[list[Any]]:
+        if self._master_on_ui_thread():
+            return self._master_run_blocking_with_ui_pump(
+                self._mpv_progress_batch_rows_impl_core
+            )
+        return self._mpv_progress_batch_rows_impl_core()
+
+    def _mpv_progress_batch_rows_impl_core(self) -> list[list[Any]]:
         """
         マスタプレビュー表示用: 完了項目はフル、現在項目は実行済みシナリオ分のみ、未到達項目は主値ソースなし。
         連携・結合は到達範囲のパイプラインに含まれる列へ反映され、未到達列へのフル結果の透けを防ぐ。
@@ -6471,7 +7877,8 @@ class DataAggDebugDialog(QDialog):
         sk_need = self._mpv_progress_step_cache_key(n_pick_req)
         from_prefetch_wait = False
         rows: list[list[Any]] = []
-        with self._mpv_prog_compute_lock:
+        self._master_mpv_compute_lock_acquire_ui()
+        try:
             hit_after_wait = self._mpv_progress_rows_step_cache.get(sk_need)
             if hit_after_wait is not None:
                 candidate = [list(r) for r in hit_after_wait]
@@ -6497,13 +7904,7 @@ class DataAggDebugDialog(QDialog):
                     and n_pick_req >= n_act_compute
                 ):
                     frozen_cap = {}
-                _off_hook = None
-                try:
-                    _pd = getattr(self, "_run_progress_dlg", None)
-                    if _pd is not None and _pd.isVisible():
-                        _off_hook = self._master_dbg_batch_progress_hook
-                except Exception:
-                    _off_hook = None
+                _off_hook = self._mpv_master_dbg_progress_hook_or_none()
                 try:
                     rows = self._mpv_compute_progress_table_rows(
                         mi_idx=int(self._mi_idx),
@@ -6522,6 +7923,8 @@ class DataAggDebugDialog(QDialog):
                 except Exception:
                     _logger.exception("mpv progress batch rows failed")
                     rows = []
+        finally:
+            self._master_mpv_compute_lock_release_ui()
         if (
             not rows
             and self._active_slot_indices
@@ -6650,6 +8053,134 @@ class DataAggDebugDialog(QDialog):
         # join/item の行順差でズレる可能性があるため、従来どおり compute_batch を使う。
         return None
 
+    def _mpv_poll_extract_cancel(
+        self, cancel_check: Callable[..., None] | None
+    ) -> None:
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        if cancel_check is not None:
+            cancel_check(force=True)
+
+    def _mpv_extract_colvals_blocking(
+        self,
+        *,
+        mi_idx: int,
+        si: int,
+        src: dict[str, Any],
+        paths_list: list[str],
+        one: dict[str, Any],
+        item_id: str,
+        max_rows: int,
+        n_paths_before: int,
+        n_paths_scenario: int,
+        n_paths_after: int,
+        extract_hook: Callable[..., None] | None,
+        cancel_check: Callable[..., None] | None,
+    ) -> list[str]:
+        """extract ループ本体（ワーカー可。Qt は progress_hook ブリッジ経由のみ）。"""
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        try:
+            from svc.svc_data_agg_extract import (
+                extract_item_bundle,
+                xlsx_workbook_scope,
+            )
+        except Exception:
+            extract_item_bundle = None  # type: ignore[misc, assignment]
+            xlsx_workbook_scope = None  # type: ignore[misc, assignment]
+        if extract_item_bundle is None or xlsx_workbook_scope is None:
+            return ["（svc_data_agg_extract を読み込めませんでした）"]
+        t0 = time.perf_counter()
+        col_vals: list[str] = []
+        _csv_prog = _master_debug_csv_precache_progress_hook(
+            extract_hook, cancel_check=cancel_check
+        )
+        hook_paths_prev = getattr(self, "_mpv_progress_hook_paths", None)
+        self._mpv_progress_hook_paths = list(paths_list)
+        try:
+            for i, fp in enumerate(paths_list, start=1):
+                try:
+                    self._mpv_poll_extract_cancel(cancel_check)
+                except DataAggCancelled:
+                    raise
+                if len(col_vals) >= max_rows:
+                    break
+                fname = Path(str(fp)).name
+                row_prog = min(len(col_vals) + 1, max_rows)
+                if extract_hook is not None:
+                    try:
+                        extract_hook(
+                            4,
+                            "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
+                            i,
+                            len(paths_list),
+                        )
+                    except DataAggCancelled:
+                        raise
+                    except Exception:
+                        pass
+                with xlsx_workbook_scope():  # type: ignore[misc]
+                    try:
+                        _precache_csv_for_master_debug_extract(
+                            fp,
+                            progress_hook=_csv_prog,
+                        )
+                        jp_hdr = str(one.get("name") or one.get("id") or "").strip()
+                        b = extract_item_bundle(
+                            fp,
+                            one,
+                            item_id=item_id or None,
+                            cell_positions={},
+                            join_path_header=jp_hdr or None,
+                            cancel_check=cancel_check,
+                        )
+                    except DataAggCancelled:
+                        raise
+                    except Exception:
+                        b = {"primary_values": []}
+                _append_extract_primaries_to_col(
+                    col_vals,
+                    b.get("primary_values"),
+                    max_rows=max_rows,
+                )
+                if extract_hook is not None:
+                    try:
+                        extract_hook(
+                            4,
+                            "行 %s/%s: %s（完了）" % (
+                                min(len(col_vals), max_rows),
+                                max_rows,
+                                fname,
+                            ),
+                            i,
+                            len(paths_list),
+                        )
+                    except DataAggCancelled:
+                        raise
+                    except Exception:
+                        pass
+        finally:
+            self._mpv_progress_hook_paths = hook_paths_prev
+        if not col_vals:
+            col_vals = ["（該当する主値がありません）"]
+        try:
+            _data_agg_probe_log.info(
+                "[DATA_AGG_DIAG] mpv_extract mi_idx=%s si=%s src_type=%s "
+                "paths_before=%s paths_scenario=%s paths_source=%s col_count=%s col_head=%s elapsed_ms=%s",
+                mi_idx,
+                si,
+                str(src.get("type") or "cell").strip().lower(),
+                n_paths_before,
+                n_paths_scenario,
+                n_paths_after,
+                len(col_vals),
+                col_vals[:5],
+                int((time.perf_counter() - t0) * 1000),
+            )
+        except Exception:
+            pass
+        return col_vals
+
     def _mpv_extract_colvals(self, mi_idx: int, si: int) -> list[str]:
         """
         マスタプレビュー用: 本番と同じ extract_item_bundle 経路で主値列を得る。
@@ -6658,7 +8189,6 @@ class DataAggDebugDialog(QDialog):
         key = (mi_idx, si)
         if key in self._mpv_extract_cache:
             return list(self._mpv_extract_cache[key])
-        t0 = time.perf_counter()
         scen = self._scenario_for_dry_run or {}
         items = list(scen.get("items") or [])
         if mi_idx < 0 or mi_idx >= len(items):
@@ -6682,22 +8212,12 @@ class DataAggDebugDialog(QDialog):
             return out
         try:
             from svc.svc_data_agg import filter_file_paths_for_master_preview
-            from svc.svc_data_agg_extract import (
-                extract_item_bundle,
-                file_paths_for_source_extract,
-                xlsx_workbook_scope,
-            )
+            from svc.svc_data_agg_extract import file_paths_for_source_extract
         except Exception:
-            extract_item_bundle = None  # type: ignore[misc, assignment]
             filter_file_paths_for_master_preview = None  # type: ignore[misc, assignment]
             file_paths_for_source_extract = None  # type: ignore[misc, assignment]
-            xlsx_workbook_scope = None  # type: ignore[misc, assignment]
         paths = [str(p).strip() for p in self._debug_scan_paths if str(p).strip()]
         n_paths_before = len(paths)
-        if extract_item_bundle is None:
-            out = ["（svc_data_agg_extract を読み込めませんでした）"]
-            self._mpv_extract_cache[key] = list(out)
-            return out
         if filter_file_paths_for_master_preview is not None:
             paths = list(filter_file_paths_for_master_preview(paths, items))
         n_paths_scenario = len(paths)
@@ -6717,88 +8237,48 @@ class DataAggDebugDialog(QDialog):
             self._mpv_extract_cache[key] = list(out)
             return out
         max_rows = self._master_preview_display_rows()
-        col_vals: list[str] = []
-        _pe_n = 0
-        _csv_prog = _master_debug_csv_precache_progress_hook(
-            self._mpv_master_dbg_progress_hook_or_none()
-        )
-        _extract_hook = self._mpv_master_dbg_progress_hook_or_none()
-        hook_paths_prev = getattr(self, "_mpv_progress_hook_paths", None)
-        self._mpv_progress_hook_paths = list(paths_list)
-        try:
-            for i, fp in enumerate(paths_list, start=1):
-                if len(col_vals) >= max_rows:
-                    break
-                fname = Path(str(fp)).name
-                row_prog = min(len(col_vals) + 1, max_rows)
-                if _extract_hook is not None:
-                    try:
-                        _extract_hook(
-                            4,
-                            "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
-                            i,
-                            len(paths_list),
-                        )
-                    except Exception:
-                        pass
-                with xlsx_workbook_scope():  # type: ignore[misc]
-                    try:
-                        _precache_csv_for_master_debug_extract(
-                            fp,
-                            progress_hook=_csv_prog,
-                        )
-                        jp_hdr = str(one.get("name") or one.get("id") or "").strip()
-                        b = extract_item_bundle(
-                            fp,
-                            one,
-                            item_id=item_id or None,
-                            cell_positions={},
-                            join_path_header=jp_hdr or None,
-                        )
-                    except Exception:
-                        b = {"primary_values": []}
-                _append_extract_primaries_to_col(
-                    col_vals,
-                    b.get("primary_values"),
-                    max_rows=max_rows,
-                )
-                _pe_n += 1
-                if _extract_hook is not None:
-                    try:
-                        _extract_hook(
-                            4,
-                            "行 %s/%s: %s（完了）" % (
-                                min(len(col_vals), max_rows),
-                                max_rows,
-                                fname,
-                            ),
-                            i,
-                            len(paths_list),
-                        )
-                    except Exception:
-                        pass
-                if _pe_n % 4 == 0:
-                    self._process_events_light()
-        finally:
-            self._mpv_progress_hook_paths = hook_paths_prev
-        if not col_vals:
-            col_vals = ["（該当する主値がありません）"]
-        try:
-            _data_agg_probe_log.info(
-                "[DATA_AGG_DIAG] mpv_extract mi_idx=%s si=%s src_type=%s "
-                "paths_before=%s paths_scenario=%s paths_source=%s col_count=%s col_head=%s elapsed_ms=%s",
-                mi_idx,
-                si,
-                str(src.get("type") or "cell").strip().lower(),
-                n_paths_before,
-                n_paths_scenario,
-                n_paths_after,
-                len(col_vals),
-                col_vals[:5],
-                int((time.perf_counter() - t0) * 1000),
+        cancel_chk = self._master_run_cancel_check()
+        real_hook = self._mpv_master_dbg_progress_hook_or_none()
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        def _run_extract_blocking(eff_hook: Callable[..., None] | None) -> list[str]:
+            return self._mpv_extract_colvals_blocking(
+                mi_idx=mi_idx,
+                si=si,
+                src=src,
+                paths_list=list(paths_list),
+                one=one,
+                item_id=item_id,
+                max_rows=max_rows,
+                n_paths_before=n_paths_before,
+                n_paths_scenario=n_paths_scenario,
+                n_paths_after=n_paths_after,
+                extract_hook=eff_hook,
+                cancel_check=cancel_chk,
             )
-        except Exception:
-            pass
+
+        try:
+            if self._master_on_ui_thread():
+                hook_q: queue.SimpleQueue = queue.SimpleQueue()
+                bridged = (
+                    self._master_bridge_progress_hook(real_hook, hook_q)
+                    if real_hook is not None
+                    else None
+                )
+
+                def _worker_extract() -> list[str]:
+                    return _run_extract_blocking(bridged)
+
+                col_vals = self._master_run_blocking_with_ui_pump(
+                    _worker_extract,
+                    progress_hook=real_hook,
+                    hook_q=hook_q,
+                )
+            else:
+                col_vals = _run_extract_blocking(real_hook)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            raise
         self._mpv_extract_cache[key] = list(col_vals)
         return list(col_vals)
 
@@ -6994,8 +8474,20 @@ class DataAggDebugDialog(QDialog):
         self._value_grid_structure_key = None
 
     def _rebuild_value_grid(self) -> None:
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
         try:
             self._rebuild_value_grid_impl()
+        except DataAggCancelled:
+            try:
+                _data_agg_probe_log.info(
+                    "[DATA_AGG_DIAG] value_grid_rebuild_skip reason=cancel "
+                    "mi_idx=%s step_idx=%s",
+                    self._mi_idx,
+                    self._master_step_idx,
+                )
+            except Exception:
+                pass
         except Exception:
             _logger.exception("value grid rebuild failed")
             self._log_append(
@@ -7361,6 +8853,98 @@ class DataAggDebugDialog(QDialog):
         cap = self._max_phase_slots()
         return min(len(idx), cap)
 
+    def _master_format_elapsed_sec(self, sec: float | None) -> str:
+        if sec is None:
+            return ""
+        try:
+            v = float(sec)
+        except (TypeError, ValueError):
+            return ""
+        if v < 0:
+            return ""
+        return "%.1f" % v
+
+    def _master_clear_elapsed_timings(self) -> None:
+        self._master_step_elapsed_sec.clear()
+        self._master_item_elapsed_sec.clear()
+        self._master_step_timing_t0 = None
+        self._master_continuous_run_t0 = None
+
+    def _master_begin_step_timing(self) -> None:
+        self._master_step_timing_t0 = time.perf_counter()
+
+    def _master_finish_step_timing(self, mi_idx: int, step_idx: int) -> None:
+        t0 = getattr(self, "_master_step_timing_t0", None)
+        self._master_step_timing_t0 = None
+        if t0 is None:
+            return
+        elapsed = max(0.0, time.perf_counter() - float(t0))
+        mi = int(mi_idx)
+        st = int(step_idx)
+        self._master_step_elapsed_sec[(mi, st)] = elapsed
+        mit = self._master_table_items()
+        n_steps = (
+            self._master_active_count_for_item(mit[mi])
+            if 0 <= mi < len(mit)
+            else 0
+        )
+        total = sum(
+            float(self._master_step_elapsed_sec.get((mi, s), 0.0))
+            for s in range(n_steps)
+        )
+        self._master_item_elapsed_sec[mi] = total
+        self._master_refresh_elapsed_ui()
+
+    def _master_begin_continuous_run_timing(self) -> None:
+        self._master_continuous_run_t0 = time.perf_counter()
+
+    def _master_continuous_run_elapsed_sec(self) -> float:
+        t0 = getattr(self, "_master_continuous_run_t0", None)
+        if t0 is None:
+            return 0.0
+        return max(0.0, time.perf_counter() - float(t0))
+
+    def _master_refresh_elapsed_ui(self) -> None:
+        if self._mode != 1:
+            return
+        try:
+            mit = self._master_table_items()
+            for ri in range(self.left_table.rowCount()):
+                reg = (
+                    ri < len(mit)
+                    and self._master_active_count_for_item(mit[ri]) > 0
+                )
+                it = self.left_table.item(ri, 2)
+                if it is None:
+                    continue
+                txt = (
+                    self._master_format_elapsed_sec(
+                        self._master_item_elapsed_sec.get(int(ri))
+                    )
+                    if reg
+                    else ""
+                )
+                it.setText(txt)
+                it.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            mi = int(self._mi_idx)
+            for r in range(self.left_steps.rowCount()):
+                it = self.left_steps.item(r, 2)
+                if it is None:
+                    continue
+                it.setText(
+                    self._master_format_elapsed_sec(
+                        self._master_step_elapsed_sec.get((mi, int(r)))
+                    )
+                )
+                it.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            self._apply_master_left_registered_row_style()
+        except Exception:
+            pass
+
     def _master_cycle_total_steps(self) -> int:
         return sum(
             self._master_active_count_for_item(m) for m in self._master_table_items()
@@ -7399,6 +8983,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_join_search_pool_seed = None
         self._mpv_join_search_pool_seed_paths_count = -1
         self._mpv_join_pool_by_mi.clear()
+        self._mpv_row_file_paths_by_mi.clear()
         self._mpv_final_table_rows = None
         self._last_master_completed_mi_idx = None
         self._mpv_display_mi_idx = None
@@ -7557,29 +9142,41 @@ class DataAggDebugDialog(QDialog):
         self._log_append("（%s）実行単位終了（%s）" % (run_kind, reason))
 
     def _show_continuous_run_done_dialog(
-        self, *, mode: int, was_full_master: bool, steps: int
+        self,
+        *,
+        mode: int,
+        was_full_master: bool,
+        steps: int,
+        elapsed_sec: float = 0.0,
     ) -> None:
         """連続実行の正常完了時に JSON 文言で終了メッセージを表示する。"""
         title = self._d("DIALOG_RUN_ALL_DONE_TITLE", "データ集約 デバッグ")
         if mode == 0:
             tpl = self._d(
                 "MSG_RUN_ALL_SCENARIO_DONE",
-                "シナリオの連続実行が完了しました。\n実行ステップ数: {steps}",
+                "シナリオの連続実行が完了しました。\n"
+                "実行ステップ数: {steps}\n所要時間: {elapsed_sec} 秒",
             )
         elif was_full_master:
             tpl = self._d(
                 "MSG_RUN_ALL_MASTER_ITEMS_DONE",
-                "全項目の連続実行が完了しました。\n実行ステップ数: {steps}",
+                "全項目の連続実行が完了しました。\n"
+                "実行ステップ数: {steps}\n所要時間: {elapsed_sec} 秒",
             )
         else:
             tpl = self._d(
                 "MSG_RUN_ALL_MASTER_DONE",
-                "項目の連続実行が完了しました。\n実行ステップ数: {steps}",
+                "項目の連続実行が完了しました。\n"
+                "実行ステップ数: {steps}\n所要時間: {elapsed_sec} 秒",
             )
+        elapsed_s = self._master_format_elapsed_sec(elapsed_sec) or "0.0"
         try:
-            body = tpl.format(steps=int(steps))
+            body = tpl.format(steps=int(steps), elapsed_sec=elapsed_s)
         except Exception:
-            body = tpl
+            try:
+                body = tpl.format(steps=int(steps))
+            except Exception:
+                body = tpl
         from ui_qt.ui_common import show_done_notice
 
         show_done_notice(self, title, _normalize_message_newlines(body))
@@ -7598,7 +9195,10 @@ class DataAggDebugDialog(QDialog):
         busy = getattr(self, "_continuous_busy", False)
         prog = self._run_progress_dialog_blocking()
         block = busy or prog
-        snap_view = self._mode == 1 and self._master_showing_row_snapshot()
+        snap_view = self._mode == 1 and (
+            self._master_showing_row_snapshot()
+            or getattr(self, "_master_snapshot_browse_after_cancel", False)
+        )
         try:
             self.btn_cancel.setEnabled(True)
         except Exception:
@@ -7866,6 +9466,8 @@ class DataAggDebugDialog(QDialog):
             )
             return False, False
 
+        self._ensure_master_run_cancel()
+        self._ensure_master_cancel_pump_timer()
         focus_results_tab = False
         while True:
             nmit = len(self._master_table_items())
@@ -7915,6 +9517,7 @@ class DataAggDebugDialog(QDialog):
                     self._rebuild_left_steps()
                     self._paint_left_steps_executed()
                     self._paint_result_highlights()
+                    self._apply_master_left_registered_row_style()
                 else:
                     self._master_finish_step_pass_idle()
                 # 実行可能シナリオが無い項目の「次」が実行ありのとき、入場直後の再構築は
@@ -7963,10 +9566,15 @@ class DataAggDebugDialog(QDialog):
                 self._rebuild_left_steps()
                 self._paint_left_steps_executed()
                 self._paint_result_highlights()
+                self._apply_master_left_registered_row_style()
                 if done_mi == 0:
                     focus_results_tab = True
                 continue
             break
+        self._master_step_exec_depth = int(getattr(self, "_master_step_exec_depth", 0) or 0) + 1
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         m = self._current_master()
         _mt_item = str(m.get("title") or m.get("name") or m.get("id") or "").strip() or "項目"
         if self._master_step_idx == 0:
@@ -8008,6 +9616,7 @@ class DataAggDebugDialog(QDialog):
         sc = m["scenarios"][si]
         slot = sc["slot"]
         assert slot is not None
+        self._master_begin_step_timing()
         sub_total = len(_MASTER_DEBUG_PROGRESS_PHASES)
         prog_wt = self._scenario_progress_window_title()
         # compute_batch フックは _show_run_progress より前に _mpv_progress_batch_rows を
@@ -8053,7 +9662,19 @@ class DataAggDebugDialog(QDialog):
         self._process_events_light()
         plab = self._phase_label(gno, sc_title)
         plab_summary = self._summary_first_col_label(gno, sc_title)
-        colvals = self._mpv_resolve_master_step_colvals(si)
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
+        try:
+            colvals = self._mpv_resolve_master_step_colvals(si)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            return self._master_abort_step_after_cancel()
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         if self._scenario_for_dry_run and self._debug_scan_paths:
             self._mpv_colvals_cache[(int(self._mi_idx), int(si))] = list(colvals)
         gr = self._master_global_row_idx
@@ -8075,6 +9696,9 @@ class DataAggDebugDialog(QDialog):
             % (str(m.get("title") or m.get("name") or ""), len(colvals)),
         )
         self._process_events_light()
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         self._upsert_value_cols_at(gr, colvals, [None] * len(colvals))
         if (
             self._scenario_for_dry_run
@@ -8100,11 +9724,15 @@ class DataAggDebugDialog(QDialog):
         except Exception:
             pass
         _log_step_n = int(self._master_step_idx) + 1
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         self._capture_master_step_snapshot(
             int(self._mi_idx),
             max(0, int(_log_step_n) - 1),
             colvals=list(colvals) if colvals else None,
         )
+        self._master_finish_step_timing(int(self._mi_idx), int(self._master_step_idx))
         self._master_step_idx += 1
         self._last_master_active_count = len(self._active_slot_indices)
         will_finish_master_item = self._master_step_idx >= len(self._active_slot_indices)
@@ -8181,6 +9809,9 @@ class DataAggDebugDialog(QDialog):
                     wait_async_ms=0,
                     probe_caller="mpv_multislot_frozen_capture",
                 )
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         if will_finish_master_item:
             n_act_done = len(self._active_slot_indices or [])
             if self._mpv_current_item_has_join_defs() and n_act_done > 0:
@@ -8217,10 +9848,23 @@ class DataAggDebugDialog(QDialog):
                 1, len(self._active_slot_indices or [])
             )
             self._mpv_sync_progress_cache_from_step_n_pick(n_sync)
-        self._refresh_master_value_grid(finalize=should_finalize_now)
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
+        try:
+            self._refresh_master_value_grid(finalize=should_finalize_now)
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            return self._master_abort_step_after_cancel()
+        aborted = self._master_return_if_step_cancelled()
+        if aborted is not None:
+            return aborted
         self._rebuild_left_steps()
         self._show_run_progress(
-            _MASTER_DEBUG_PROGRESS_PHASES[7], 8, sub_total, window_title=prog_wt
+            _MASTER_DEBUG_PROGRESS_PHASE_DONE,
+            sub_total,
+            sub_total,
+            window_title=prog_wt,
         )
         self._process_events_light()
         self._paint_left_steps_executed()
@@ -8258,6 +9902,7 @@ class DataAggDebugDialog(QDialog):
                 self._rebuild_left_steps()
                 self._paint_left_steps_executed()
                 self._paint_result_highlights()
+                self._apply_master_left_registered_row_style()
                 if self._active_slot_indices:
                     self._mpv_warmup_single_slot_progress_cache(int(self._mi_idx))
                     self._rebuild_value_grid()
@@ -8269,8 +9914,16 @@ class DataAggDebugDialog(QDialog):
                         )
                     except Exception:
                         pass
+        if self._master_cancel_pending():
+            return self._master_abort_step_after_cancel()
         self._close_run_progress()
+        self._master_step_exec_depth_leave()
         return True, focus_results_tab
+
+    def _master_step_exec_depth_leave(self) -> None:
+        self._master_step_exec_depth = max(
+            0, int(getattr(self, "_master_step_exec_depth", 0) or 0) - 1
+        )
 
     def _finish_continuous_run(self) -> None:
         if not self._continuous_busy:
@@ -8278,8 +9931,13 @@ class DataAggDebugDialog(QDialog):
         # マスタ連続実行完了時: 左が「シナリオなし」項目にいても、
         # 直前までの結果一覧を最終反映する（マージ列表示を 1 回）。
         if self._mode == 1:
+            self._continuous_busy = False
+            self._master_step_loop_busy = False
             fb_mi = getattr(self, "_last_master_completed_mi_idx", None)
-            self._mpv_display_mi_idx = fb_mi if fb_mi is not None else self._mi_idx
+            disp_mi = self._mpv_finalize_target_mi()
+            self._mpv_display_mi_idx = (
+                disp_mi if disp_mi is not None else (fb_mi if fb_mi is not None else self._mi_idx)
+            )
             try:
                 _data_agg_probe_log.info(
                     "[DATA_AGG_DIAG] mpv_finalize_apply_end_of_continuous "
@@ -8304,6 +9962,8 @@ class DataAggDebugDialog(QDialog):
             self._paint_result_highlights()
         self._continuous_busy = False
         self._continuous_steps_left = 0
+        self._stop_master_cancel_pump_timer()
+        self._clear_master_run_cancel()
         if self._mode == 1:
             if getattr(self, "_continuous_was_full_master", False):
                 self._master_full_continuous_allowed = True
@@ -8316,21 +9976,37 @@ class DataAggDebugDialog(QDialog):
     def _run_continuous_next(self) -> None:
         if not self._continuous_busy:
             return
+        if getattr(self, "_master_continuous_cancel_requested", False):
+            self._master_continuous_cancel_requested = False
+            self._log_append(
+                self._d("MSG_MASTER_RUN_CANCEL", "（連続実行を中止しました）")
+            )
+            self._show_master_run_cancel_notice(continuous=True)
+            self._finish_continuous_run()
+            return
         if self._continuous_steps_left <= 0:
             self._finish_continuous_run()
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._ensure_master_run_cancel()
+        self._ensure_master_cancel_pump_timer()
         ok = False
+        focus_tab = False
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
         try:
             ok, focus_tab = self._execute_single_run_step()
-            if ok:
-                if focus_tab:
-                    self._focus_results_tab()
-                    self._schedule_focus_results_tab()
-                self._update_run_buttons_state()
-                self._update_clear_buttons()
-        finally:
-            QApplication.restoreOverrideCursor()
+        except DataAggCancelled:
+            self._master_note_cancel_requested()
+            self._master_abort_step_after_cancel()
+            return
+        if ok:
+            if focus_tab:
+                self._focus_results_tab()
+                self._schedule_focus_results_tab()
+            self._update_run_buttons_state()
+            self._update_clear_buttons()
+        if not self._continuous_busy:
+            return
         if not ok:
             if self._mode == 1:
                 _rk = (
@@ -8353,6 +10029,7 @@ class DataAggDebugDialog(QDialog):
             done_mode = self._mode
             done_was_full = getattr(self, "_continuous_was_full_master", False)
             done_steps = int(getattr(self, "_continuous_initial_steps", 0) or 0)
+            done_elapsed = self._master_continuous_run_elapsed_sec()
             if self._mode == 1:
                 _rk = "全項目連続実行" if done_was_full else "連続実行"
                 self._log_master_exec_unit_close(_rk, "完了")
@@ -8365,7 +10042,9 @@ class DataAggDebugDialog(QDialog):
                 mode=done_mode,
                 was_full_master=done_was_full,
                 steps=done_steps,
+                elapsed_sec=done_elapsed,
             )
+            self._master_continuous_run_t0 = None
         else:
             QTimer.singleShot(0, self._run_continuous_next)
 
@@ -8376,6 +10055,8 @@ class DataAggDebugDialog(QDialog):
             self._continuous_was_full_master = False
             self._master_full_continuous_allowed = False
             self._master_step_pass_complete = False
+            self._master_snapshot_browse_after_cancel = False
+            self._reset_master_cancel_state()
         if self._mode == 0:
             n = len(self._active_slot_indices)
         else:
@@ -8385,6 +10066,10 @@ class DataAggDebugDialog(QDialog):
         self._continuous_busy = True
         self._continuous_steps_left = n
         self._continuous_initial_steps = n
+        self._master_begin_continuous_run_timing()
+        self._reset_master_cancel_state()
+        self._ensure_master_run_cancel()
+        self._ensure_master_cancel_pump_timer()
         self._mpv_show_merged_current = False
         try:
             _data_agg_probe_log.info(
@@ -8419,6 +10104,10 @@ class DataAggDebugDialog(QDialog):
         self._continuous_busy = True
         self._continuous_steps_left = total
         self._continuous_initial_steps = total
+        self._master_begin_continuous_run_timing()
+        self._reset_master_cancel_state()
+        self._ensure_master_run_cancel()
+        self._ensure_master_cancel_pump_timer()
         self._mpv_show_merged_current = False
         try:
             _data_agg_probe_log.info(
@@ -8442,19 +10131,32 @@ class DataAggDebugDialog(QDialog):
             return
         if self._mode == 1:
             self._log_master_exec_unit_open("ステップ実行")
+            self._master_snapshot_browse_after_cancel = False
+            self._reset_master_cancel_state()
+            self._ensure_master_run_cancel()
+            self._ensure_master_cancel_pump_timer()
         ok = False
         focus_tab = False
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        use_wait_cursor = self._mode != 1
+        if use_wait_cursor:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
         try:
-            ok, focus_tab = self._execute_single_run_step()
-            if ok:
-                if self._mode == 1:
-                    self._master_full_continuous_allowed = False
-                if focus_tab:
-                    self._focus_results_tab()
-                    self._schedule_focus_results_tab()
-                self._update_run_buttons_state()
-                self._update_clear_buttons()
+            try:
+                ok, focus_tab = self._execute_single_run_step()
+                if ok:
+                    if self._mode == 1:
+                        self._master_full_continuous_allowed = False
+                    if focus_tab:
+                        self._focus_results_tab()
+                        self._schedule_focus_results_tab()
+                    self._update_run_buttons_state()
+                    self._update_clear_buttons()
+            except DataAggCancelled:
+                self._master_note_cancel_requested()
+                self._master_abort_step_after_cancel()
+                ok = False
         finally:
             if self._mode == 1:
                 self._log_master_exec_unit_close(
@@ -8462,11 +10164,15 @@ class DataAggDebugDialog(QDialog):
                 )
             if self._mode == 1:
                 QTimer.singleShot(350, self._close_run_progress)
-            QApplication.restoreOverrideCursor()
+                if not getattr(self, "_continuous_busy", False):
+                    self._stop_master_cancel_pump_timer()
+            if use_wait_cursor:
+                QApplication.restoreOverrideCursor()
 
     def _clear_master_debug_results(self) -> None:
         self._master_full_continuous_allowed = True
         self._master_step_pass_complete = False
+        self._master_clear_elapsed_timings()
         self._clear_master_item_snapshots()
         self._bump_mpv_prefetch_cancel()
         self._master_sparse_notice_shown = False
@@ -8492,6 +10198,7 @@ class DataAggDebugDialog(QDialog):
         self._mpv_join_search_pool_seed = None
         self._mpv_join_search_pool_seed_paths_count = -1
         self._mpv_join_pool_by_mi.clear()
+        self._mpv_row_file_paths_by_mi.clear()
         self._mpv_final_table_rows = None
         self._mpv_column_fit_pending = False
         self._mpv_final_grid_applied = False
@@ -8509,6 +10216,7 @@ class DataAggDebugDialog(QDialog):
                 self.left_table.selectRow(0)
         finally:
             self.left_table.blockSignals(False)
+        self._reload_left_table()
         self._reload_conditions()
         self._rebuild_active_slots()
         self._rebuild_value_grid()

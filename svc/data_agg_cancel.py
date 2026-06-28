@@ -31,6 +31,16 @@ def cancel_request_path_data_agg_batch(sheet_id: str, ipc_root: Path) -> Path:
     return d / ("cancel_req_data_agg_batch_%s.pkl" % sid)
 
 
+def cancel_request_path_data_agg_master_debug(ipc_root: Path, *, token: str = "") -> Path:
+    """マスタデバッグ進捗の協調キャンセル（本番一括の強制終了経路とは別名）。"""
+    d = ipc_root / "progress"
+    d.mkdir(parents=True, exist_ok=True)
+    tok = str(token or "").strip()
+    if not tok:
+        tok = "%s" % int(time.time() * 1000)
+    return d / ("cancel_req_data_agg_master_debug_%s.pkl" % tok)
+
+
 def reset_cancel_path(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)  # type: ignore[call-arg]

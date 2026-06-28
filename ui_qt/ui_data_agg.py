@@ -292,6 +292,10 @@ _BTN_EDIT_LINKED_DISABLED = (
     "QPushButton { background-color: #E0E0E0; color: #888888; font-weight: bold; "
     "border-radius: 4px; padding: 4px 12px; border: 1px solid #CCCCCC; }"
 )
+_BTN_BATCH_TEXT = (
+    "QPushButton { color: #003399; font-weight: bold; }"
+    "QPushButton:disabled { color: #888888; font-weight: bold; }"
+)
 
 # Excel タブ: コンボ・入力の縦幅・最大幅（コンパクト表示）
 _EXCEL_CTRL_MAX_H = 26
@@ -947,6 +951,7 @@ class _DataAggMainWindow(QDialog):
         self._btn_batch = QPushButton(_u("BTN_BATCH", "一括実行"))
         self._btn_batch.setAutoDefault(False)
         self._btn_batch.setDefault(False)
+        self._btn_batch.setStyleSheet(_BTN_BATCH_TEXT)
         self._btn_batch.clicked.connect(self._on_batch_run)
         btn_cancel = QPushButton(_u("BTN_CANCEL", "キャンセル"))
         btn_cancel.setAutoDefault(False)

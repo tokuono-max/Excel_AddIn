@@ -302,6 +302,337 @@ def test_seed_pool_prefers_anchor_file_path_over_synthetic() -> None:
     assert not str(rows[0]["__file_path"]).startswith("mpv_table_seed://")
 
 
+def test_seed_pool_stacked_join_uses_row_file_paths() -> None:
+    fps = [r"C:\a\file1.xlsx", r"C:\a\file2.xlsx", r"C:\a\file3.xlsx"]
+    rows = table_rows_to_join_search_seed_pool(
+        ["品名", "機器番号"],
+        [["A", "1"], ["B", "2"]],
+        anchor_file_path=r"C:\a\anchor.xlsx",
+        row_file_paths=fps,
+        stacked_join=True,
+    )
+    assert rows[0]["__file_path"] == fps[0]
+    assert rows[1]["__file_path"] == fps[1]
+    assert rows[0]["__file_path"] != r"C:\a\anchor.xlsx"
+
+
+def test_table_row_file_paths_groups_by_device_id() -> None:
+    from svc.data_agg_master_preview import table_row_file_paths_for_stacked_seed  # noqa: WPS433
+
+    headers = ["品名", "機器番号", "実装装置番号"]
+    rows = [
+        ["ユニット", "PT1", "'DEV-A"],
+        ["IMX-VCH", "PT1 '1", "'DEV-A"],
+        ["ユニット", "PT2", "'DEV-B"],
+    ]
+    scan = [r"C:\a\sub1.xlsx", r"C:\a\sub2.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(headers, rows, scan_paths=scan)
+    assert fps == [scan[0], scan[0], scan[1]]
+
+
+def test_table_row_file_paths_prefers_stored_iteration_paths() -> None:
+    from svc.data_agg_master_preview import table_row_file_paths_for_stacked_seed  # noqa: WPS433
+
+    headers = ["品名", "機器番号"]
+    rows = [["A", "1"], ["B", "2"]]
+    stored = [r"C:\real\file1.xlsx", r"C:\real\file1.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(
+        headers,
+        rows,
+        scan_paths=[r"C:\wrong\file1.xlsx", r"C:\wrong\file2.xlsx"],
+        stored_row_paths=stored,
+    )
+    assert fps == stored
+
+
+def test_patch_stacked_join_pool_skips_multi_distinct_device_ids() -> None:
+    from svc.svc_data_agg import _patch_stacked_join_pool_row_join_targets  # noqa: WPS433
+
+    pool = [
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "'PT4400243777",
+            "__iter_index": 0,
+        },
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "'PT4400243777 '1",
+            "__iter_index": 1,
+        },
+        {
+            "__file_path": r"C:\data\sub2.xlsx",
+            "機器番号": "OTHER",
+            "__iter_index": 0,
+        },
+    ]
+    _patch_stacked_join_pool_row_join_targets(
+        pool,
+        file_path=r"C:\data\sub1.xlsx",
+        join_defs=[{"item": "機器番号", "cell": "AS30"}],
+        bundle={"join_values": {"機器番号": ["'PT4400243777"]}},
+    )
+    assert pool[0]["機器番号"] == "'PT4400243777"
+    assert pool[1]["機器番号"] == "'PT4400243777 '1"
+    assert pool[2]["機器番号"] == "OTHER"
+
+
+def test_patch_stacked_join_pool_patches_single_wrong_row() -> None:
+    from svc.svc_data_agg import _patch_stacked_join_pool_row_join_targets  # noqa: WPS433
+
+    pool = [
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "WRONG-1",
+            "__iter_index": 0,
+        },
+        {
+            "__file_path": r"C:\data\sub2.xlsx",
+            "機器番号": "OTHER",
+            "__iter_index": 0,
+        },
+    ]
+    _patch_stacked_join_pool_row_join_targets(
+        pool,
+        file_path=r"C:\data\sub1.xlsx",
+        join_defs=[{"item": "機器番号", "cell": "AS30"}],
+        bundle={"join_values": {"機器番号": ["PT4400243777"]}},
+    )
+    assert pool[0]["機器番号"] == "PT4400243777"
+    assert pool[1]["機器番号"] == "OTHER"
+
+
+def test_patch_stacked_join_pool_skips_when_multiple_rows_share_host_file() -> None:
+    """同一 __file_path の seed が複数あるとき比較列（機器番号）を上書きしない。"""
+    from svc.svc_data_agg import _patch_stacked_join_pool_row_join_targets  # noqa: WPS433
+
+    pool = [
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "'PT4300312992",
+            "__iter_index": 0,
+        },
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "'PT4300312993",
+            "__iter_index": 1,
+        },
+    ]
+    _patch_stacked_join_pool_row_join_targets(
+        pool,
+        file_path=r"C:\data\sub1.xlsx",
+        join_defs=[{"item": "機器番号", "cell": "AS30"}],
+        bundle={"join_values": {"機器番号": ["'PT4290015938"]}},
+    )
+    assert pool[0]["機器番号"] == "'PT4300312992"
+    assert pool[1]["機器番号"] == "'PT4300312993"
+
+
+def test_patch_stacked_join_pool_skips_same_host_single_distinct_value() -> None:
+    """複数行が同一機器番号でも、複数行なら patch しない（一括同一化を防ぐ）。"""
+    from svc.svc_data_agg import _patch_stacked_join_pool_row_join_targets  # noqa: WPS433
+
+    pool = [
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "OLD",
+            "__iter_index": 0,
+        },
+        {
+            "__file_path": r"C:\data\sub1.xlsx",
+            "機器番号": "OLD",
+            "__iter_index": 1,
+        },
+    ]
+    _patch_stacked_join_pool_row_join_targets(
+        pool,
+        file_path=r"C:\data\sub1.xlsx",
+        join_defs=[{"item": "機器番号", "cell": "AS30"}],
+        bundle={"join_values": {"機器番号": ["NEW-PT"]}},
+    )
+    assert pool[0]["機器番号"] == "OLD"
+    assert pool[1]["機器番号"] == "OLD"
+
+
+def test_stacked_join_search_pool_not_filtered_by_host_file() -> None:
+    from svc.svc_data_agg import _join_search_pool_scope  # noqa: WPS433
+
+    pool = [
+        {"__file_path": r"C:\host\a.xlsx", "機器番号": "1", "__iter_index": 0},
+        {"__file_path": r"C:\host\b.xlsx", "機器番号": "2", "__iter_index": 1},
+    ]
+    scoped = _join_search_pool_scope(
+        pool,
+        r"C:\host\b.xlsx",
+        False,
+        stacked_join=True,
+    )
+    assert len(scoped) == 2
+    narrow = _join_search_pool_scope(pool, r"C:\host\b.xlsx", False)
+    assert len(narrow) == 1
+
+
+def test_narrow_join_matched_rows_stacked_join_filters_by_host_file() -> None:
+    from svc.svc_data_agg import _narrow_join_matched_rows_for_write  # noqa: WPS433
+
+    rows = [
+        {
+            "__file_path": r"C:\host\a.xlsx",
+            "機器番号": "PT-A",
+            "MAC LOC": "",
+            "__iter_index": 0,
+        },
+        {
+            "__file_path": r"C:\host\b.xlsx",
+            "機器番号": "PT-A",
+            "MAC LOC": "",
+            "__iter_index": 1,
+        },
+    ]
+    narrowed = _narrow_join_matched_rows_for_write(
+        rows,
+        0,
+        1,
+        1,
+        stacked_join=True,
+        host_file_path=r"C:\host\b.xlsx",
+    )
+    assert len(narrowed) == 1
+    assert narrowed[0]["__file_path"] == r"C:\host\b.xlsx"
+    value_only = _narrow_join_matched_rows_for_write(
+        rows,
+        0,
+        1,
+        1,
+        stacked_join=True,
+        host_file_path=r"C:\host\b.xlsx",
+        stacked_join_value_match_only=True,
+    )
+    assert len(value_only) == 2
+
+
+def test_stacked_join_cell_write_uses_value_match_not_host_path() -> None:
+    """table_rows seed のセル結合: __file_path 不一致でも join 比較列一致で書込み。"""
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+    from svc.svc_data_agg import _apply_join_key_search_write  # noqa: WPS433
+
+    headers = ["品名", "機器番号", "MAC LOC"]
+    host_a = r"C:\data\host_a.xlsm"
+    host_b = r"C:\data\host_b.xlsm"
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        [["ユニット", "PT-A", None]],
+        row_file_paths=[host_a],
+        stacked_join=True,
+    )
+    item = {
+        "name": "MAC LOC",
+        "write_mode": "overwrite",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "join_defs": [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}],
+                },
+            }
+        ],
+    }
+    bundle = {
+        "primary_values": ["D8:4A:87:FF:B2:14"],
+        "join_values": {"機器番号": ["PT-A"]},
+    }
+    _apply_join_key_search_write(
+        pool,
+        item,
+        "MAC LOC",
+        bundle,
+        "overwrite",
+        header_set=set(headers),
+        search_pool=pool,
+        stacked_join=True,
+        host_file_path=host_b,
+        stacked_join_value_match_only=True,
+    )
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    assert join_compare_display_key(pool[0].get("MAC LOC")) == "D8:4A:87:FF:B2:14"
+
+
+def test_stacked_join_write_requires_matching_host_file_path_without_value_only() -> None:
+    """積み上げ join（path 絞り込みあり）: __file_path がホストと一致しないと書込みされない。"""
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+    from svc.svc_data_agg import _apply_join_key_search_write  # noqa: WPS433
+
+    headers = ["品名", "機器番号", "MAC LOC"]
+    host_a = r"C:\data\host_a.xlsm"
+    host_b = r"C:\data\host_b.xlsm"
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        [["ユニット", "PT-A", None]],
+        row_file_paths=[host_a],
+        stacked_join=True,
+    )
+    item = {
+        "name": "MAC LOC",
+        "write_mode": "overwrite",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "join_defs": [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}],
+                },
+            }
+        ],
+    }
+    bundle = {
+        "primary_values": ["D8:4A:87:FF:B2:14"],
+        "join_values": {"機器番号": ["PT-A"]},
+    }
+    _apply_join_key_search_write(
+        pool,
+        item,
+        "MAC LOC",
+        bundle,
+        "overwrite",
+        header_set=set(headers),
+        search_pool=pool,
+        stacked_join=True,
+        host_file_path=host_b,
+        stacked_join_value_match_only=False,
+    )
+    assert pool[0].get("MAC LOC") in (None, "")
+
+    pool[0]["MAC LOC"] = None
+    _apply_join_key_search_write(
+        pool,
+        item,
+        "MAC LOC",
+        bundle,
+        "overwrite",
+        header_set=set(headers),
+        search_pool=pool,
+        stacked_join=True,
+        host_file_path=host_a,
+        stacked_join_value_match_only=False,
+    )
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    assert join_compare_display_key(pool[0].get("MAC LOC")) == "D8:4A:87:FF:B2:14"
+
+
+def test_row_file_paths_real_count_prefers_iteration_paths() -> None:
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        is_synthetic_mpv_row_file_path,
+        row_file_paths_real_count,
+    )
+
+    assert is_synthetic_mpv_row_file_path("mpv_table_seed://0")
+    real = [r"C:\a\f1.xlsm", r"C:\a\f2.xlsm"]
+    synth = ["mpv_table_seed://0", "mpv_table_seed://1"]
+    assert row_file_paths_real_count(real) == 2
+    assert row_file_paths_real_count(synth) == 0
+    assert row_file_paths_real_count(real) > row_file_paths_real_count(synth)
+
+
 def test_cross_detection_uses_topology_not_empty_stepped_sources(
     tmp_path: Path,
 ) -> None:
@@ -610,3 +941,397 @@ def test_stacked_join_cross_join_pt_host_only(
     assert pt_vals, "積み上げ join で PT が空"
     assert seq_vals, "積み上げ join で製番が空"
     assert join_compare_display_key(pt_vals[0]) == "PT-001"
+
+
+def test_apply_master_preview_join_max_files_caps_join_item(
+    tmp_path: Path,
+) -> None:
+    """結合項目のみ filter/reorder 後の paths を MASTER_DEBUG_JOIN_MAX_FILES 相当で打切る。"""
+    from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+        apply_master_preview_join_max_files,
+        master_preview_join_max_files_cap,
+        master_preview_should_apply_join_file_cap,
+    )
+
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    paths_many = [paths[0]] * 15 + [paths[1]] * 15
+    dd: dict = {
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "master_preview_join_max_files": 20,
+    }
+    assert master_preview_join_max_files_cap(dd) == 20
+    assert master_preview_should_apply_join_file_cap(data["items"], 2)
+    assert not master_preview_should_apply_join_file_cap(data["items"], 0)
+    capped = apply_master_preview_join_max_files(paths_many, data["items"], dd)
+    assert len(capped) == 20
+    assert dd["master_preview_join_file_cap_hit"] is True
+    assert dd["master_preview_join_files_detected"] == 30
+    assert dd["master_preview_join_files_read"] == 20
+
+
+def test_apply_master_preview_join_max_files_skips_non_join_item(
+    tmp_path: Path,
+) -> None:
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    paths_many = paths * 15
+    dd: dict = {
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 0,
+        "master_preview_join_max_files": 20,
+    }
+    from svc.data_agg_master_preview_perf import apply_master_preview_join_max_files  # noqa: WPS433
+
+    capped = apply_master_preview_join_max_files(paths_many, data["items"], dd)
+    assert len(capped) == len(paths_many)
+    assert "master_preview_join_file_cap_hit" not in dd
+
+
+def test_master_preview_join_file_cap_limits_compute_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """compute_batch 経路でも結合項目の読込ファイル数が上限以下になる。"""
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    paths_many = [paths[0]] * 10 + [paths[1]] * 10
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "master_preview_join_max_files": 1,
+        "join_search_skip_seed": True,
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    compute_batch_table_rows(
+        data,
+        paths_many,
+        max_primary_rows=4,
+        max_table_rows=4,
+        probe_caller="test_join_file_cap",
+    )
+    dd = data.get("__debug_diag") or {}
+    assert dd.get("master_preview_join_file_cap_hit") is True
+    assert int(dd.get("master_preview_join_files_read") or 0) == 1
+    assert int(dd.get("master_preview_stats_files_read") or 0) <= 1
+
+
+def test_stacked_seed_join_targets_fill_ratio() -> None:
+    from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+        master_preview_stacked_seed_join_targets_fill_ratio,
+        master_preview_stacked_seed_usable,
+    )
+
+    headers = ["品名", "機器番号", "MAC LOC"]
+    good = [["A", "D1", None], ["B", "D2", None]]
+    bad = [["A", None, None], ["B", None, None]]
+    assert master_preview_stacked_seed_join_targets_fill_ratio(
+        good, headers, ["機器番号"]
+    ) == 1.0
+    assert master_preview_stacked_seed_join_targets_fill_ratio(
+        bad, headers, ["機器番号"]
+    ) == 0.0
+    assert master_preview_stacked_seed_usable(good, headers, ["機器番号"])
+    assert not master_preview_stacked_seed_usable(bad, headers, ["機器番号"])
+
+
+def test_stacked_join_odn375_like_same_file(tmp_path: Path) -> None:
+    """ODN375 型: 品名表示行 seed + 積み上げ join で MAC LOC が埋まる。"""
+    from openpyxl import Workbook
+
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        MASTER_PREVIEW_DIAG_SOURCE,
+        scenario_for_stepped_preview,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    p = tmp_path / "ODN375_sample.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "ユニット実装チェック"
+    ws["P14"] = "UNIT-A"
+    ws["P16"] = "DEV-001"
+    ws["AS30"] = "DEV-001"
+    ws["AV30"] = "AA:BB:CC:DD:EE:FF"
+    wb.save(p)
+
+    data: dict = {
+        "items": [
+            {
+                "name": "品名",
+                "write_mode": "append",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "ユニット実装チェック",
+                        "cell_ref": "P14",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "ODN375",
+                            "link_defs": [
+                                {
+                                    "item": "機器番号",
+                                    "cell": "P16",
+                                    "mode": "セル座標",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+            {"name": "機器番号", "write_mode": "append", "sources": []},
+            {"name": "MAC", "write_mode": "append", "sources": []},
+            {
+                "name": "MAC LOC",
+                "write_mode": "overwrite",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "ユニット実装チェック",
+                        "cell_ref": "AV30",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "ODN375",
+                            "link_defs": [
+                                {
+                                    "item": "MAC",
+                                    "cell": "",
+                                    "mode": "固定値",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                            "join_defs": [
+                                {"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+        ]
+    }
+    headers = [str(it.get("name") or "") for it in data["items"]]
+    scen0 = scenario_for_stepped_preview(
+        data, mi_idx=0, master_step_idx=1, active_slot_indices=[0]
+    )
+    _, prior_rows, _, _ = compute_batch_table_rows(
+        scen0, [str(p)], max_primary_rows=10, max_table_rows=10
+    )
+    assert prior_rows
+    ix_dev = headers.index("機器番号")
+    assert prior_rows[0][ix_dev] not in (None, "")
+
+    scen = scenario_for_stepped_preview(
+        data,
+        mi_idx=3,
+        master_step_idx=1,
+        active_slot_indices=[0],
+        carry_forward_completed_items=True,
+    )
+    dd = scen["__debug_diag"]
+    dd["source"] = MASTER_PREVIEW_DIAG_SOURCE
+    dd["mi_idx"] = 3
+    dd["preview_join_topology_items"] = data["items"]
+    seed = table_rows_to_join_search_seed_pool(
+        headers,
+        prior_rows,
+        row_file_paths=[str(p)],
+        stacked_join=True,
+    )
+    dd["join_search_seed_pool"] = seed
+    dd["join_search_seed_from_table_rows"] = True
+    dd["master_preview_stacked_join"] = True
+    dd["preview_extract_item_allowlist"] = [3]
+    dd["master_preview_join_read_full_files"] = False
+    _, rows, _, _ = compute_batch_table_rows(
+        scen, [str(p)], max_primary_rows=10, max_table_rows=10, probe_caller="test_odn375"
+    )
+    ix_loc = headers.index("MAC LOC")
+    ix_mac = headers.index("MAC")
+    assert rows[0][ix_loc] not in (None, "")
+    assert rows[0][ix_mac] in (None, "")
+
+
+def test_stacked_join_seed_join_matches_as30_without_patch(
+    tmp_path: Path,
+) -> None:
+    """積み上げ join: 前段 seed の機器番号を書き換えず AS30 と join_compare で結合する。"""
+    from openpyxl import Workbook
+
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        MASTER_PREVIEW_DIAG_SOURCE,
+        scenario_for_stepped_preview,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    p = tmp_path / "ODN375_pt_match.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "ユニット実装チェック"
+    ws["P14"] = "UNIT-A"
+    ws["P16"] = "PT4400243759"
+    ws["AS30"] = "PT4400243759"
+    ws["AV30"] = "D8:4A:87:FF:C3:58"
+    wb.save(p)
+
+    data: dict = {
+        "items": [
+            {
+                "name": "品名",
+                "write_mode": "append",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "ユニット実装チェック",
+                        "cell_ref": "P14",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "ODN375",
+                            "link_defs": [
+                                {
+                                    "item": "機器番号",
+                                    "cell": "P16",
+                                    "mode": "セル座標",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+            {"name": "機器番号", "write_mode": "append", "sources": []},
+            {"name": "MAC", "write_mode": "append", "sources": []},
+            {
+                "name": "MAC LOC",
+                "write_mode": "overwrite",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "ユニット実装チェック",
+                        "cell_ref": "AV30",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "ODN375",
+                            "link_defs": [
+                                {
+                                    "item": "MAC",
+                                    "cell": "",
+                                    "mode": "固定値",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                            "join_defs": [
+                                {"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}
+                            ],
+                        },
+                        "repeat_direction": "vertical",
+                        "repeat_max": 1,
+                    }
+                ],
+            },
+        ]
+    }
+    headers = [str(it.get("name") or "") for it in data["items"]]
+    prior_rows = [["UNIT-A", "PT4400243759", None, None]]
+    scen = scenario_for_stepped_preview(
+        data,
+        mi_idx=3,
+        master_step_idx=1,
+        active_slot_indices=[0],
+        carry_forward_completed_items=True,
+    )
+    dd = scen["__debug_diag"]
+    dd["source"] = MASTER_PREVIEW_DIAG_SOURCE
+    dd["mi_idx"] = 3
+    dd["preview_join_topology_items"] = data["items"]
+    seed = table_rows_to_join_search_seed_pool(
+        headers,
+        prior_rows,
+        row_file_paths=[str(p)],
+        stacked_join=True,
+    )
+    dd["join_search_seed_pool"] = seed
+    dd["join_search_seed_from_table_rows"] = True
+    dd["master_preview_stacked_join"] = True
+    dd["preview_extract_item_allowlist"] = [3]
+    dd["master_preview_join_read_full_files"] = False
+    _, rows, _, _ = compute_batch_table_rows(
+        scen,
+        [str(p)],
+        max_primary_rows=10,
+        max_table_rows=10,
+        probe_caller="test_stacked_seed_patch",
+    )
+    ix_loc = headers.index("MAC LOC")
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    assert join_compare_display_key(rows[0][ix_loc]) == "D8:4A:87:FF:C3:58"
+    ix_dev = headers.index("機器番号")
+    assert join_compare_display_key(rows[0][ix_dev]) == "PT4400243759"
+
+
+def test_stacked_join_mac_loc_preserves_distinct_device_ids() -> None:
+    """積み上げ join: 行ごとに異なる機器番号を AS30 一括上書きせず、一致行のみ MAC LOC。"""
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+    from svc.svc_data_agg import (  # noqa: WPS433
+        _apply_join_key_search_write,
+        _patch_stacked_join_pool_row_join_targets,
+    )
+
+    headers = ["品名", "機器番号", "MAC", "MAC LOC"]
+    prior_rows = [
+        ["ユニット", "'PT4400243770", None, None],
+        ["IMX-VCH", "'PT4400243777", None, None],
+        ["IMX-REP", "'PT4400243777 '1", None, None],
+    ]
+    fp = r"C:\data\sub1.xlsx"
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        prior_rows,
+        row_file_paths=[fp, fp, fp],
+        stacked_join=True,
+    )
+    item = {
+        "name": "MAC LOC",
+        "write_mode": "overwrite",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "join_defs": [{"item": "機器番号", "cell": "AS30", "row": 0, "col": 0}],
+                },
+            }
+        ],
+    }
+    bundle = {
+        "primary_values": ["D8:4A:87:FF:C3:57"],
+        "join_values": {"機器番号": ["'PT4400243777"]},
+    }
+    _patch_stacked_join_pool_row_join_targets(
+        pool,
+        file_path=fp,
+        join_defs=[{"item": "機器番号", "cell": "AS30"}],
+        bundle=bundle,
+    )
+    _apply_join_key_search_write(
+        pool,
+        item,
+        "MAC LOC",
+        bundle,
+        "overwrite",
+        header_set=set(headers),
+        search_pool=pool,
+    )
+    from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+    assert join_compare_display_key(pool[0]["機器番号"]) == "PT4400243770"
+    assert join_compare_display_key(pool[1]["機器番号"]) == "PT4400243777"
+    assert join_compare_display_key(pool[2]["機器番号"]) == "PT4400243777 '1"
+    assert join_compare_display_key(pool[0].get("MAC LOC")) == ""
+    assert join_compare_display_key(pool[1].get("MAC LOC")) == "D8:4A:87:FF:C3:57"
+    assert join_compare_display_key(pool[2].get("MAC LOC")) == ""

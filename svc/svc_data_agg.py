@@ -919,6 +919,19 @@ def _join_item_sources_pass_file(
     return _item_sources_pass_file(probe, file_path)
 
 
+def _row_file_path_matches_host(row: dict[str, Any], host_file_path: str) -> bool:
+    """seed 行の __file_path がホスト file_path（フルパスまたはファイル名）と一致するか。"""
+    hf = str(host_file_path or "").strip()
+    if not hf or not isinstance(row, dict):
+        return False
+    rfp = str(row.get("__file_path") or "").strip()
+    if not rfp:
+        return False
+    if rfp == hf:
+        return True
+    return Path(rfp).name == Path(hf).name
+
+
 def _pool_rows_for_host_file(
     pool: list[dict[str, Any]],
     host_file_path: str,
@@ -926,7 +939,7 @@ def _pool_rows_for_host_file(
     hf = str(host_file_path or "")
     if not hf:
         return []
-    return [r for r in pool if isinstance(r, dict) and str(r.get("__file_path") or "") == hf]
+    return [r for r in pool if isinstance(r, dict) and _row_file_path_matches_host(r, hf)]
 
 
 def _pool_rows_matching_file_patterns(
@@ -951,7 +964,10 @@ def _join_search_pool_scope(
     host_item: Optional[dict[str, Any]] = None,
     items: Optional[list[dict[str, Any]]] = None,
     headers: Optional[list[str]] = None,
+    stacked_join: bool = False,
 ) -> list[dict[str, Any]]:
+    if stacked_join:
+        return pool
     if not cross_file:
         hf = str(host_file_path or "")
         if not hf:
@@ -1038,14 +1054,35 @@ def _narrow_join_matched_rows_for_write(
     n_join: int,
     *,
     cross_file: bool = False,
+    stacked_join: bool = False,
+    host_file_path: str = "",
+    stacked_join_value_match_only: bool = False,
 ) -> list[dict[str, Any]]:
     """
     スライス k で書き込む行を絞る。
     cross_file または n_prim==1: 値一致した行をすべて（__iter_index で絞らない）。
+    stacked_join かつ n_prim==1 かつ not value_match_only:
+        さらに __file_path がホストと一致する行のみ書込み。
+    stacked_join_value_match_only（table_rows seed のセル結合）:
+        本番同等に join 比較列の値一致のみで書込み（__file_path は使わない）。
     同一ファイルで n_prim>1 かつ n_join>1: __iter_index==k のみ（縦繰りペア）。
     """
     if not rows:
         return rows
+    if (
+        stacked_join
+        and n_prim == 1
+        and not cross_file
+        and not stacked_join_value_match_only
+    ):
+        hf = str(host_file_path or "").strip()
+        if hf:
+            scoped = [
+                r
+                for r in rows
+                if isinstance(r, dict) and _row_file_path_matches_host(r, hf)
+            ]
+            return scoped
     if cross_file or n_prim == 1:
         return rows
     if n_prim > 1 and n_join > 1:
@@ -1395,6 +1432,66 @@ def _join_cell_compare_norm(v: Any) -> str:
     return join_compare_display_key(v)
 
 
+def _patch_stacked_join_pool_row_join_targets(
+    pool: list[dict[str, Any]],
+    *,
+    file_path: str,
+    join_defs: list[dict[str, Any]],
+    bundle: dict[str, Any],
+) -> None:
+    """
+    積み上げ join: 合成 seed 行 1 件のみ join 比較列を bundle.join_values で補正する。
+    同一ホストに複数 seed 行がある場合は比較列を変更しない（前段 table_rows を保護）。
+    """
+    if not pool or not isinstance(bundle, dict):
+        return
+    targets = _join_search_targets_from_defs(join_defs)
+    jv = bundle.get("join_values") or {}
+    if not targets:
+        return
+    hf = str(file_path or "").strip()
+    if not hf:
+        return
+    patched: list[dict[str, Any]] = []
+    for r in pool:
+        if not isinstance(r, dict):
+            continue
+        rfp = str(r.get("__file_path") or "").strip()
+        if not rfp:
+            continue
+        if _row_file_path_matches_host(r, hf):
+            patched.append(r)
+    if not patched:
+        row = {
+            "__file_path": hf,
+            "__norm_path": hf,
+            "__iter_index": len(pool),
+        }
+        pool.append(row)
+        patched = [row]
+    # 前段 table_rows seed（複数行）の join 比較列は書き換えない。比較は join_compare のみ。
+    if len(patched) > 1:
+        return
+    for t in targets:
+        vals = jv.get(t) or []
+        if not isinstance(vals, list) or not vals:
+            continue
+        jv0 = vals[0]
+        jv_norm = _join_cell_compare_norm(jv0)
+        if any(_join_cell_compare_norm(r.get(t)) == jv_norm for r in patched):
+            continue
+        distinct = {
+            _join_cell_compare_norm(r.get(t))
+            for r in patched
+            if _join_cell_compare_norm(r.get(t))
+        }
+        # スロット展開済み seed（行ごとに機器番号が異なる）では AS30 一括上書きしない。
+        if len(distinct) > 1:
+            continue
+        for row in patched:
+            row[t] = jv0
+
+
 def _row_satisfies_join_and(
     row: dict[str, Any],
     join_defs: list[dict[str, Any]],
@@ -1519,6 +1616,9 @@ def _apply_join_key_search_write(
     join_host_rows: Optional[list[dict[str, Any]]] = None,
     join_slice_progress: Optional[Callable[[int, int], None]] = None,
     header_set: Optional[set[str]] = None,
+    stacked_join: bool = False,
+    host_file_path: str = "",
+    stacked_join_value_match_only: bool = False,
 ) -> None:
     """
     結合キー新仕様: セルから読んだ値と、表上の同一マスタ列の値を AND で比較し、
@@ -1640,7 +1740,14 @@ def _apply_join_key_search_write(
         else:
             raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
         return _narrow_join_matched_rows_for_write(
-            raw, k, n_prim, n_join, cross_file=cross_file
+            raw,
+            k,
+            n_prim,
+            n_join,
+            cross_file=cross_file,
+            stacked_join=stacked_join,
+            host_file_path=host_file_path,
+            stacked_join_value_match_only=stacked_join_value_match_only,
         )
 
     max_sl = core_env.data_agg_join_dump_max_slices() if _jd_detail else 0
@@ -1793,6 +1900,9 @@ def _apply_join_key_search_link_write(
     join_index: Optional[JoinSearchIndex] = None,
     join_host_rows: Optional[list[dict[str, Any]]] = None,
     join_slice_progress: Optional[Callable[[int, int], None]] = None,
+    stacked_join: bool = False,
+    host_file_path: str = "",
+    stacked_join_value_match_only: bool = False,
 ) -> None:
     """
     波及抑制 G1–G5: join_defs と link_defs を持つ項目のみ。
@@ -1853,7 +1963,14 @@ def _apply_join_key_search_link_write(
         else:
             raw = _join_search_rows_for_slice(_search, join_defs, jv, targets, k)
         return _narrow_join_matched_rows_for_write(
-            raw, k, n_prim, n_join, cross_file=cross_file
+            raw,
+            k,
+            n_prim,
+            n_join,
+            cross_file=cross_file,
+            stacked_join=stacked_join,
+            host_file_path=host_file_path,
+            stacked_join_value_match_only=stacked_join_value_match_only,
         )
 
     def _write_link_on_rows(rows_k: list[dict[str, Any]], k: int) -> int:
@@ -1969,7 +2086,7 @@ def _apply_join_key_search_across_file_passes(
     elif progress_hook is not None:
         _join_prog_interval = 0.20
     elif preview_master_mode:
-        _join_prog_interval = 0.25
+        _join_prog_interval = 0.0
     else:
         _join_prog_interval = 0.0
     _join_slice_prog_interval = (
@@ -2061,8 +2178,27 @@ def _apply_join_key_search_across_file_passes(
         if preview_master_mode
         else items
     )
+    stacked_join_active = False
+    if preview_master_mode:
+        from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+            master_preview_stacked_join_active,
+        )
+
+        stacked_join_active = master_preview_stacked_join_active(debug_diag)
+    stacked_join_mi: int | None = None
+    if stacked_join_active and isinstance(debug_diag, dict):
+        _smi = debug_diag.get("mi_idx")
+        if isinstance(_smi, int) and int(_smi) >= 0:
+            stacked_join_mi = int(_smi)
+    stacked_join_value_match_only = bool(
+        stacked_join_active
+        and isinstance(debug_diag, dict)
+        and bool(debug_diag.get("join_search_seed_from_table_rows"))
+    )
     for ji, jit in enumerate(items):
         _poll_cancel(force=True)
+        if stacked_join_mi is not None and int(ji) != stacked_join_mi:
+            continue
         jit_eff = _master_preview_join_item_effective(
             items,
             ji,
@@ -2135,6 +2271,18 @@ def _apply_join_key_search_across_file_passes(
             jb = bundles[ji] if ji < len(bundles) else {}
             if not isinstance(jb, dict):
                 jb = {}
+            if stacked_join_active and jb and join_defs_item:
+                seed_from_table = (
+                    isinstance(debug_diag, dict)
+                    and bool(debug_diag.get("join_search_seed_from_table_rows"))
+                )
+                if not seed_from_table:
+                    _patch_stacked_join_pool_row_join_targets(
+                        global_pool,
+                        file_path=file_path,
+                        join_defs=join_defs_item,
+                        bundle=jb,
+                    )
             join_host_rows: Optional[list[dict[str, Any]]] = None
             search_pool_len = 0
             join_slice_progress: Optional[Callable[[int, int], None]] = None
@@ -2161,11 +2309,17 @@ def _apply_join_key_search_across_file_passes(
                     host_item=jit_eff,
                     items=items,
                     headers=headers,
+                    stacked_join=stacked_join_active,
                 )
                 search_pool_len = len(search_pool)
-                join_index = _resolve_join_search_index(
-                    search_pool, join_defs_item, join_index_cache
-                )
+                if stacked_join_active:
+                    join_index = _build_join_search_index(
+                        search_pool, join_defs_item
+                    )
+                else:
+                    join_index = _resolve_join_search_index(
+                        search_pool, join_defs_item, join_index_cache
+                    )
             _join_progress(
                 "ファイル %s/%s: %s（候補 %s 行）"
                 % (fpi, n_fp, fname, search_pool_len),
@@ -2198,6 +2352,9 @@ def _apply_join_key_search_across_file_passes(
                 join_host_rows=join_host_rows,
                 join_slice_progress=join_slice_progress,
                 header_set=header_set,
+                stacked_join=stacked_join_active,
+                host_file_path=file_path,
+                stacked_join_value_match_only=stacked_join_value_match_only,
             )
             try:
                 _agg_diag.info(
@@ -3801,6 +3958,7 @@ def compute_batch_table_rows(
         dd["master_preview_stats_join_ref_rows"] = 0
         dd["master_preview_stats_files_read"] = 0
         dd["master_preview_stats_scan_cap_hit"] = False
+        dd["master_preview_join_file_cap_hit"] = False
     if preview_master_mode and master_preview_extract_allow is not None:
         try:
             _agg_diag.info(
@@ -3821,6 +3979,13 @@ def compute_batch_table_rows(
             paths = reorder_paths_for_master_preview_join_priority(
                 paths, items, headers, dd
             )
+        from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+            apply_master_preview_join_max_files,
+        )
+
+        paths = apply_master_preview_join_max_files(
+            paths, items, dd, log=_agg_diag
+        )
         master_preview_join_full_read_patterns = _master_preview_join_full_read_patterns(
             dd
         )

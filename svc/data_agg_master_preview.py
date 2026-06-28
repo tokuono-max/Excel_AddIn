@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
 from svc.svc_data_agg import resolve_path_column_for_merge
@@ -22,17 +23,103 @@ MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
 FROZEN_SNAPSHOT_VERSION = 1
 
 
+def is_synthetic_mpv_row_file_path(file_path: Any) -> bool:
+    """積み上げ seed 用の synthetic __file_path（mpv_table_seed://）か。"""
+    return str(file_path or "").strip().startswith("mpv_table_seed://")
+
+
+def row_file_paths_real_count(file_paths: Sequence[str] | None) -> int:
+    """synthetic でない参照元パス数（品質比較用）。"""
+    return sum(
+        1
+        for p in (file_paths or [])
+        if str(p or "").strip() and not is_synthetic_mpv_row_file_path(p)
+    )
+
+
+def table_row_file_paths_for_stacked_seed(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    scan_paths: Sequence[str] | None = None,
+    stored_row_paths: Sequence[str] | None = None,
+) -> list[str]:
+    """
+    積み上げ join seed 用: table_rows 各行の参照元ファイルパスを推定する。
+
+    優先順: stored_row_paths（compute の iteration_context）→ file_path 列
+    → 実装装置番号の出現順と scan_paths の対応 → scan_paths の先頭行割当（後方互換）。
+    """
+    n = len(rows)
+    if n <= 0:
+        return []
+
+    def _norm_fp(fp: Any) -> str:
+        return str(fp or "").strip()
+
+    stored = [_norm_fp(p) for p in (stored_row_paths or [])]
+    if len(stored) >= n and any(stored[:n]):
+        return list(stored[:n])
+
+    path_ix = headers.index("file_path") if "file_path" in headers else -1
+    if path_ix >= 0:
+        from_path: list[str] = []
+        for row in rows:
+            fp = ""
+            if isinstance(row, (list, tuple)) and path_ix < len(row):
+                fp = _norm_fp(row[path_ix])
+            from_path.append(fp)
+        if any(from_path):
+            scan = [_norm_fp(p) for p in (scan_paths or []) if _norm_fp(p)]
+            for i, fp in enumerate(from_path):
+                if not fp and scan:
+                    from_path[i] = scan[min(i, len(scan) - 1)]
+            return from_path
+
+    dev_ix = headers.index("実装装置番号") if "実装装置番号" in headers else -1
+    scan = [_norm_fp(p) for p in (scan_paths or []) if _norm_fp(p)]
+    if dev_ix >= 0 and scan:
+        from core.core_join_compare import join_compare_display_key  # noqa: WPS433
+
+        device_order: list[str] = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or dev_ix >= len(row):
+                continue
+            key = join_compare_display_key(row[dev_ix])
+            if key and key not in device_order:
+                device_order.append(key)
+        if device_order:
+            dev_to_path: dict[str, str] = {}
+            for i, dev in enumerate(device_order):
+                if i < len(scan):
+                    dev_to_path[dev] = scan[i]
+            out: list[str] = []
+            for row in rows:
+                dev = ""
+                if isinstance(row, (list, tuple)) and dev_ix < len(row):
+                    dev = join_compare_display_key(row[dev_ix])
+                out.append(dev_to_path.get(dev, scan[min(len(out), len(scan) - 1)]))
+            return out
+
+    if scan:
+        return [scan[min(i, len(scan) - 1)] for i in range(n)]
+    return []
+
+
 def table_rows_to_join_search_seed_pool(
     headers: list[str],
     rows: list[list[Any]],
     *,
     anchor_file_path: str | None = None,
+    row_file_paths: Sequence[str] | None = None,
+    stacked_join: bool = False,
 ) -> list[dict[str, Any]]:
     """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。"""
     if not headers or not rows:
         return []
     path_h = "file_path" if "file_path" in headers else None
     anchor_fp = str(anchor_file_path or "").strip()
+    row_fps = [str(p).strip() for p in (row_file_paths or []) if str(p).strip()]
     out: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         if not isinstance(row, (list, tuple)):
@@ -44,7 +131,9 @@ def table_rows_to_join_search_seed_pool(
         d["__iter_index"] = int(i)
         if path_h and d.get(path_h) not in (None, ""):
             fp = str(d[path_h])
-        elif anchor_fp:
+        elif i < len(row_fps):
+            fp = row_fps[int(i)]
+        elif anchor_fp and not stacked_join:
             fp = anchor_fp
         else:
             fp = "mpv_table_seed://%d" % int(i)
@@ -409,19 +498,26 @@ def run_preview_compute(
     max_table_rows: Optional[int],
     progress_hook: Optional[Callable[..., None]] = None,
     probe_caller: Optional[str] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
+    iteration_contexts_out: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
     """マスタプレビュー用に compute_batch_table_rows を実行する。"""
+    from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
     from svc.svc_data_agg import compute_batch_table_rows  # noqa: WPS433
 
     try:
         return compute_batch_table_rows(
             scenario,
             file_paths,
+            iteration_contexts_out,
             max_primary_rows=max_primary_rows,
             max_table_rows=max_table_rows,
             progress_hook=progress_hook,
             probe_caller=probe_caller,
+            cancel_check=cancel_check,
         )
+    except DataAggCancelled:
+        raise
     except Exception:
         _logger.exception("master preview compute_batch_table_rows failed")
         return [], [], [], 0

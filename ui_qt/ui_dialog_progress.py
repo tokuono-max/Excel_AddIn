@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -257,6 +258,7 @@ class ProgressDialog(QDialog):
         self._no_native_window = bool(req.get("no_native_window", False))
         # データ集約デバッグ等: Excel ではなく親 QWidget の中央に進捗を置く
         self._center_on_parent_widget = bool(req.get("center_on_parent_widget", False))
+        self._bring_excel_first = bool(req.get("bring_excel_first", True))
         # 完了時に親 QWidget を close するか（データ集約デバッグ等は False）
         self._req: dict = dict(req) if isinstance(req, dict) else {}
         try:
@@ -328,10 +330,17 @@ class ProgressDialog(QDialog):
                     self._btn_cancel.setToolTip(tt_c)
             except Exception:
                 pass
-            self._btn_cancel.clicked.connect(self._on_cancel_clicked)  # type: ignore[attr-defined]
+            _conn = Qt.ConnectionType.AutoConnection
+            self._btn_cancel.clicked.connect(self._on_cancel_clicked, _conn)  # type: ignore[attr-defined]
             row_c.addWidget(self._btn_cancel)
             self._cancel_row_widget = cw
             lay.addWidget(cw)
+            try:
+                esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+                esc.activated.connect(self._on_cancel_clicked)  # type: ignore[attr-defined]
+                self._cancel_esc_shortcut = esc
+            except Exception:
+                self._cancel_esc_shortcut = None
 
         # 命令分離: 画面固有 WINDOW（TOPMOST / SHOW_MINIMIZE / タスクバー等）を JSON 設定で適用
         try:
@@ -446,17 +455,22 @@ class ProgressDialog(QDialog):
         p = str(getattr(self, "_cancel_request_path", "") or "").strip()
         if not p:
             return
+        if getattr(self, "_cancel_dispatch_in_flight", False):
+            return
+        self._cancel_dispatch_in_flight = True
         is_data_agg_batch = "cancel_req_data_agg_batch" in p
+        is_master_debug = "cancel_req_data_agg_master_debug" in p
         if _log is not None:
             try:
                 _log.info(
-                    "[DATA_AGG] progress cancel clicked path=%s data_agg_batch=%s",
+                    "[DATA_AGG] progress cancel clicked path=%s data_agg_batch=%s master_debug=%s",
                     p,
                     is_data_agg_batch,
+                    is_master_debug,
                 )
             except Exception:
                 pass
-        if is_data_agg_batch:
+        if is_data_agg_batch or is_master_debug:
             try:
                 self._label_file.setText("中止しています…")
             except Exception:
@@ -465,6 +479,13 @@ class ProgressDialog(QDialog):
             ipc_file.write_pickle(Path(p), {"cancel": True, "v": 1})
         except Exception:
             pass
+        if is_master_debug:
+            cb = self._req.get("master_debug_cancel_cb")
+            if callable(cb):
+                try:
+                    cb()
+                except Exception:
+                    pass
         if is_data_agg_batch:
             try:
                 from svc.data_agg_cancel import force_data_agg_batch_cancel_from_ui  # noqa: WPS433
@@ -531,7 +552,9 @@ class ProgressDialog(QDialog):
                                 if not show_tb and ph_eff:
                                     _set_owner_hwnd(self, ph_eff)
                                 if ph_eff:
-                                    ensure_front(self, ph_eff)
+                                    ensure_front(
+                                        self, ph_eff, bring_excel_first=self._bring_excel_first
+                                    )
                                 try:
                                     self.setWindowOpacity(1.0)
                                 except Exception:
@@ -550,7 +573,9 @@ class ProgressDialog(QDialog):
                                 _set_owner_hwnd(self, ph_eff)
                             center_on_excel(self, ph_eff, rect)
                             if ph_eff:
-                                ensure_front(self, ph_eff)
+                                ensure_front(
+                                    self, ph_eff, bring_excel_first=self._bring_excel_first
+                                )
                         try:
                             self.setWindowOpacity(1.0)
                         except Exception:
@@ -560,7 +585,9 @@ class ProgressDialog(QDialog):
                             _set_owner_hwnd(self, ph)
                         center_on_excel(self, ph, rect)
                         if ph:
-                            ensure_front(self, ph)
+                            ensure_front(
+                                self, ph, bring_excel_first=self._bring_excel_first
+                            )
                 except Exception:
                     pass
 
@@ -1147,7 +1174,7 @@ class ProgressDialog(QDialog):
             else:
                 self._bar.setValue(pct)
 
-            # 進捗バー下: done / total を右寄せ（スラッシュ両側にスペース）
+            # 進捗バー右下: 全体（フェーズ）の done/total。フェーズ内 N/M は detail 行に表示。
             if done is not None and total is not None:
                 self._label_count.setText(f"{done} / {total}")
             elif total is not None:

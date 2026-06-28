@@ -134,12 +134,12 @@ def master_preview_join_step0_should_skip_progress_compute(
 
 def master_preview_join_step0_initial_progress() -> tuple[str, int]:
     """結合項目 step0: 重い compute 前の進捗 (文言, done_1based)。"""
-    return "ファイルを読み込み・結合しています", 4
+    return "読込開始", 4
 
 
 def master_preview_join_sync_compute_progress() -> tuple[str, int]:
     """結合項目の同期 compute 直前の進捗 (文言, done_1based)。"""
-    return "結果一覧用に取り出し中", 4
+    return "読込開始", 4
 
 
 def master_preview_join_chain_targets_prior_item(
@@ -231,6 +231,55 @@ def master_preview_join_result_usable(
     if not row_count_acceptable or not rows:
         return False
     ratio = master_preview_join_host_column_fill_ratio(rows, int(col_idx))
+    if ratio >= 0.05:
+        return True
+    return ratio * len(rows) >= 1.0
+
+
+def master_preview_join_target_headers(join_defs: list[dict]) -> list[str]:
+    """join_defs から結合比較列名（例: 機器番号）を返す。"""
+    from svc.svc_data_agg import _join_search_targets_from_defs  # noqa: WPS433
+
+    return list(_join_search_targets_from_defs(join_defs))
+
+
+def master_preview_stacked_seed_join_targets_fill_ratio(
+    rows: list[list[Any]],
+    headers: list[str],
+    join_target_headers: list[str],
+) -> float:
+    """積み上げ join seed: 比較列が非空の行比率。"""
+    if not rows or not join_target_headers:
+        return 0.0
+    indices: list[int] = []
+    for h in join_target_headers:
+        if h in headers:
+            indices.append(int(headers.index(h)))
+    if not indices:
+        return 0.0
+    filled = 0
+    for r in rows:
+        if any(
+            ci < len(r) and r[ci] not in (None, "")
+            for ci in indices
+        ):
+            filled += 1
+    return float(filled) / float(len(rows))
+
+
+def master_preview_stacked_seed_usable(
+    rows: list[list[Any]],
+    headers: list[str],
+    join_target_headers: list[str],
+) -> bool:
+    """積み上げ join seed に結合比較列が載っているか。"""
+    if not rows:
+        return False
+    if not join_target_headers:
+        return True
+    ratio = master_preview_stacked_seed_join_targets_fill_ratio(
+        rows, headers, join_target_headers
+    )
     if ratio >= 0.05:
         return True
     return ratio * len(rows) >= 1.0
@@ -353,6 +402,78 @@ def master_preview_read_pool_display_cap(
         read_rows_limit=read_rows_limit,
         file_count=file_count,
     )
+
+
+_MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
+
+
+def master_preview_join_max_files_cap(debug_diag: Any) -> int | None:
+    """結合項目のファイル読込上限。正の整数のみ。0・省略・不正値は無制限。"""
+    if not isinstance(debug_diag, dict):
+        return None
+    raw = debug_diag.get("master_preview_join_max_files")
+    if raw is None:
+        return None
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
+
+
+def master_preview_should_apply_join_file_cap(
+    items: list[Any],
+    mi_idx: int,
+) -> bool:
+    """当該マスタ項目が結合定義を持つときのみファイル数上限を適用する。"""
+    from svc.svc_data_agg import _item_join_defs_list  # noqa: WPS433
+
+    if mi_idx < 0 or mi_idx >= len(items):
+        return False
+    it = items[mi_idx]
+    return isinstance(it, dict) and bool(_item_join_defs_list(it))
+
+
+def apply_master_preview_join_max_files(
+    paths: list[str],
+    items: list[Any],
+    debug_diag: Any,
+    *,
+    log: Any = None,
+) -> list[str]:
+    """マスタデバッグ結合項目: filter/reorder 後の paths を上限件数で打切る。"""
+    if not paths or not isinstance(debug_diag, dict):
+        return paths
+    if str(debug_diag.get("source") or "") != _MASTER_PREVIEW_DIAG_SOURCE:
+        return paths
+    cap = master_preview_join_max_files_cap(debug_diag)
+    if cap is None:
+        return paths
+    mi_idx = debug_diag.get("mi_idx")
+    if not isinstance(mi_idx, int) or mi_idx < 0:
+        return paths
+    if not master_preview_should_apply_join_file_cap(items, int(mi_idx)):
+        return paths
+    detected = len(paths)
+    debug_diag["master_preview_join_files_detected"] = int(detected)
+    if detected <= cap:
+        debug_diag["master_preview_join_file_cap_hit"] = False
+        debug_diag["master_preview_join_files_read"] = int(detected)
+        return paths
+    capped = list(paths[:cap])
+    debug_diag["master_preview_join_file_cap_hit"] = True
+    debug_diag["master_preview_join_files_read"] = int(len(capped))
+    if log is not None:
+        try:
+            log.info(
+                "[DATA_AGG_DIAG] master_preview_join_file_cap detected=%s read=%s cap=%s",
+                detected,
+                len(capped),
+                cap,
+            )
+        except Exception:
+            pass
+    return capped
 
 
 # 後方互換（旧関数名）
