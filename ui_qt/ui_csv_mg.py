@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_csv_mg.py
 Created: 2026-02-12
-Updated: 2026-05-05
-Version: 0.3.30
+Updated: 2026-06-29
+Version: 0.3.31
 Purpose:
   CSV結合 UI（Qt / PySide6）
   - コードからUI定義(core_cst)を分離し、運用で文字列等を変更可能にする
@@ -12,6 +12,7 @@ Purpose:
   - Excelロック機構は共通モジュール(ui_common)を明示的に呼び出して解決する
 
 History (latest 3):
+  - 0.3.31 (2026-06-29) 進捗 action: SCREENS.DONE を _done_cfg として ProgressDialog へ渡し、完了通知の TOPMOST/EXCEL_LOCK 等を JSON どおり反映。
   - 0.3.30 (2026-05-05) キャンセル時の Excel メニュー有効化を closeEvent 依存から分離。_do_close_cancel/done で teardown を先行実行し、解除漏れを防止。
   - 0.3.29 (2026-05-05) Excelロック判定を COMMON.EXCEL.LOCK_WHEN_OPEN まで含めて統一。closeEvent の excel_unlock は parent_hwnd 基準で実行し、キャンセル時の解除漏れを防止。
   - 0.3.28 (2026-04-09) 結合キャンセル: done(0) の前に hide() で即非表示（空枠ゴースト低減。ui_server 側は finished を QueuedConnection に変更）。
@@ -72,7 +73,7 @@ from PySide6.QtWidgets import (
 )
 
 # 変数: バージョン情報
-__version__ = "0.3.30"
+__version__ = "0.3.31"
 
 try:
     from ui_qt.ipc_file import get_last_folder, set_last_folder
@@ -129,6 +130,9 @@ except Exception:  # pragma: no cover
     enable_excel_window = None  # type: ignore
 
 
+_CSV_MG_CFG_CACHE: Dict[str, Any] | None = None
+
+
 def _get_cfg() -> Dict[str, Any]:
     """
     Method Name : _get_cfg
@@ -137,6 +141,9 @@ def _get_cfg() -> Dict[str, Any]:
     機能概要    : 共通定義モジュール(core_cst)から、CSV結合画面用のUI設定を抽出する。
                   UI_COMMON + UI_SCREENS['CSV_MG'].COMMON + MAIN を単純マージする。
     """
+    global _CSV_MG_CFG_CACHE
+    if _CSV_MG_CFG_CACHE is not None:
+        return _CSV_MG_CFG_CACHE
     try:
         from ui_qt.ui_common import _deep_merge
 
@@ -165,6 +172,7 @@ def _get_cfg() -> Dict[str, Any]:
                 list(cfg.keys())[:20],
                 bool(cfg.get("RIBBON")),
             )
+        _CSV_MG_CFG_CACHE = cfg
         return cfg
     except Exception:
         if logger:
@@ -1632,8 +1640,20 @@ def create_dialog(req_dict=None, parent_hwnd: int = 0, sheet_id=None):
     if action == "progress":
         from ui_qt import ui_common
 
+        cfg = _get_cfg()
+        main = (cfg or {}).get("MAIN") or {}
+        progress = ((cfg or {}).get("SCREENS") or {}).get("PROGRESS") or {}
+        if _deep_merge:
+            progress_cfg = _deep_merge(main, progress)
+        else:
+            progress_cfg = {**main, **progress}
+        done_screen = ((cfg or {}).get("SCREENS") or {}).get("DONE") or {}
+        if _deep_merge:
+            progress_cfg["_done_cfg"] = _deep_merge(main, done_screen)
+        else:
+            progress_cfg["_done_cfg"] = {**main, **done_screen}
         return ui_common.create_progress_dialog(
-            req, int(parent_hwnd or 0), parent_widget=None
+            req, int(parent_hwnd or 0), parent_widget=None, progress_cfg=progress_cfg
         )
     initial_files = req.get("initial_files")
     clear_table = bool(req.get("clear_table", False))
@@ -1646,14 +1666,19 @@ def create_dialog(req_dict=None, parent_hwnd: int = 0, sheet_id=None):
         dlg._excel_rect_override = _excel_rect_from_req(req)
     except Exception:
         dlg._excel_rect_override = None
-    # json WINDOW を表示前に確実に適用: 親子・タスクバー・中央・前面
+    ph = int(parent_hwnd or 0)
+    try:
+        from ui_qt.ipc_file import write_waitform_ready_signal
+
+        write_waitform_ready_signal(ph)
+    except Exception:
+        pass
+    # 表示前の owner / 中央寄せは ui_server 側 prepare_dialog_excel_center_before_show に一本化
     try:
         cfg = _get_cfg()
         win = (cfg or {}).get("WINDOW") or {}
-        ph = int(parent_hwnd or 0)
-        show_taskbar = bool(win.get("SHOW_IN_TASKBAR", False))
         try:
-            dlg.setProperty("_hc_show_taskbar", show_taskbar)
+            dlg.setProperty("_hc_show_taskbar", bool(win.get("SHOW_IN_TASKBAR", False)))
         except Exception:
             pass
         try:
@@ -1667,14 +1692,6 @@ def create_dialog(req_dict=None, parent_hwnd: int = 0, sheet_id=None):
             dlg._hc_prepare_window_cfg = dict(win)
         except Exception:
             pass
-        dlg.winId()  # ネイティブウィンドウを先行生成（owner 設定のため必須）
-        if ph:
-            if not show_taskbar and ensure_owner_and_front is not None:
-                ensure_owner_and_front(dlg, ph)
-            if bool(win.get("CENTER_ON_EXCEL", False)) and center_on_excel is not None:
-                center_on_excel(dlg, ph, _excel_rect_from_req(req))
-            if ensure_front is not None:
-                ensure_front(dlg, ph)
     except Exception:
         pass
     return dlg

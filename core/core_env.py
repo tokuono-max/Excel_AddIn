@@ -86,6 +86,11 @@ def csv_sp_conflict_hwnd_diag_enabled() -> bool:
     return truthy(os.environ.get("HC_CSV_SP_CONFLICT_HWND_DIAG"), empty_means_false=False)
 
 
+def ui_native_file_diag_enabled() -> bool:
+    """ネイティブファイル選択の FG/Z 順調査（HC_UI_NATIVE_FILE_DIAG）。単独で hc_csv_diag.log を有効化する。"""
+    return truthy(os.environ.get("HC_UI_NATIVE_FILE_DIAG"), empty_means_false=False)
+
+
 def ui_fg_diag_enabled() -> bool:
     """ui_server: Excel 前面／Z 順の調査ログ（HC_UI_FG_DIAG）。単独で hc_csv_diag.log を有効化する。"""
     return truthy(os.environ.get("HC_UI_FG_DIAG"), empty_means_false=False)
@@ -262,6 +267,7 @@ def diag_log_file_enabled() -> bool:
         or data_agg_diag_file_needed()
         or csv_sp_conflict_hwnd_diag_enabled()
         or ui_fg_diag_enabled()
+        or ui_native_file_diag_enabled()
         or ui_excel_lock_diag_enabled()
         or ui_window_caption_diag_enabled()
     )

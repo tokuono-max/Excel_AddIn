@@ -31,6 +31,11 @@ if _root not in sys.path:
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger  # noqa: E402
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle  # noqa: E402
+from core.progress_close_ack import (  # noqa: E402
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
 
 logger = get_logger(__name__)
 _col_diag = get_diag_logger("hc_csv_tool.diag.col_dl")
@@ -43,9 +48,6 @@ class _ColDlCancelled(Exception):
 
 
 _CANCEL_POLL_INTERVAL_SEC = 0.2
-_PROGRESS_CLOSE_ACK_TIMEOUT_SEC = 3.0
-_PROGRESS_CLOSE_ACK_POLL_SEC = 0.03
-
 
 def _col_index_to_letters(col_1based: int) -> str:
     """Excel 1 始まり列番号を列記号（A, B, …）へ。"""
@@ -172,34 +174,6 @@ def _cancel_request_path(sheet_id: str) -> Path:
     d = Path(get_ipc_root()) / "progress"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"cancel_req_col_dl_{sheet_id}.pkl"
-
-
-def _progress_closed_ack_path(sheet_id: str) -> Path:
-    """進捗ダイアログが閉じたことを示す ACK ファイル。"""
-    d = Path(get_ipc_root()) / "progress"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"progress_col_dl_closed_{sheet_id}.pkl"
-
-
-def _wait_progress_closed_ack(path: Optional[Path], timeout_sec: float = _PROGRESS_CLOSE_ACK_TIMEOUT_SEC) -> None:
-    """
-    進捗画面のクローズACKを短時間待つ。
-    タイムアウト時はログのみ残し先へ進む（処理全体を止めない）。
-    """
-    if path is None:
-        return
-    p = path
-    t0 = time.perf_counter()
-    while True:
-        try:
-            if p.exists():
-                return
-        except Exception:
-            return
-        if (time.perf_counter() - t0) >= max(0.05, float(timeout_sec)):
-            logger.info("[COL_DL] progress close ack timeout: %s", str(p))
-            return
-        time.sleep(_PROGRESS_CLOSE_ACK_POLL_SEC)
 
 
 def _reset_cancel_path(path: Path) -> None:
@@ -561,15 +535,21 @@ def delete_empty_cols(target_hwnd: Optional[int] = None, sheet_id: str = "") -> 
         )
 
     cancel_path = _cancel_request_path(sid)
-    progress_closed_path = _progress_closed_ack_path(sid)
-    _reset_cancel_path(progress_closed_path)
+    progress_closed_path = progress_closed_ack_path("col_dl", sid)
+    reset_progress_closed_ack(progress_closed_path)
     interactive_locked = False
     progress_closed_waited = [False]
 
     def _ensure_progress_closed_before_modal() -> None:
         if progress_closed_waited[0]:
             return
-        _wait_progress_closed_ack(progress_closed_path)
+        wait_progress_closed_with_nudge(
+            progress_closed_path,
+            parent_hwnd=ph,
+            sheet_id=sid,
+            progress_path=prog_path,
+            log_tag="COL_DL",
+        )
         progress_closed_waited[0] = True
 
     try:

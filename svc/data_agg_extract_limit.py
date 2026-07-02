@@ -141,18 +141,35 @@ def enforce_extract_truncation_policy(
 ) -> None:
     if not records:
         return
-    for rec in records:
-        try:
-            _logger.warning(
-                "[DATA_AGG] extract_truncated scenario=%s caller=%s file=%s item=%s limit=%s",
-                scenario_id or "-",
-                probe_caller or "-",
-                Path(rec.file_path).name,
-                rec.item_label,
-                rec.limit,
-            )
-        except Exception:
-            pass
+    if preview_master_mode:
+        by_item: dict[str, list[ExtractTruncationRecord]] = {}
+        for rec in records:
+            by_item.setdefault(rec.item_label, []).append(rec)
+        for item_label, recs in by_item.items():
+            try:
+                _logger.warning(
+                    "[DATA_AGG] extract_truncated scenario=%s caller=%s item=%s files=%s limit=%s",
+                    scenario_id or "-",
+                    probe_caller or "-",
+                    item_label,
+                    len(recs),
+                    recs[0].limit,
+                )
+            except Exception:
+                pass
+    else:
+        for rec in records:
+            try:
+                _logger.warning(
+                    "[DATA_AGG] extract_truncated scenario=%s caller=%s file=%s item=%s limit=%s",
+                    scenario_id or "-",
+                    probe_caller or "-",
+                    Path(rec.file_path).name,
+                    rec.item_label,
+                    rec.limit,
+                )
+            except Exception:
+                pass
     policy = core_env.data_agg_extract_trunc_policy(
         probe_caller=probe_caller or None,
         preview_master=preview_master_mode,

@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_server.py
 Created: 2026-02-09
-Updated: 2026-06-13
-Version: 1.4.61
+Updated: 2026-06-30
+Version: 1.4.65
 Purpose:
   svc層からの要求(req_*.pkl)を監視し、Qtダイアログを生成・実行して結果(res_*.pkl)を返す。
   - IPC: ui_qt.ipc_file を使用（req/res/ready/shutdown）
@@ -18,6 +18,10 @@ Purpose:
   - shutdown: QTimer で shutdown.flag をポーリングし、ネスト QEventLoop（csv_mg 結合メイン）と dlg.exec 中でもループ終了＋トップレベル close。clear_shutdown_flag は mutex 取得成功後のみ（二重起動時にフラグを消さない）。
 
 History (latest 3):
+  - 1.4.65 (2026-06-30) csv_ld 進捗: show 直後 ensure_progress_dialog_front。ファイル確定直前に pump（sv/mg 累積後 Z順）。
+  - 1.4.64 (2026-06-29) modeless 二重 ensure_front を削除（ui_common ensure_front 強化に一本化）。
+  - 1.4.63 (2026-06-29) csv_ld/csv_sv: csv_sp 分割・同名確認・csv_mg 結合のモーダル表示中はファイル選択 IPC を CANCEL で拒否。
+  - 1.4.62 (2026-06-29) ui warmup: data_agg / dupli / csv_mg / csv_sp の import と _get_cfg を起動時に前倒し。
   - 1.4.61 (2026-06-13) csv_ld: 完了通知の自動 close は行わない（ui_dialog_progress 側で非モーダル show に変更済み）。
   - 1.4.60 (2026-06-06) 旧 COM WaitForm 解除（install_ribbon_startup_wait_dismiss）を削除。.ready 合図のみ。
   - 1.4.59 (2026-06-06) create_dialog 成功時に write_waitform_ready_signal（VBA DoEvents 待ち合図）。
@@ -77,7 +81,7 @@ from typing import Any
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-__version__ = "1.4.61"
+__version__ = "1.4.65"
 
 from ui_qt import ipc_file  # noqa: E402
 
@@ -335,6 +339,29 @@ def _close_stale_csv_sp_conflict_if_any() -> None:
         pass
 
 
+def _widget_still_visible(w: Any) -> bool:
+    if w is None:
+        return False
+    try:
+        if hasattr(w, "isVisible"):
+            return bool(w.isVisible())
+    except Exception:
+        return True
+    return True
+
+
+def _file_pick_blocked_by_active_modal(module_name: str, req_action: str) -> bool:
+    """csv_sp 分割等のモーダル表示中に ld/sv のファイル選択が割り込まないよう拒否する。"""
+    if module_name not in ("ui_qt.ui_csv_ld", "ui_qt.ui_csv_sv"):
+        return False
+    if str(req_action or "").strip().lower() in ("progress",):
+        return False
+    for active in (_CSV_SP_ACTIVE_SPLIT, _CSV_SP_ACTIVE_CONFLICT, _CSV_MG_ACTIVE_MERGE):
+        if _widget_still_visible(active):
+            return True
+    return False
+
+
 def _ensure_qapp() -> QApplication:
     """QApplication を必ず1つだけ用意する。"""
     global _QAPP
@@ -390,6 +417,16 @@ def _claim_request(req_path: Path) -> Path:
         return work
     except Exception:
         return req_path
+
+
+def _payload_action(payload: dict[str, Any]) -> str:
+    """要求 payload から action を取り出す（req_dict 内を優先）。"""
+    rd = payload.get("req_dict")
+    if isinstance(rd, dict):
+        act = str(rd.get("action") or "").strip().lower()
+        if act:
+            return act
+    return str(payload.get("action") or "").strip().lower()
 
 
 def _extract_paths(req_path: Path, payload: dict[str, Any]) -> _ReqPaths:
@@ -767,6 +804,23 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
     if sheet_id == "":
         sheet_id = "_"
 
+    if _rd_action == "progress_nudge":
+        try:
+            _ensure_qapp()
+            from ui_qt.ui_dialog_progress import nudge_progress_dialogs_for_path
+
+            ppath = str(req_dict_early.get("progress_path") or "").strip()
+            nudged = nudge_progress_dialogs_for_path(ppath)
+            logger.info(
+                "[UI_DISPATCH] progress_nudge path=%s nudged=%s sheet_id=%s",
+                ppath,
+                nudged,
+                sheet_id,
+            )
+            return {"status": "OK", "nudged": int(nudged)}
+        except Exception as exc:
+            return _error_result("progress_nudge failed", exc)
+
     try:
         mod = __import__(module_name, fromlist=["*"])
         logger.debug(
@@ -784,6 +838,22 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
     req_dict = payload.get("req_dict")
     if not isinstance(req_dict, dict):
         req_dict = payload
+
+    _req_action_block = str(req_dict.get("action", "") or "").strip().lower()
+    if _file_pick_blocked_by_active_modal(module_name, _req_action_block):
+        logger.warning(
+            "[UI_DISPATCH] file pick blocked by active modal module=%s action=%s sheet_id=%s",
+            module_name,
+            _req_action_block or "-",
+            sheet_id,
+        )
+        try:
+            from ui_qt.ipc_file import write_waitform_ready_signal
+
+            write_waitform_ready_signal(int(parent_hwnd or 0))
+        except Exception:
+            pass
+        return {"status": "CANCEL", "path": ""}
 
     try:
         _ensure_qapp()
@@ -973,6 +1043,10 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
         if is_modeless:
             # show() できる場合は表示して即返す
             try:
+                if _req_action == "progress" and module_name == "ui_qt.ui_csv_ld":
+                    _app_ld_prog = QApplication.instance()
+                    if _app_ld_prog is not None:
+                        _pump_deferred_deletes(_app_ld_prog)
                 if _req_action == "progress" and module_name == "ui_qt.ui_csv_mg":
                     _close_stale_csv_mg_merge_if_any()
                 if _req_action == "progress" and module_name == "ui_qt.ui_csv_sp":
@@ -1082,6 +1156,13 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                 else:
                     if hasattr(dlg, "show"):
                         dlg.show()
+                        if _req_action == "progress" and module_name == "ui_qt.ui_csv_ld":
+                            try:
+                                from ui_qt.ui_dialog_progress import ensure_progress_dialog_front
+
+                                ensure_progress_dialog_front(dlg)
+                            except Exception:
+                                pass
                         if a == "progress":
                             logger.debug(
                                 "[CSV_LD_FLOW] ui_server: progress dialog show() called t=%.3f",
@@ -1357,6 +1438,12 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                     if got.get("status") == "OK":
                         if action == "csv_ld":
                             try:
+                                _app_ld = QApplication.instance()
+                                if _app_ld is not None:
+                                    _pump_deferred_deletes(_app_ld)
+                            except Exception:
+                                pass
+                            try:
                                 from core.csv_ld_progress_ack import (
                                     progress_closed_ack_path,
                                     reset_progress_closed_ack,
@@ -1382,6 +1469,19 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                                 get_window_rect=_get_window_rect,
                             )
                         elif action == "csv_sv":
+                            try:
+                                from core.progress_close_ack import (
+                                    progress_closed_ack_path,
+                                    reset_progress_closed_ack,
+                                )
+
+                                _closed = progress_closed_ack_path(
+                                    "csv_sv", str(sheet_id or "_")
+                                )
+                                reset_progress_closed_ack(_closed)
+                                closed_path = str(_closed)
+                            except Exception:
+                                closed_path = None
                             from ui_qt.ui_immediate_progress import try_show_immediate_progress_after_pick
 
                             try_show_immediate_progress_after_pick(
@@ -1393,7 +1493,7 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                                 phase_label="0/2 準備中...",
                                 detail="CSVを保存します",
                                 done_delay_ms=400,
-                                progress_closed_path=None,
+                                progress_closed_path=closed_path,
                                 get_window_rect=_get_window_rect,
                             )
                     return got
@@ -1405,6 +1505,34 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
         return {"status": "OK", "rc": int(rc)}
     except Exception as exc:
         return _error_result("create_dialog failed", exc)
+
+
+_UI_WARMUP_MODULES: tuple[str, ...] = (
+    "ui_qt.ui_data_agg",
+    "ui_qt.ui_dupli",
+    "ui_qt.ui_csv_mg",
+    "ui_qt.ui_csv_sp",
+)
+
+
+def _run_ui_warmup() -> None:
+    """初回 create_dialog の import / 設定 JSON 読込を起動時に吸収する。"""
+    for module_name in _UI_WARMUP_MODULES:
+        short = module_name.rsplit(".", 1)[-1]
+        try:
+            mod = __import__(module_name, fromlist=["*"])
+            logger.info("[UI_SERVER] warmup: %s imported", short)
+        except Exception as e:
+            logger.warning("[UI_SERVER] warmup skip import %s: %s", short, e)
+            continue
+        get_cfg = getattr(mod, "_get_cfg", None)
+        if not callable(get_cfg):
+            continue
+        try:
+            get_cfg()
+            logger.info("[UI_SERVER] warmup: %s cfg loaded", short)
+        except Exception as e:
+            logger.warning("[UI_SERVER] warmup skip cfg %s: %s", short, e)
 
 
 def main() -> int:
@@ -1459,6 +1587,7 @@ def main() -> int:
     try:
         _ensure_qapp()
         _start_shutdown_poll_timer()
+        _run_ui_warmup()
 
         inst = QApplication.instance()
         next_failed_cleanup_at = time.monotonic()
@@ -1504,6 +1633,21 @@ def main() -> int:
 
             try:
                 payload = _read_request_payload_with_retry(req_path)
+                if _payload_action(payload) == "progress_nudge":
+                    res = _dispatch(payload, source_req=req_path.name)
+                    rp_raw = str(payload.get("result_path") or "").strip()
+                    if rp_raw:
+                        _write_result(Path(rp_raw), res)
+                    if inst is not None:
+                        try:
+                            inst.processEvents()
+                        except Exception:
+                            pass
+                    try:
+                        req_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
                 paths = _extract_paths(req_path, payload)
             except Exception:
                 msg = f"failed to read req: {req_path}\n{traceback.format_exc()}"

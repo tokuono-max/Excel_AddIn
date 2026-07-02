@@ -3,10 +3,11 @@
     "File": "svc_warmup.json",
     "Purpose": "svc_server 初回起動時に事前ロードする action（B+ 常駐: 1 セッション 1 回のみ）。未指定・空ならウォームアップなし。",
     "CommentOutRule": "JSON は正式コメント不可。無効化したい要素は先頭に # を付ける（例: #data_agg）。unknown action として無視される。",
-    "BPlusNote": "操作ごとの svc_server 再起動は行わない。初回リボンまでの遅延削減に絞り、重い data_agg 等は初回利用時に load する。",
-    "Updated": "2026-06-16"
+    "BPlusNote": "操作ごとの svc_server 再起動は行わない。warmup_actions で初回リボンまでの handler import を前倒しする（data_agg 含む）。",
+    "Updated": "2026-06-26"
   },
   "warmup_actions": [
+    "data_agg",
     "csv_ld",
     "csv_mg",
     "csv_sv",
@@ -14,6 +15,7 @@
     "dupli",
     "row_dl",
     "col_dl",
-    "undo"
+    "undo",
+    "help"
   ]
 }

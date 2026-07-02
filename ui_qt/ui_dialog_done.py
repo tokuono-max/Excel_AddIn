@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_dialog_done.py
 Created: 2026-03-10
-Updated: 2026-04-08
-Version: 0.2.5
+Updated: 2026-07-02
+Version: 0.2.6
 Purpose:
   共通完了通知ダイアログ（DoneDialog）および create_done_dialog を提供する。
   ui_common の Done 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -17,6 +17,7 @@ Purpose:
   - 呼び出し側は ui_common.create_done_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
+  - 0.2.6 (2026-07-02) _prepare_done_before_show: サイズ確定→winId の順に変更。show 前 opacity 0、showEvent 後に配置確定して不透明化（大枠チラつき抑制）。
   - 0.2.5 (2026-06-13) showEvent: done_dialog_show_event_on_excel に一本化（EXCEL_LOCK=false 時は Excel を先に前面化しない）。
   - 0.2.4 (2026-04-08) 名前列幅を実ファイル名長＋上限で算出（短い名前での過剰幅を抑制）。req.output_dir を MSG_OUTPUT_DIR_PREFIX で表示。
   - 0.2.3 (2026-04-08) DEFAULT_WIDTH=0 時、一覧幅に合わせダイアログ幅を確保（行数・容量列の見切れ抑制）。items の rows/row_count・size_bytes フォールバック。
@@ -71,7 +72,7 @@ from ui_qt.ui_common import (
 # 定数: アイコン既定ピクセル（ui_common の _ICON_SIZE_M と揃える。ICON_SIZE 未指定時のフォールバック）
 _ICON_SIZE_M = 24
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 
 def _fmt_size_bytes(n: int, unit: str = "auto", decimals: int = 1) -> str:
@@ -138,6 +139,7 @@ class DoneDialog(QDialog):
         self._done_plain: Optional[QPlainTextEdit] = None
         self._done_list_lines: list[str] = []
         self._done_list_width_floor = 0
+        self._done_opacity_reveal_pending = False
 
         # 変数: 画面設定（done_cfg 未指定時は CSV_MG 用既定を _get_done_config で取得）
         _cfg = done_cfg if done_cfg is not None else _get_done_config()
@@ -419,6 +421,32 @@ class DoneDialog(QDialog):
                 )
             except Exception:
                 pass
+        self._schedule_done_opacity_reveal()
+
+    def _schedule_done_opacity_reveal(self) -> None:
+        """配置・前面化のあと不透明化する（show 前 opacity 0 の reveal）。"""
+        if not getattr(self, "_done_opacity_reveal_pending", False):
+            return
+        ph = int(self._parent_hwnd or 0)
+        rect = getattr(self, "_excel_rect", None)
+
+        def _reveal() -> None:
+            try:
+                if ph:
+                    center_on_excel(self, ph, rect)
+                    ensure_front(self, ph)
+            except Exception:
+                pass
+            try:
+                self.setWindowOpacity(1.0)
+                self._done_opacity_reveal_pending = False
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(0, _reveal)
+        except Exception:
+            _reveal()
 
     def _on_ok_and_close(self) -> None:
         """OK押下時: ロックしていた場合は Excel 操作を有効にしてから accept でダイアログを閉じる。"""
@@ -471,8 +499,8 @@ class DoneDialog(QDialog):
             pass
 
 
-def _prepare_done_before_show(dlg: DoneDialog) -> None:
-    """show 前にサイズ・タイトルバー・Excel 中央・オーナーを一度だけ適用する。"""
+def _ensure_done_native_window(dlg: DoneDialog) -> None:
+    """サイズ確定後にネイティブ HWND を一度だけ materialize する。"""
     try:
         dlg.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         dlg.winId()
@@ -482,6 +510,10 @@ def _prepare_done_before_show(dlg: DoneDialog) -> None:
             dlg.winId()
         except Exception:
             pass
+
+
+def _prepare_done_before_show(dlg: DoneDialog) -> None:
+    """show 前にサイズ・タイトルバー・Excel 中央・オーナーを一度だけ適用する。"""
     win_cfg = getattr(dlg, "_done_win_cfg", None) or {}
     try:
         dlg._prepare_done_list_content_for_autosize()
@@ -501,6 +533,7 @@ def _prepare_done_before_show(dlg: DoneDialog) -> None:
             dlg.resize(mw, dlg.height())
     except Exception:
         pass
+    _ensure_done_native_window(dlg)
     if not win_cfg.get("SHOW_MINIMIZE", False) and not win_cfg.get("SHOW_MAXIMIZE", False):
         try:
             hwnd = int(dlg.winId()) if hasattr(dlg, "winId") else 0
@@ -526,9 +559,10 @@ def _prepare_done_before_show(dlg: DoneDialog) -> None:
         except Exception:
             pass
     try:
-        dlg.setWindowOpacity(1.0)
+        dlg._done_opacity_reveal_pending = True
+        dlg.setWindowOpacity(0.0)
     except Exception:
-        pass
+        dlg._done_opacity_reveal_pending = False
 
 
 def create_done_dialog(

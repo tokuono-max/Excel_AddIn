@@ -3,12 +3,13 @@
 Python: 3.12
 Module: svc/svc_trm_ex.py
 Created: 2026-03-19
-Version: 1.2.4
+Version: 1.2.5
 Purpose:
   文頭・文末トリム（選択範囲の空白削除）。選択範囲または有効データ領域を走査し、
   文頭/文末の件数表示後に「文頭削除」「文末削除」「全削除」のいずれかを実行。Undo 対応。
   画面は ui_qt.ui_trm_ex + config/ui_trm_ex.json。
 History (latest 1):
+  - 1.2.5 (2026-06-29) 進捗クローズ ACK を共通モジュールへ統一（15秒+nudge）。3秒タイムアウトの独自待機を廃止。
   - 1.2.4 (2026-05-05) progress n/m の定義を変更。m=前後空白ありセル数（choice に応じた変換対象数）、n=変換中セル数。
   - 1.2.3 (2026-05-05) progress n/m をセル数ベースへ変更。更新頻度はセル進捗ステップ＋時間間引きで制御。
   - 1.2.2 (2026-05-05) 選択範囲を Areas 対応（歯抜け選択対応）。進捗 done/total を常時送信し n/m 表示を 0/0 にならないよう修正。
@@ -31,16 +32,18 @@ if _root not in sys.path:
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger  # noqa: E402
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle  # noqa: E402
+from core.progress_close_ack import (  # noqa: E402
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
 
 _TRM_HL_SIDECAR_GLOB = "trm_ex_hl_rects_*.pkl"
 
 logger = get_logger(__name__)
 _trm_diag = get_diag_logger("hc_csv_tool.diag.trm_ex")
 _perf = get_perf_logger("svc.svc_trm_ex.perf")
-__version__ = "1.2.4"
-
-_PROGRESS_CLOSE_ACK_TIMEOUT_SEC = 3.0
-_PROGRESS_CLOSE_ACK_POLL_SEC = 0.03
+__version__ = "1.2.5"
 
 
 def _elapsed_ms(since: float) -> int:
@@ -263,29 +266,6 @@ def _progress_path(sheet_id: str) -> Path:
     d = Path(get_ipc_root()) / "progress"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"progress_trm_ex_{sheet_id}.pkl"
-
-
-def _progress_closed_ack_path(sheet_id: str) -> Path:
-    d = Path(get_ipc_root()) / "progress"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"progress_trm_ex_closed_{sheet_id}.pkl"
-
-
-def _wait_progress_closed_ack(path: Optional[Path], timeout_sec: float = _PROGRESS_CLOSE_ACK_TIMEOUT_SEC) -> None:
-    if path is None:
-        return
-    p = path
-    t0 = time.perf_counter()
-    while True:
-        try:
-            if p.exists():
-                return
-        except Exception:
-            return
-        if (time.perf_counter() - t0) >= max(0.05, float(timeout_sec)):
-            logger.info("[TRM_EX] progress close ack timeout: %s", str(p))
-            return
-        time.sleep(_PROGRESS_CLOSE_ACK_POLL_SEC)
 
 
 def _progress_write(path: Path, obj: dict[str, Any]) -> None:
@@ -540,7 +520,7 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
     ptr_a, ptr_w, ptr_s, ph = ctx
     sid = str(sheet_id or "").strip() or f"trm_ex_{abs(id(ptr_s))}"
     progress_path = _progress_path(sid)
-    progress_closed_path = _progress_closed_ack_path(sid)
+    progress_closed_path = progress_closed_ack_path("trm_ex", sid)
     progress_close_waited = False
     logger.info("[TRM_EX] 開始")
     _perf_trm("after_context", t_flow, hwnd=ph)
@@ -760,8 +740,7 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             return
 
         try:
-            if progress_closed_path.exists():
-                progress_closed_path.unlink(missing_ok=True)
+            reset_progress_closed_ack(progress_closed_path)
         except Exception:
             pass
         _progress_write(
@@ -931,7 +910,13 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
                 },
             )
             if not progress_close_waited:
-                _wait_progress_closed_ack(progress_closed_path)
+                wait_progress_closed_with_nudge(
+                    progress_closed_path,
+                    parent_hwnd=ph,
+                    sheet_id=sid,
+                    progress_path=progress_path,
+                    log_tag="TRM_EX",
+                )
                 progress_close_waited = True
             _perf_trm("abort_write_failed", t_flow)
             _trm_trace("abort_write_failed", t_flow)
@@ -965,7 +950,13 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             },
         )
         if not progress_close_waited:
-            _wait_progress_closed_ack(progress_closed_path)
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                parent_hwnd=ph,
+                sheet_id=sid,
+                progress_path=progress_path,
+                log_tag="TRM_EX",
+            )
             progress_close_waited = True
         _submit_done_ui(ph, sid, done_msg, cfg.get("SCREENS", {}).get("DONE", {}).get("TITLE") or "文頭・文末トリム", cfg)
         _perf_trm("after_done_ui", t_flow)

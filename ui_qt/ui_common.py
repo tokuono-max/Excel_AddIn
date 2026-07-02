@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_common.py
 Created: 2026-02-12
-Updated: 2026-06-06
-Version: 0.2.87
+Updated: 2026-06-29
+Version: 0.2.89
 Purpose:
   Qt UI サーバ側の「表示共通」を集約する。
   - owner 設定（Excel HWND）
@@ -14,6 +14,7 @@ Purpose:
   - create_dialog はハブとして action に応じ ui_dialog_* へ委譲。Done/Progress 実装は ui_dialog_done / ui_dialog_progress に移管。
 
 History (latest 3):
+  - 0.2.89 (2026-06-29) ensure_front: bring_excel_first=false 時は AttachThreadInput+nudge を全ダイアログに適用（ヘルプ限定だった強化を共通化）。SFW 失敗時も同様。
   - 0.2.87 (2026-06-06) 旧 COM WaitForm 解除（dismiss_vba_wait_form / install_ribbon_startup_wait_dismiss）を削除。.ready 合図は ui_server / core_cursor 経由。
   - 0.2.86 (2026-06-06) dismiss_vba_wait_form_best_effort: ui プロセスから VBA WaitForm を閉じる共通入口（svc 裏スレッド COM 回避）。
   - 0.2.85 (2026-05-05) prepare_dialog_excel_center_before_show: プロパティ _hc_prepare_skip_ensure_front=true のとき prepare 内 ensure_front をスキップ（画面個別のちらつき切り分け用）。
@@ -918,7 +919,14 @@ def prepare_dialog_excel_center_before_show(
         _skip_ensure = False
     if not _skip_ensure:
         try:
-            ensure_front(w, ph)
+            bring_first = False
+            try:
+                _prop = w.property("_hc_ensure_front_bring_excel_first")
+                if _prop is not None:
+                    bring_first = bool(_prop)
+            except Exception:
+                pass
+            ensure_front(w, ph, bring_excel_first=bring_first)
         except Exception:
             pass
     log_ui_fg_phase("prepare:after_ensure_front", ph, w)
@@ -1090,19 +1098,36 @@ def _reapply_win32_owner_if_missing(w: QWidget, owner_hwnd: int) -> None:
         pass
 
 
+def _strengthen_widget_foreground(hwnd: int, *, bring_excel_first: bool, sfw_ok: Optional[bool]) -> None:
+    """SFW だけでは足りない環境向けに AttachThreadInput と Z 順 nudge を行う。"""
+    h = int(hwnd or 0)
+    if not h or _w32 is None:
+        return
+    strengthen = (not bring_excel_first) or (sfw_ok is False)
+    if not strengthen:
+        return
+    try:
+        if hasattr(_w32, "set_foreground_window_attach_input"):
+            _w32.set_foreground_window_attach_input(h)
+        if hasattr(_w32, "nudge_top_level_to_foreground"):
+            _w32.nudge_top_level_to_foreground(h)
+    except Exception:
+        pass
+
+
 def ensure_front(
     w: QWidget,
     parent_hwnd: int,
     *,
-    bring_excel_first: bool = True,
+    bring_excel_first: bool = False,
     _ff_retry: int = 0,
 ) -> None:
     """
     Method Name : ensure_front
     Arguments   : w (QWidget), parent_hwnd (int), bring_excel_first (bool)
     Return      : None
-    機能概要    : 既定では Excel 前面→ダイアログ前面の順で最前面化する。
-    bring_excel_first=False のときは Excel を前面に引き上げずダイアログのみ前面化（完了通知・他アプリ前面時の緩和）。
+    機能概要    : 既定ではダイアログのみ前面化する（bring_excel_first=false）。
+    bring_excel_first=True のときだけ Excel 前面→ダイアログ前面の順で最前面化する（EXCEL_LOCK 付き完了通知等）。
     GW_OWNER が欠ける環境では set_owner を再適用する。SetForegroundWindow が失敗した場合は短い遅延で数回まで再試行する。
     """
     _trace(f"[ensure_front:enter] parent_hwnd={parent_hwnd}")
@@ -1193,20 +1218,9 @@ def ensure_front(
             _ff_diag_ensure_front_snapshot(
                 "ensure_front:after_sfw", owner, hwnd, sfw_ok=sfw_ok
             )
-            _help_use_attach = False
-            try:
-                _help_use_attach = bool(w.property("_hc_help_dialog"))
-            except Exception:
-                _help_use_attach = False
-            if _help_use_attach and hwnd:
-                try:
-                    from core import core_w32 as _cw_help_fg
-
-                    _cw_help_fg.set_foreground_window_attach_input(hwnd)
-                    if hasattr(_cw_help_fg, "nudge_top_level_to_foreground"):
-                        _cw_help_fg.nudge_top_level_to_foreground(int(hwnd))
-                except Exception:
-                    pass
+            _strengthen_widget_foreground(
+                hwnd, bring_excel_first=bring_excel_first, sfw_ok=sfw_ok
+            )
             _trace(f"[ensure_front:done] widget_hwnd={hwnd} parent_hwnd={parent_hwnd}")
             _trace_widget_rect(w, "ensure_front:直後(前面化で位置が変わったか)")
             _ff_diag(
@@ -1400,11 +1414,11 @@ def _set_owner_hwnd(w: QWidget, owner_hwnd: int) -> None:
 
 def ensure_owner_and_front(w: QWidget, owner_hwnd: int) -> None:
     """
-    ダイアログ表示直後に呼ぶ。Excel との親子関係を設定し、Excel→ダイアログの順で前面化する。
+    ダイアログ表示直後に呼ぶ。Excel との親子関係を設定し、ダイアログを Excel 手前に前面化する。
     親子関係によりタスクバーにダイアログが出なくなり、常に Excel の手前に表示される。
     """
     _set_owner_hwnd(w, owner_hwnd)
-    ensure_front(w, owner_hwnd)
+    ensure_front(w, owner_hwnd, bring_excel_first=False)
 
 
 def apply_tooltip_if_set(widget, cfg: dict, key: str = "TOOLTIP") -> None:

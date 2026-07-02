@@ -93,16 +93,98 @@ def test_ensure_svc_ui_bridge_parallel_spawns_all(monkeypatch):
 
 def test_ensure_python_hosts_ready_registers_book(monkeypatch):
     calls: list[int | None] = []
+    marks: list[int] = []
 
+    monkeypatch.setattr(svc_host, "all_python_hosts_running", lambda: False)
     monkeypatch.setattr(svc_host, "ensure_svc_ui_bridge_parallel", lambda: None)
 
     def fake_register(*, target_hwnd=None):
         calls.append(target_hwnd)
 
+    def fake_mark(hwnd):
+        marks.append(int(hwnd))
+
     monkeypatch.setattr("core.excel_session.register_book", fake_register)
+    monkeypatch.setattr(
+        "core.excel_book_register_gate.mark_excel_book_registered",
+        fake_mark,
+    )
 
     svc_host.ensure_python_hosts_ready(6229952)
     assert calls == [6229952]
+    assert marks == [6229952]
 
     svc_host.ensure_python_hosts_ready(0)
     assert calls == [6229952]
+    assert marks == [6229952]
+
+
+def test_ensure_python_hosts_ready_fast_path_skips_all(monkeypatch):
+    calls: list[int | None] = []
+
+    monkeypatch.setattr(svc_host, "all_python_hosts_running", lambda: True)
+    monkeypatch.setattr(
+        "core.excel_book_register_gate.should_skip_register_book_com",
+        lambda hwnd: True,
+    )
+    def must_not_spawn():
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(svc_host, "ensure_svc_ui_bridge_parallel", must_not_spawn)
+    monkeypatch.setattr(
+        "core.excel_session.register_book",
+        lambda **kw: calls.append(kw.get("target_hwnd")),
+    )
+
+    svc_host.ensure_python_hosts_ready(6229952)
+    assert calls == []
+
+
+def test_ensure_python_hosts_ready_register_only_when_hosts_up(monkeypatch):
+    calls: list[int | None] = []
+    marks: list[int] = []
+
+    monkeypatch.setattr(svc_host, "all_python_hosts_running", lambda: True)
+    monkeypatch.setattr(
+        "core.excel_book_register_gate.should_skip_register_book_com",
+        lambda hwnd: False,
+    )
+
+    def fake_parallel():
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(svc_host, "ensure_svc_ui_bridge_parallel", fake_parallel)
+
+    def fake_register(*, target_hwnd=None):
+        calls.append(target_hwnd)
+
+    monkeypatch.setattr("core.excel_session.register_book", fake_register)
+    monkeypatch.setattr(
+        "core.excel_book_register_gate.mark_excel_book_registered",
+        lambda hwnd: marks.append(int(hwnd)),
+    )
+
+    svc_host.ensure_python_hosts_ready(999)
+    assert calls == [999]
+    assert marks == [999]
+
+
+def test_ensure_svc_ui_bridge_parallel_skips_when_all_running(monkeypatch):
+    spawned = {"svc": 0}
+    prewarm = {"called": False}
+
+    monkeypatch.setattr(svc_host, "clear_shutdown_flags", lambda _r: None)
+    monkeypatch.setattr(svc_host, "all_python_hosts_running", lambda: True)
+    monkeypatch.setattr(
+        svc_host,
+        "spawn_svc_server",
+        lambda: spawned.__setitem__("svc", spawned["svc"] + 1),
+    )
+    monkeypatch.setattr(
+        "core.ribbon_invoke.start_xlwings_import_prewarm",
+        lambda: prewarm.__setitem__("called", True),
+    )
+
+    svc_host.ensure_svc_ui_bridge_parallel()
+    assert spawned["svc"] == 0
+    assert prewarm["called"] is False

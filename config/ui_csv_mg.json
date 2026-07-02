@@ -27,6 +27,8 @@
         "ICON（全画面共通ルール）": "アイコン表示は全画面で同一ルール。未設定・空＝アイコン表示なし。設定値あり＝その標準アイコンを表示。画面単位でオン/オフを分けず、このルールを標準とする。",
         "ICON_設定可能値": "Information, Info（情報）, Warning, Warn（警告）, Critical（エラー）, Question（質問）のいずれか。大文字小文字は区別しない。空・未設定でアイコン非表示。"
       },
+      "AUTOFIT_MAX_ROWS": "結合展開後の列幅AutoFit。今回書込行数がこの値未満なら実施、以上なら省略。0または省略で常に実施。",
+      "AUTOFILTER": "trueかつ空シート先頭書込・mode_append のみ1行目ヘッダにオートフィルタ＋1行目固定。省略時false。",
       "MAIN": {
         "説明": "結合画面（メイン）の設定。",
         "WINDOW": "上記 WINDOW と同じ構造。",
@@ -129,6 +131,8 @@
     }
   },
   "_separator": "------------------- 以下、設定本体 -------------------",
+  "AUTOFIT_MAX_ROWS": 0,
+  "AUTOFILTER": true,
   "WINDOW": {
     "RESIZABLE": true,
     "SHOW_MINIMIZE": false,

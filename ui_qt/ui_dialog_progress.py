@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_dialog_progress.py
 Created: 2026-03-10
-Updated: 2026-06-14
-Version: 0.1.36
+Updated: 2026-07-02
+Version: 0.1.48
 Purpose:
   進捗表示用ダイアログ（ProgressDialog）および create_progress_dialog を提供する。
   ui_common の Progress 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -16,7 +16,18 @@ Purpose:
   - 呼び出し側は ui_common.create_progress_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
-  - 0.1.36 (2026-06-14) DONE/ERROR は seq が古くても必ず処理（CSV読込オートフィット後の終端 pickle 取りこぼし防止）。
+  - 0.1.48 (2026-07-02) immediate progress: opacity reveal（show 前 0→前面化→不透明化）。showEvent で前面化を cursor COM より先に実行。
+  - 0.1.47 (2026-06-30) _tick 例外を WARNING 化。nudge 後の pickle/terminal ログ・DONE 取りこぼし救済。show 同期前面化は refront_on_run（csv_ld）のみ。
+  - 0.1.46 (2026-06-30) RUN 再前面化は refront_on_run 指定時のみ（csv_mg AutoFilter 中の COM 競合で DONE 未処理になるのを防止）。
+  - 0.1.45 (2026-06-30) 進捗前面化: show 直後の同期 _apply_show_front_stack。excel_lock 時 RUN で再前面化。ensure_progress_dialog_front 公開。
+  - 0.1.44 (2026-06-29) 右下 N/M に工程/分割ラベル。progress_unit 時はバーを pct 専用に。
+  - 0.1.43 (2026-06-29) excel_lock 時は bring_excel_first 既定 false（進捗が Excel 背後に回るのを防止）。
+  - 0.1.42 (2026-06-29) DONE 時バー95%以上は close 待ちを最大350msに短縮。工程3のバー足踏みは creep 側で抑制。
+  - 0.1.41 (2026-06-29) _close_after_done: done_cfg 未設定時に空 dict へ潰さず _get_done_config フォールバックを有効化。
+  - 0.1.40 (2026-06-29) 診断ログ・ポーリング再起動ログを progress_closed_path 指定全機能へ拡張（csv_mg 等）。
+  - 0.1.39 (2026-06-29) 進捗クローズ: ウォッチドッグ・ACK 必達・nudge 対応。csv_ld 終端ログを INFO/DIAG 化。
+  - 0.1.38 (2026-06-29) data_agg の DONE/close を DEBUG 化（本番・デバッグ進捗の hc_csv.log ノイズ削減）。
+  - 0.1.37 (2026-06-29) RUN 進捗ログを DEBUG 化。data_agg 本番/デバッグは RUN ログ省略。ラベルを [UI_PROGRESS] に統一。
   - 0.1.35 (2026-06-13) 砂時計: Qt WaitCursor を進捗表示中に付与。Excel xlWait は遅延再武装。
   - 0.1.34 (2026-06-13) DONE 終了アニメ中は直前工程ではなく「仕上げ中…」を表示（オートフィット表示の残りを防止）。
   - 0.1.33 (2026-06-13) DONE: バー100%到達後に「完了」表示。終了アニメは加速 creep で短時間化。
@@ -105,7 +116,94 @@ try:
 except Exception:  # pragma: no cover
     _diag_ui = None  # type: ignore
 
-__version__ = "0.1.36"
+__version__ = "0.1.48"
+
+# 進捗 pickle 更新の RUN ログ間隔（秒）。data_agg 以外は DEBUG でこの間隔以上ごとに出力。
+_PROGRESS_RUN_LOG_INTERVAL_SEC = 1.0
+_PROGRESS_WATCHDOG_INTERVAL_MS = 1000
+
+
+def _has_progress_closed_ack_req(req: dict[str, Any] | None) -> bool:
+    """progress_closed_path 指定あり（終端 ACK・診断ログ対象）。"""
+    if not isinstance(req, dict):
+        return False
+    return bool(str(req.get("progress_closed_path") or "").strip())
+
+
+_is_csv_ld_progress_req = _has_progress_closed_ack_req  # 後方互換
+
+
+def _progress_path_str_equal(path_a: Any, path_b: str) -> bool:
+    """進捗 pickle パス比較（resolve 済み・大文字小文字は OS 依存）。"""
+    target = str(path_b or "").strip()
+    if not target:
+        return False
+    raw = str(path_a or "").strip()
+    if not raw:
+        return False
+    try:
+        return Path(raw).resolve() == Path(target).resolve()
+    except Exception:
+        return raw == target
+
+
+def _read_progress_pickle_status(progress_path: Path) -> str:
+    """進捗 pickle の status を読む（診断用。失敗時は空またはエラー文字列）。"""
+    try:
+        if not progress_path.exists() or progress_path.stat().st_size <= 0:
+            return ""
+        d = ipc_file.read_pickle(progress_path)
+        if isinstance(d, dict):
+            return str(d.get("status", "") or "").strip()
+    except Exception as exc:
+        return f"read_err:{exc}"
+    return ""
+
+
+def _is_data_agg_progress_req(req: dict[str, Any] | None) -> bool:
+    """本番一括 / マスタデバッグ等、データ集約の進捗（RUN ログを省略する対象）。"""
+    if not isinstance(req, dict):
+        return False
+    if str(req.get("data_agg_batch_scenario_id") or "").strip():
+        return True
+    if "data_agg_batch_notify_parent" in req:
+        return True
+    if callable(req.get("master_debug_cancel_cb")):
+        return True
+    cp = str(req.get("cancel_request_path") or "").strip().lower()
+    return "data_agg_batch" in cp or "data_agg_master_debug" in cp
+
+
+def _progress_run_log(logger: Any, req: dict[str, Any], **fields: Any) -> None:
+    """RUN 更新ログ: data_agg は出さない。それ以外は DEBUG（1秒間隔は呼び出し側）。"""
+    if logger is None or _is_data_agg_progress_req(req):
+        return
+    try:
+        logger.debug(
+            "[UI_PROGRESS] ProgressDialog RUN seq=%s pct=%s phase=%s detail=%s done=%s total=%s",
+            fields.get("seq"),
+            fields.get("pct"),
+            fields.get("phase"),
+            fields.get("detail"),
+            fields.get("done"),
+            fields.get("total"),
+        )
+    except Exception:
+        pass
+
+
+def _progress_terminal_log(logger: Any, req: dict[str, Any], msg: str, *args: Any) -> None:
+    """DONE / close 等の終端ログ。data_agg は DEBUG、それ以外は INFO。"""
+    if logger is None:
+        return
+    try:
+        if _is_data_agg_progress_req(req):
+            logger.debug(msg, *args)
+        else:
+            logger.info(msg, *args)
+    except Exception:
+        pass
+
 
 # DONE 受信後、バーが 100% に達するまでの暫定ラベル（直前工程名のまま残さない）
 DONE_FINISH_INTERIM_LABEL = "仕上げ中…"
@@ -150,6 +248,31 @@ def _format_progress_status_text(
     return body
 
 
+def _format_progress_count_label(
+    done: Any,
+    total: Any,
+    *,
+    progress_unit: str = "",
+) -> str:
+    """右下 N/M。progress_unit=phase|split のときラベル付き。"""
+    try:
+        dn = int(done) if done is not None else 0
+    except (TypeError, ValueError):
+        dn = 0
+    try:
+        tn = int(total) if total is not None else 0
+    except (TypeError, ValueError):
+        tn = 0
+    unit = str(progress_unit or "").strip().lower()
+    if unit == "split":
+        return f"分割 {dn} / {tn}"
+    if unit == "phase":
+        return f"工程 {dn} / {tn}"
+    if total is not None:
+        return f"{dn} / {tn}"
+    return "0 / 0"
+
+
 def compute_run_progress_bar_pct(
     *,
     svc_pct: int,
@@ -177,7 +300,7 @@ def compute_run_progress_bar_pct(
     return (pct, tgt)
 
 
-from core.csv_ld_progress_ack import (
+from core.progress_close_ack import (
     compute_bar_creep_next_value,
     compute_done_close_delay_ms,
     compute_done_finish_creep_pct,
@@ -244,6 +367,8 @@ class ProgressDialog(QDialog):
         _closed_path_raw = str(req.get("progress_closed_path") or "").strip()
         self._progress_closed_path: Optional[Path] = Path(_closed_path_raw) if _closed_path_raw else None
         self._progress_closed_ack_written = False
+        self._terminal_handled = False
+        self._done_close_scheduled = False
         # 変数: 表示時点の Excel 矩形（svc が GetWindowRect で渡した場合、中央配置のずれを抑える）
         _er = req.get("excel_rect")
         self._excel_rect = None
@@ -254,11 +379,21 @@ class ProgressDialog(QDialog):
                 pass
         # 変数: csv_ld 等が True を渡した場合のみ、表示中は Excel 操作を無効化
         self._excel_lock = bool(req.get("excel_lock", False))
+        # csv_ld 等: RUN 更新中に Excel が FG を奪ったときだけ再前面化（csv_mg の COM 処理と競合しないよう明示 opt-in）
+        self._refront_on_run = bool(req.get("refront_on_run", False))
         # 変数: True のときは show 後 1 フレームだけ中央・オーナー（HWND が遅延するため）
         self._no_native_window = bool(req.get("no_native_window", False))
+        self._progress_opacity_reveal_pending = bool(
+            req.get("opacity_reveal_before_show", False)
+        )
         # データ集約デバッグ等: Excel ではなく親 QWidget の中央に進捗を置く
         self._center_on_parent_widget = bool(req.get("center_on_parent_widget", False))
-        self._bring_excel_first = bool(req.get("bring_excel_first", True))
+        _bef_raw = req.get("bring_excel_first")
+        if _bef_raw is not None:
+            self._bring_excel_first = bool(_bef_raw)
+        else:
+            # excel_lock 中は Excel を先に前面化しない（進捗・完了通知が背後に回るのを防ぐ）
+            self._bring_excel_first = not bool(req.get("excel_lock", False))
         # 完了時に親 QWidget を close するか（データ集約デバッグ等は False）
         self._req: dict = dict(req) if isinstance(req, dict) else {}
         try:
@@ -373,6 +508,10 @@ class ProgressDialog(QDialog):
         self._timer.setInterval(_poll)
         self._timer.timeout.connect(self._tick)  # type: ignore[attr-defined]
         self._timer.start()
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(_PROGRESS_WATCHDOG_INTERVAL_MS)
+        self._watchdog_timer.timeout.connect(self._watchdog_tick)  # type: ignore[attr-defined]
+        self._watchdog_timer.start()
         self._bar_creep_timer = QTimer(self)
         self._bar_creep_timer.setInterval(_poll)
         self._bar_creep_timer.timeout.connect(self._bar_creep_tick)  # type: ignore[attr-defined]
@@ -443,13 +582,45 @@ class ProgressDialog(QDialog):
             pass
 
     def _stop_progress_timers(self) -> None:
-        for _tm in (getattr(self, "_timer", None), getattr(self, "_bar_creep_timer", None)):
+        for _tm in (
+            getattr(self, "_timer", None),
+            getattr(self, "_bar_creep_timer", None),
+            getattr(self, "_watchdog_timer", None),
+        ):
             if _tm is None:
                 continue
             try:
                 _tm.stop()
             except Exception:
                 pass
+
+    def _ensure_poll_timers_active(self) -> None:
+        """ポーリングタイマーが止まっていたら再開する（イベントループ取りこぼし対策）。"""
+        for name in ("_timer", "_bar_creep_timer", "_watchdog_timer"):
+            tm = getattr(self, name, None)
+            if tm is None:
+                continue
+            try:
+                if not tm.isActive():
+                    tm.start()
+                    if _log is not None and _has_progress_closed_ack_req(self._req):
+                        _log.info(
+                            "[UI_PROGRESS] poll timer restarted name=%s path=%s",
+                            name,
+                            self._progress_path,
+                        )
+            except Exception:
+                pass
+
+    def _watchdog_tick(self) -> None:
+        """終端 pickle の取りこぼし対策。メインタイマー停止時は再起動して _tick を再試行。"""
+        try:
+            if getattr(self, "_terminal_handled", False):
+                return
+            self._ensure_poll_timers_active()
+            self._tick()
+        except Exception:
+            pass
 
     def _on_cancel_clicked(self) -> None:
         p = str(getattr(self, "_cancel_request_path", "") or "").strip()
@@ -514,13 +685,123 @@ class ProgressDialog(QDialog):
         except Exception:
             pass
 
+    def _apply_show_front_stack(self) -> None:
+        """表示直後にオーナー→中央→前面化を同期適用（comdlg32 終了後 FG=Excel の空白を埋める）。"""
+        ph = int(self._parent_hwnd or 0)
+        rect = getattr(self, "_excel_rect", None)
+        try:
+            show_tb = False
+            try:
+                show_tb = bool(self.property("_hc_show_taskbar"))
+            except Exception:
+                show_tb = False
+
+            if getattr(self, "_no_native_window", False):
+                if getattr(self, "_center_on_parent_widget", False):
+                    pw = self.parentWidget()
+                    if pw is not None:
+                        try:
+                            ph_eff = int(pw.winId())
+                        except Exception:
+                            ph_eff = 0
+                        center_on_parent_widget(self, pw)
+                        if not show_tb and ph_eff:
+                            _set_owner_hwnd(self, ph_eff)
+                    if ph_eff:
+                        ensure_front(
+                            self, ph_eff, bring_excel_first=self._bring_excel_first
+                        )
+                        if not getattr(self, "_progress_opacity_reveal_pending", False):
+                            try:
+                                self.setWindowOpacity(1.0)
+                            except Exception:
+                                pass
+                        return
+                ph_eff = ph
+                if ph_eff == 0:
+                    pw = self.parentWidget()
+                    if pw is not None:
+                        try:
+                            ph_eff = int(pw.winId())
+                        except Exception:
+                            ph_eff = 0
+                if ph_eff or rect:
+                    if not show_tb and ph_eff:
+                        _set_owner_hwnd(self, ph_eff)
+                    center_on_excel(self, ph_eff, rect)
+                    if ph_eff:
+                        ensure_front(
+                            self, ph_eff, bring_excel_first=self._bring_excel_first
+                        )
+                if not getattr(self, "_progress_opacity_reveal_pending", False):
+                    try:
+                        self.setWindowOpacity(1.0)
+                    except Exception:
+                        pass
+            elif ph or rect:
+                if not show_tb and ph:
+                    _set_owner_hwnd(self, ph)
+                center_on_excel(self, ph, rect)
+                if ph:
+                    ensure_front(self, ph, bring_excel_first=self._bring_excel_first)
+        except Exception:
+            pass
+
+    def _maybe_refront_if_excel_lock(self) -> None:
+        """refront_on_run かつ excel_lock 時のみ、短い間隔で再前面化（csv_ld 向け。mg/sv の COM 中は呼ばない）。"""
+        if not getattr(self, "_refront_on_run", False):
+            return
+        if not getattr(self, "_excel_lock", False):
+            return
+        try:
+            if not self.isVisible():
+                return
+        except Exception:
+            return
+        import time as _t
+
+        now = _t.monotonic()
+        last = float(getattr(self, "_last_excel_lock_refront_mono", 0.0) or 0.0)
+        if now - last < 0.35:
+            return
+        self._last_excel_lock_refront_mono = now
+        try:
+            self._apply_show_front_stack()
+        except Exception:
+            pass
+
+    def _schedule_progress_opacity_reveal(self) -> None:
+        """show 前 opacity 0 の進捗を、前面化後に不透明化してから砂時計 ON。"""
+        if not getattr(self, "_progress_opacity_reveal_pending", False):
+            return
+
+        def _reveal() -> None:
+            try:
+                if getattr(self, "_refront_on_run", False):
+                    self._apply_show_front_stack()
+            except Exception:
+                pass
+            try:
+                self.setWindowOpacity(1.0)
+                self._progress_opacity_reveal_pending = False
+            except Exception:
+                pass
+            try:
+                self._progress_wait_cursor_on()
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(0, _reveal)
+        except Exception:
+            _reveal()
+
     def showEvent(self, event) -> None:  # type: ignore[override]
         """
         【概要】
-            excel_lock なら Excel 操作をロック。表示直後 1 回だけオーナー→中央→前面化（ネイティブ／no_native 共通方針でちらつき抑制）。
+            excel_lock なら Excel 操作をロック。表示直後に同期でオーナー→中央→前面化（イベントキュー遅延で背後に見えるのを防ぐ）。
         """
         try:
-            self._progress_wait_cursor_on()
             if getattr(self, "_excel_lock", False) and self._parent_hwnd:
                 try:
                     enable_excel_window(self._parent_hwnd, False)
@@ -529,72 +810,26 @@ class ProgressDialog(QDialog):
             if _log is not None:
                 import time as _t
                 _log.debug("[CSV_LD_FLOW] ProgressDialog showEvent (window visible) t=%.3f", _t.time())
-
-            def _after_show_stack() -> None:
-                ph = int(self._parent_hwnd or 0)
-                rect = getattr(self, "_excel_rect", None)
-                try:
-                    show_tb = False
-                    try:
-                        show_tb = bool(self.property("_hc_show_taskbar"))
-                    except Exception:
-                        show_tb = False
-
-                    if getattr(self, "_no_native_window", False):
-                        if getattr(self, "_center_on_parent_widget", False):
-                            pw = self.parentWidget()
-                            if pw is not None:
-                                try:
-                                    ph_eff = int(pw.winId())
-                                except Exception:
-                                    ph_eff = 0
-                                center_on_parent_widget(self, pw)
-                                if not show_tb and ph_eff:
-                                    _set_owner_hwnd(self, ph_eff)
-                                if ph_eff:
-                                    ensure_front(
-                                        self, ph_eff, bring_excel_first=self._bring_excel_first
-                                    )
-                                try:
-                                    self.setWindowOpacity(1.0)
-                                except Exception:
-                                    pass
-                                return
-                        ph_eff = ph
-                        if ph_eff == 0:
-                            pw = self.parentWidget()
-                            if pw is not None:
-                                try:
-                                    ph_eff = int(pw.winId())
-                                except Exception:
-                                    ph_eff = 0
-                        if ph_eff or rect:
-                            if not show_tb and ph_eff:
-                                _set_owner_hwnd(self, ph_eff)
-                            center_on_excel(self, ph_eff, rect)
-                            if ph_eff:
-                                ensure_front(
-                                    self, ph_eff, bring_excel_first=self._bring_excel_first
-                                )
-                        try:
-                            self.setWindowOpacity(1.0)
-                        except Exception:
-                            pass
-                    elif ph or rect:
-                        if not show_tb and ph:
-                            _set_owner_hwnd(self, ph)
-                        center_on_excel(self, ph, rect)
-                        if ph:
-                            ensure_front(
-                                self, ph, bring_excel_first=self._bring_excel_first
-                            )
-                except Exception:
-                    pass
-
-            QTimer.singleShot(0, _after_show_stack)
+            self._ensure_poll_timers_active()
         except Exception:
             pass
         super().showEvent(event)
+        # csv_ld（refront_on_run）のみ show 直後の同期前面化。mg/sv の excel_lock COM 中は競合回避。
+        if getattr(self, "_refront_on_run", False):
+            try:
+                self._apply_show_front_stack()
+            except Exception:
+                pass
+        if getattr(self, "_progress_opacity_reveal_pending", False):
+            try:
+                self._schedule_progress_opacity_reveal()
+            except Exception:
+                pass
+        else:
+            try:
+                self._progress_wait_cursor_on()
+            except Exception:
+                pass
 
     def _compact_progress_after_cancel_hidden(self) -> None:
         """キャンセル行を隠したあと、stretch とウィンドウ高さを内容に寄せる（固定高さの余白低減）。"""
@@ -741,6 +976,9 @@ class ProgressDialog(QDialog):
 
             # 判定: 完了時は「完了」表示を短時間残してから _close_after_done で進捗を閉じ、必要なら完了通知を表示
             if status_u == "DONE":
+                if getattr(self, "_terminal_handled", False):
+                    return
+                self._terminal_handled = True
                 self._bar_creep_done_phase = True
                 if self._timer is not None:
                     try:
@@ -768,13 +1006,26 @@ class ProgressDialog(QDialog):
                         _n = len(self._pending_done_items)
                     except Exception:
                         _n = 0
-                    _log.info(
-                        "[CSV_MG] ProgressDialog DONE seq=%s show_done_dialog=%s done_items=%s done_delay_ms=%s",
+                    _progress_terminal_log(
+                        _log,
+                        self._req,
+                        "[UI_PROGRESS] ProgressDialog DONE seq=%s show_done_dialog=%s done_items=%s done_delay_ms=%s path=%s",
                         seq,
                         self._pending_show_done_dialog,
                         _n,
                         _close_ms,
+                        self._progress_path,
                     )
+                if _diag_ui is not None and _has_progress_closed_ack_req(self._req):
+                    try:
+                        _diag_ui.info(
+                            "[UI_PROGRESS_DIAG] DONE seq=%s path=%s close_ms=%s",
+                            seq,
+                            self._progress_path,
+                            _close_ms,
+                        )
+                    except Exception:
+                        pass
                 total = d.get("total")
                 done = d.get("done", total)
                 _done_lbl = str(d.get("phase", "") or "").strip() or "完了"
@@ -790,6 +1041,8 @@ class ProgressDialog(QDialog):
                 _close_ms = compute_done_close_delay_ms(
                     prev_bar, creep, poll_iv, _close_ms, done_creep=done_creep
                 )
+                if prev_bar >= 95:
+                    _close_ms = min(_close_ms, 350)
                 if creep <= 0 or prev_bar >= 100:
                     self._bar.setValue(100)
                     self._label_file.setText(_done_lbl)
@@ -801,7 +1054,13 @@ class ProgressDialog(QDialog):
                     except Exception:
                         pass
                 if done is not None and total is not None:
-                    self._label_count.setText(f"{done} / {total}")
+                    self._label_count.setText(
+                        _format_progress_count_label(
+                            done,
+                            total,
+                            progress_unit=str(d.get("progress_unit") or ""),
+                        )
+                    )
                 # ラベル更新後のレイアウト確定を待ち、前面化＋中央を 1 回だけ（直後の二重センタ廃止）
                 if (
                     getattr(self, "_center_on_parent_widget", False)
@@ -809,7 +1068,9 @@ class ProgressDialog(QDialog):
                 ) or self._parent_hwnd or getattr(self, "_excel_rect", None):
                     QTimer.singleShot(16, lambda: _progress_done_recenter(self))
                 # 完了表示を短時間維持してから _close_after_done（req の done_delay_ms、または DONE pickle の done_delay_ms）
-                QTimer.singleShot(_close_ms, self._close_after_done)
+                if not getattr(self, "_done_close_scheduled", False):
+                    self._done_close_scheduled = True
+                    QTimer.singleShot(_close_ms, self._close_after_done)
                 return
 
             if status_u == "RUN" and _log is not None:
@@ -818,17 +1079,18 @@ class ProgressDialog(QDialog):
                     _now = _t.time()
                     _last_t = float(getattr(self, "_run_info_last_t", 0.0) or 0.0)
                     _last_seq = int(getattr(self, "_run_info_last_seq", -1) or -1)
-                    if seq != _last_seq and (_now - _last_t) >= 1.0:
+                    if seq != _last_seq and (_now - _last_t) >= _PROGRESS_RUN_LOG_INTERVAL_SEC:
                         self._run_info_last_t = _now
                         self._run_info_last_seq = seq
-                        _log.info(
-                            "[CSV_MG] ProgressDialog RUN seq=%s pct=%s phase=%s detail=%s done=%s total=%s",
-                            seq,
-                            d.get("pct"),
-                            d.get("phase"),
-                            d.get("detail"),
-                            d.get("done"),
-                            d.get("total"),
+                        _progress_run_log(
+                            _log,
+                            self._req,
+                            seq=seq,
+                            pct=d.get("pct"),
+                            phase=d.get("phase"),
+                            detail=d.get("detail"),
+                            done=d.get("done"),
+                            total=d.get("total"),
                         )
                 except Exception:
                     pass
@@ -876,6 +1138,9 @@ class ProgressDialog(QDialog):
                 return
 
             if status_u == "ERROR":
+                if getattr(self, "_terminal_handled", False):
+                    return
+                self._terminal_handled = True
                 self._stop_progress_timers()
                 detail = str(d.get("detail", "") or d.get("msg", "") or "").strip()
                 self._teardown_progress_shared_state(
@@ -911,9 +1176,16 @@ class ProgressDialog(QDialog):
                     _close_all_modeless()
                 except Exception:
                     pass
+                try:
+                    self._write_progress_closed_ack()
+                except Exception:
+                    pass
                 return
 
             if status_u == "CANCEL":
+                if getattr(self, "_terminal_handled", False):
+                    return
+                self._terminal_handled = True
                 self._stop_progress_timers()
                 pw_cancel = self._req.get("partner_widget_after_cancel")
                 self._teardown_progress_shared_state(
@@ -1069,6 +1341,10 @@ class ProgressDialog(QDialog):
                             _log.warning("[UI_PROGRESS_DIAG] CANCEL partner branch: %s", _e3)
                         except Exception:
                             pass
+                try:
+                    self._write_progress_closed_ack()
+                except Exception:
+                    pass
                 return
 
             # 通常の進捗更新: phase_i / phase / current_file / pct / done / total をラベル・バーに反映
@@ -1106,13 +1382,17 @@ class ProgressDialog(QDialog):
                     except (TypeError, ValueError):
                         svc_pct_explicit = False
                 if not svc_pct_explicit:
-                    try:
-                        to_i = int(total) if total is not None else 0
-                        dn_i = int(done) if done is not None else None
-                        if to_i > 0 and dn_i is not None:
-                            pct = max(0, min(99, int(dn_i * 100 / to_i)))
-                    except (TypeError, ValueError):
-                        pct = 0
+                    _pu = str(d.get("progress_unit") or "").strip().lower()
+                    if _pu not in ("phase", "split"):
+                        try:
+                            to_i = int(total) if total is not None else 0
+                            dn_i = int(done) if done is not None else None
+                            if to_i > 0 and dn_i is not None:
+                                pct = max(0, min(99, int(dn_i * 100 / to_i)))
+                        except (TypeError, ValueError):
+                            pct = 0
+                    else:
+                        pct = int(getattr(self, "_progress_display_target", 0) or 0)
                 self._progress_display_target = max(
                     int(getattr(self, "_progress_display_target", 0) or 0),
                     int(pct),
@@ -1174,14 +1454,33 @@ class ProgressDialog(QDialog):
             else:
                 self._bar.setValue(pct)
 
-            # 進捗バー右下: 全体（フェーズ）の done/total。フェーズ内 N/M は detail 行に表示。
+            # 進捗バー右下: 全体 N/M（工程 or 分割）。行数等は detail 行。
+            _pu_lbl = str(d.get("progress_unit") or "").strip()
             if done is not None and total is not None:
-                self._label_count.setText(f"{done} / {total}")
+                self._label_count.setText(
+                    _format_progress_count_label(done, total, progress_unit=_pu_lbl)
+                )
             elif total is not None:
-                self._label_count.setText(f"0 / {total}")
+                self._label_count.setText(
+                    _format_progress_count_label(0, total, progress_unit=_pu_lbl)
+                )
             else:
                 self._label_count.setText("0 / 0")
-        except Exception:
+            if status_u == "RUN":
+                self._maybe_refront_if_excel_lock()
+        except Exception as exc:
+            if _log is not None:
+                try:
+                    _log.warning(
+                        "[UI_PROGRESS] ProgressDialog _tick failed path=%s terminal=%s done_scheduled=%s: %s",
+                        self._progress_path,
+                        getattr(self, "_terminal_handled", False),
+                        getattr(self, "_done_close_scheduled", False),
+                        exc,
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
             return
 
     def _write_progress_closed_ack(self) -> None:
@@ -1193,6 +1492,11 @@ class ProgressDialog(QDialog):
                 return
             p = getattr(self, "_progress_closed_path", None)
             if p is None:
+                if _log is not None and _has_progress_closed_ack_req(self._req):
+                    _log.warning(
+                        "[UI_PROGRESS] progress closed ack skipped: no progress_closed_path path=%s",
+                        self._progress_path,
+                    )
                 return
             try:
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -1200,8 +1504,19 @@ class ProgressDialog(QDialog):
                 pass
             ipc_file.write_pickle(p, {"status": "CLOSED", "ts_ms": int(time.time() * 1000)})
             self._progress_closed_ack_written = True
-        except Exception:
-            pass
+            if _log is not None:
+                _log.info("[UI_PROGRESS] progress close ack written path=%s", p)
+            if _diag_ui is not None and _is_csv_ld_progress_req(self._req):
+                try:
+                    _diag_ui.info("[UI_PROGRESS_DIAG] ack written path=%s", p)
+                except Exception:
+                    pass
+        except Exception as exc:
+            if _log is not None:
+                try:
+                    _log.warning("[UI_PROGRESS] progress close ack write failed: %s", exc)
+                except Exception:
+                    pass
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
@@ -1243,16 +1558,19 @@ class ProgressDialog(QDialog):
                 pass
             if _log is not None:
                 import time as _t
-                _log.info(
-                    "[CSV_MG] ProgressDialog _close_after_done (closing progress) t=%.3f",
+                _progress_terminal_log(
+                    _log,
+                    self._req,
+                    "[UI_PROGRESS] ProgressDialog _close_after_done (closing progress) t=%.3f path=%s",
                     _t.time(),
+                    self._progress_path,
                 )
             items = self._pending_done_items if isinstance(getattr(self, "_pending_done_items", None), list) else []
             detail_text = (getattr(self, "_pending_done_detail_text", None) or "").strip()
             show_done = bool(getattr(self, "_pending_show_done_dialog", False)) and (
                 bool(items) or bool(detail_text)
             )
-            done_cfg = getattr(self, "_done_cfg", None) or {}
+            done_cfg = getattr(self, "_done_cfg", None)
             ph = int(self._parent_hwnd or 0)
             excel_rect = getattr(self, "_excel_rect", None)
             self._defer_closed_ack = True
@@ -1318,15 +1636,6 @@ class ProgressDialog(QDialog):
                                 pass
                 except Exception:
                     pass
-            try:
-                self._defer_closed_ack = False
-                self._write_progress_closed_ack()
-            except Exception:
-                pass
-            try:
-                self._defer_closed_ack = False
-            except Exception:
-                pass
             # 3) csv_sp 等: 分割画面の exec を終了。次イベントで accept/close し、_close_after_done 内からの exec 再入を避ける
             try:
                 pw = self._req.get("partner_widget_after_done")
@@ -1352,8 +1661,21 @@ class ProgressDialog(QDialog):
                     QTimer.singleShot(0, _finish_partner)
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as exc:
+            if _log is not None:
+                try:
+                    _log.warning("[UI_PROGRESS] _close_after_done error: %s", exc)
+                except Exception:
+                    pass
+        finally:
+            try:
+                self._defer_closed_ack = False
+            except Exception:
+                pass
+            try:
+                self._write_progress_closed_ack()
+            except Exception:
+                pass
 
 
 def raise_csv_sp_partner_progress(parent_hwnd: int) -> None:
@@ -1386,6 +1708,132 @@ def raise_csv_sp_partner_progress(parent_hwnd: int) -> None:
             pass
 
 
+def dismiss_progress_dialogs_for_path(progress_path: str) -> int:
+    """同一 progress_path の既存 ProgressDialog を閉じる（連続実行時のゾンビ防止）。"""
+    target = str(progress_path or "").strip()
+    if not target:
+        return 0
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        return 0
+    dismissed = 0
+    for w in list(app.topLevelWidgets()):
+        if not isinstance(w, ProgressDialog):
+            continue
+        try:
+            if str(getattr(w, "_progress_path", "")) != target:
+                continue
+            if _log is not None:
+                _log.info(
+                    "[UI_PROGRESS] dismiss stale progress dlg_id=%s path=%s visible=%s",
+                    id(w),
+                    target,
+                    w.isVisible(),
+                )
+            w.close()
+            dismissed += 1
+        except Exception:
+            pass
+    if dismissed > 0:
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+    return dismissed
+
+
+def nudge_progress_dialogs_for_path(progress_path: str) -> int:
+    """progress_path に一致する可視 ProgressDialog の終端 pickle 処理を再試行する。戻り値は対象数。"""
+    target = str(progress_path or "").strip()
+    if not target:
+        return 0
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        return 0
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+    nudged = 0
+    for w in app.topLevelWidgets():
+        if not isinstance(w, ProgressDialog):
+            continue
+        try:
+            if not _progress_path_str_equal(getattr(w, "_progress_path", ""), target):
+                continue
+            terminal_before = bool(getattr(w, "_terminal_handled", False))
+            done_scheduled_before = bool(getattr(w, "_done_close_scheduled", False))
+            pickle_before = _read_progress_pickle_status(w._progress_path)
+            if _log is not None:
+                _log.info(
+                    "[UI_PROGRESS] progress nudge dlg_id=%s path=%s terminal_before=%s "
+                    "done_scheduled_before=%s pickle_status=%s",
+                    id(w),
+                    target,
+                    terminal_before,
+                    done_scheduled_before,
+                    pickle_before or "(empty)",
+                )
+            w._ensure_poll_timers_active()
+            w._tick()
+            terminal_after = bool(getattr(w, "_terminal_handled", False))
+            done_scheduled_after = bool(getattr(w, "_done_close_scheduled", False))
+            pickle_after = _read_progress_pickle_status(w._progress_path)
+            # DONE が pickle にあるのに close 未予約なら terminal フラグを戻して再試行
+            if (
+                pickle_after.upper() == "DONE"
+                and not done_scheduled_after
+                and terminal_after
+            ):
+                w._terminal_handled = False
+                w._tick()
+                terminal_after = bool(getattr(w, "_terminal_handled", False))
+                done_scheduled_after = bool(getattr(w, "_done_close_scheduled", False))
+            elif pickle_after.upper() == "DONE" and not done_scheduled_after and not terminal_after:
+                w._tick()
+                terminal_after = bool(getattr(w, "_terminal_handled", False))
+                done_scheduled_after = bool(getattr(w, "_done_close_scheduled", False))
+            if _log is not None:
+                _log.info(
+                    "[UI_PROGRESS] progress nudge done dlg_id=%s path=%s terminal_after=%s "
+                    "done_scheduled_after=%s pickle_status=%s",
+                    id(w),
+                    target,
+                    terminal_after,
+                    done_scheduled_after,
+                    pickle_after or "(empty)",
+                )
+            nudged += 1
+        except Exception as exc:
+            if _log is not None:
+                try:
+                    _log.warning(
+                        "[UI_PROGRESS] progress nudge failed path=%s: %s",
+                        target,
+                        exc,
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
+    return nudged
+
+
+def _unwrap_progress_dialog(showable: Any) -> Any:
+    if type(showable).__name__ == "_CsvLdProgressWrapper":
+        return getattr(showable, "_dlg", showable)
+    return showable
+
+
+def ensure_progress_dialog_front(showable: Any) -> None:
+    """show() 直後に進捗ダイアログを同期前面化（ラッパ／ProgressDialog 両対応）。"""
+    dlg = _unwrap_progress_dialog(showable)
+    if hasattr(dlg, "_apply_show_front_stack"):
+        try:
+            dlg._apply_show_front_stack()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def create_progress_dialog(
     req_dict: dict,
     parent_hwnd: int,
@@ -1396,12 +1844,13 @@ def create_progress_dialog(
     【概要】
         進捗ダイアログを生成し、サイズ調整後にモデルレス保護へ登録して返す。
     【補足】
-        中央・オーナー・前面化は showEvent 直後 1 回に集約（show 前の二重配置とちらつきを避ける）。
-        no_native_window 時も opacity は 1 のまま（透明化による点滅を避ける）。
+        中央・オーナー・前面化は showEvent（refront_on_run 時）と ld 向け ensure_progress_dialog_front で同期適用。
+        opacity_reveal_before_show 時は show 前 opacity 0、reveal 後に不透明化。
     """
     dlg = ProgressDialog(req_dict, int(parent_hwnd or 0), parent_widget, progress_cfg=progress_cfg)
     _cfg = progress_cfg if isinstance(progress_cfg, dict) else _get_progress_config()
     win_cfg = (_cfg or {}).get("WINDOW") or {}
+    _opacity_reveal = bool(req_dict.get("opacity_reveal_before_show", False))
     if not bool(req_dict.get("no_native_window", False)):
         try:
             dlg.adjustSize()
@@ -1415,12 +1864,12 @@ def create_progress_dialog(
             except Exception:
                 pass
         try:
-            dlg.setWindowOpacity(1.0)
+            dlg.setWindowOpacity(0.0 if _opacity_reveal else 1.0)
         except Exception:
             pass
     else:
         try:
-            dlg.setWindowOpacity(1.0)
+            dlg.setWindowOpacity(0.0 if _opacity_reveal else 1.0)
         except Exception:
             pass
     _keep_modeless(dlg)
@@ -1428,4 +1877,10 @@ def create_progress_dialog(
 
 
 # 公開シンボル（他モジュールから from ui_dialog_progress import ProgressDialog 等で参照可能）
-__all__ = ["ProgressDialog", "create_progress_dialog", "raise_csv_sp_partner_progress"]
+__all__ = [
+    "ProgressDialog",
+    "create_progress_dialog",
+    "ensure_progress_dialog_front",
+    "nudge_progress_dialogs_for_path",
+    "raise_csv_sp_partner_progress",
+]

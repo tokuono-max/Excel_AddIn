@@ -2197,7 +2197,7 @@ def _apply_join_key_search_across_file_passes(
             pass
 
     try:
-        logger.info(
+        logger.debug(
             "[DATA_AGG] join_search enter pool_rows=%s file_passes=%s",
             len(global_pool),
             len(file_passes),

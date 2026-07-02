@@ -3,15 +3,15 @@
 Pythonバージョン: 3.12
 モジュール名: core_cursor
 作成日: 2026-02-12
-更新日: 2026-06-06
-バージョン: 0.3.5
+更新日: 2026-06-29
+バージョン: 0.3.6
 概要:
     Excelアドインの「砂時計（Application.Cursor=xlWait）」を、Python側（UI表示完了）で解除する共通モジュール。
     VBA側で起動した保険タイマ（Application.OnTime）も、VBAマクロ呼び出しにより停止する。
     ※Polling（Application.OnTimeの定周期監視）は副作用（STA占有）を招きやすいため、本方式では採用しない。
 
 改訂履歴:
-    0.3.5: 2026-06-06 notify_wait_form_ready を .ready 合図ファイル方式に変更（COM Application.Run 廃止）。notify_ui_ready から WaitForm COM 解除を削除。
+    0.3.6: 2026-06-29 UI_READY 内訳を DEBUG 化（完了1行のみ INFO）。CURSOR_WAIT_ON は同一 sheet_id で間引き。
     0.3.4: 2026-06-06 data_agg/csv_tool の svc 側砂時計 API を削除（進捗は ProgressDialog のみ）。
     0.3.3: 2026-06-06 進捗砂時計は ProgressDialog の表示開始/終了のみ（ForceCursorOnProgress・保険タイマなし）。tick 系は互換のため no-op。
     0.3.2: 2026-06-04 progress_dialog_wait_cursor_on/tick/off（進捗ダイアログ表示中の砂時計を全機能で共通化）。
@@ -53,6 +53,9 @@ _LOG = get_logger("core.hc_cursor")
 _VBA_CURSOR_GUARD_START: str = "Main.StartCursorGuardTimer"
 _VBA_CURSOR_FORCE_ON: str = "Main.ForceCursorOn"
 _VBA_CURSOR_PROGRESS_ON: str = "Main.ForceCursorOnProgress"
+
+_CURSOR_ON_LAST_LOG_MONO: dict[str, float] = {}
+_CURSOR_ON_LOG_INTERVAL_SEC: float = 3.0
 
 # ==============================================================================
 # Data models
@@ -112,7 +115,7 @@ def notify_excel_wait_cursor_on(
             return
         try:
             excel.Run(vba_force_on_macro, sid)
-            _LOG.info("CURSOR_WAIT_ON: Run(%s) ok sheet_id=%s", vba_force_on_macro, sid)
+            _log_cursor_wait_on_ok(vba_force_on_macro, sid)
             return
         except Exception as ex:
             _LOG.warning(
@@ -122,13 +125,13 @@ def notify_excel_wait_cursor_on(
             )
         try:
             excel.Cursor = _XL_CURSOR_WAIT
-            _LOG.info("CURSOR_WAIT_ON: Cursor xlWait (COM fallback) sheet_id=%s", sid)
+            _log_cursor_wait_on_ok(vba_force_on_macro, sid, fallback=True)
         except Exception as ex:
             _LOG.warning("CURSOR_WAIT_ON: Cursor ON failed: %s", str(ex))
         if str(vba_guard_macro or "").strip():
             try:
                 excel.Run(vba_guard_macro, sid)
-                _LOG.info("CURSOR_WAIT_ON: Run(%s) ok", vba_guard_macro)
+                _log_cursor_wait_on_ok(vba_guard_macro, sid)
             except Exception as ex:
                 _LOG.warning("CURSOR_WAIT_ON: guard timer Run failed: %s", str(ex))
     finally:
@@ -251,7 +254,7 @@ def notify_ui_ready(
     timer_cancel_ok = False
     err = ""
 
-    _LOG.info(
+    _LOG.debug(
         "UI_READY: start vba_cancel_macro=%s reason=%s", vba_cancel_macro, cancel_reason
     )
 
@@ -260,7 +263,7 @@ def notify_ui_ready(
         import win32com.client  # noqa: WPS433
     except Exception as ex:
         err = "pywin32 import failed: " + str(ex)
-        return _finish(t0, cursor_off_ok, timer_cancel_ok, err)
+        return _finish(t0, cursor_off_ok, timer_cancel_ok, err, cancel_reason)
 
     pythoncom.CoInitialize()
     try:
@@ -271,15 +274,15 @@ def notify_ui_ready(
         )
         if excel is None:
             err = "GetActiveObject(Excel.Application) failed"
-            return _finish(t0, cursor_off_ok, timer_cancel_ok, err)
+            return _finish(t0, cursor_off_ok, timer_cancel_ok, err, cancel_reason)
 
-        _LOG.info("UI_READY: Excel acquired")
+        _LOG.debug("UI_READY: Excel acquired")
 
         # 1) 砂時計解除（外部COMで直接変更）
         try:
             excel.Cursor = _XL_CURSOR_DEFAULT
             cursor_off_ok = True
-            _LOG.info("UI_READY: Cursor OFF sent (xlDefault)")
+            _LOG.debug("UI_READY: Cursor OFF sent (xlDefault)")
         except Exception as ex:
             if not err:
                 err = "Cursor OFF failed: " + str(ex)
@@ -289,7 +292,7 @@ def notify_ui_ready(
         try:
             excel.Run(vba_cancel_macro, cancel_reason)
             timer_cancel_ok = True
-            _LOG.info("UI_READY: Guard timer cancel requested (%s)", vba_cancel_macro)
+            _LOG.debug("UI_READY: Guard timer cancel requested (%s)", vba_cancel_macro)
         except Exception as ex:
             if not err:
                 err = "VBA cancel timer failed: " + str(ex)
@@ -311,12 +314,34 @@ def notify_ui_ready(
         except Exception:
             _LOG.warning("UI_READY: CoUninitialize failed (ignored)")
 
-    return _finish(t0, cursor_off_ok, timer_cancel_ok, err)
+    return _finish(t0, cursor_off_ok, timer_cancel_ok, err, cancel_reason)
 
 
 # ==============================================================================
 # Internal helpers
 # ==============================================================================
+def _log_cursor_wait_on_ok(
+    macro: str, sheet_id: str, *, fallback: bool = False
+) -> None:
+    """CURSOR_WAIT_ON 成功ログ（同一 sheet_id は数秒に1回まで INFO、以降 DEBUG）。"""
+    sid = str(sheet_id or "batch")
+    now = time.monotonic()
+    last = float(_CURSOR_ON_LAST_LOG_MONO.get(sid, 0.0) or 0.0)
+    frequent = (now - last) < _CURSOR_ON_LOG_INTERVAL_SEC
+    if not frequent:
+        _CURSOR_ON_LAST_LOG_MONO[sid] = now
+    if fallback:
+        msg = "CURSOR_WAIT_ON: Cursor xlWait (COM fallback) sheet_id=%s"
+        args: tuple[Any, ...] = (sid,)
+    else:
+        msg = "CURSOR_WAIT_ON: Run(%s) ok sheet_id=%s"
+        args = (macro, sid)
+    if frequent:
+        _LOG.debug(msg, *args)
+    else:
+        _LOG.info(msg, *args)
+
+
 def _get_excel_app(*, win32com_client, try_count: int, interval_ms: int):
     """Excel.Application を取得する（短時間リトライ）。
 
@@ -341,7 +366,7 @@ def _get_excel_app(*, win32com_client, try_count: int, interval_ms: int):
             return win32com_client.GetActiveObject("Excel.Application")
         except Exception as ex:
             if i == 0:
-                _LOG.info("UI_READY: GetActiveObject retry start: %s", str(ex))
+                _LOG.debug("UI_READY: GetActiveObject retry start: %s", str(ex))
             time.sleep(sleep_sec)
             i = i + 1
 
@@ -349,22 +374,29 @@ def _get_excel_app(*, win32com_client, try_count: int, interval_ms: int):
 
 
 def _finish(
-    t0: float, cursor_off_ok: bool, timer_cancel_ok: bool, err: str
+    t0: float,
+    cursor_off_ok: bool,
+    timer_cancel_ok: bool,
+    err: str,
+    cancel_reason: str = "",
 ) -> CursorGuardResult:
     """戻り値を整形し、最終ログを出す。"""
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     ok = cursor_off_ok or timer_cancel_ok
+    reason = str(cancel_reason or "-")
 
     if ok:
         _LOG.info(
-            "UI_READY: done ok elapsed_ms=%.1f cursor_off_ok=%s timer_cancel_ok=%s",
+            "UI_READY: done ok reason=%s elapsed_ms=%.1f cursor_off_ok=%s timer_cancel_ok=%s",
+            reason,
             elapsed_ms,
             str(cursor_off_ok),
             str(timer_cancel_ok),
         )
     else:
         _LOG.error(
-            "UI_READY: done ng elapsed_ms=%.1f cursor_off_ok=%s timer_cancel_ok=%s err=%s",
+            "UI_READY: done ng reason=%s elapsed_ms=%.1f cursor_off_ok=%s timer_cancel_ok=%s err=%s",
+            reason,
             elapsed_ms,
             str(cursor_off_ok),
             str(timer_cancel_ok),

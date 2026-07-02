@@ -58,6 +58,11 @@ from core.core_progress_wait import wait_after_progress_done
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
 from core.core_cursor import notify_wait_form_ready, progress_dialog_wait_cursor_on
 from core.csv_tool_progress_ui import enrich_progress_req_dict
+from core.csv_tool_progress_pct import (
+    PROGRESS_UNIT_SPLIT,
+    csv_sp_pct,
+    macro_progress_nm,
+)
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 from svc.svc_csv_ld import (  # noqa: E402
@@ -67,7 +72,7 @@ from svc.svc_csv_ld import (  # noqa: E402
 
 logger = get_logger(__name__)
 _sp_diag = get_diag_logger("hc_csv_tool.diag.csv_sp")
-__version__ = "2.5.10"
+__version__ = "2.5.11"
 
 _SP_CFG_CACHE: dict[str, Any] | None = None
 
@@ -1111,13 +1116,10 @@ def split_csv(
     # 進捗が 0/0 で止まらないよう、ループ前に初期状態を 1 回書く（UI がすぐ読めるように）
     _progress_write({
         "status": "RUN",
-        "phase_i": 0,
-        "phase_total": phase_total,
+        **macro_progress_nm(0, phase_total, unit=PROGRESS_UNIT_SPLIT),
         "phase": "準備中",
         "current_file": "",
-        "done": 0,
-        "total": phase_total,
-        "pct": 0,
+        "pct": csv_sp_pct(0, phase_total),
     })
 
     logger.info(
@@ -1179,13 +1181,16 @@ def split_csv(
 
                 _progress_write({
                     "status": "RUN",
-                    "phase_i": phase_i,
-                    "phase_total": phase_total,
-                    "phase": "分割保存中",
+                    **macro_progress_nm(phase_i, phase_total, unit=PROGRESS_UNIT_SPLIT),
+                    "phase": f"{phase_i}/{phase_total} 分割保存中",
+                    "detail": file_name,
                     "current_file": file_name,
-                    "done": phase_i,
-                    "total": phase_total,
-                    "pct": int(100 * (phase_i - 1) / phase_total) if phase_total else 0,
+                    "pct": csv_sp_pct(
+                        phase_i,
+                        phase_total,
+                        intra_done=done_accum,
+                        intra_total=max(1, total_rows),
+                    ),
                 })
 
                 try:
@@ -1220,24 +1225,24 @@ def split_csv(
                     logger.warning("[CSV_SP] 書込失敗 ファイル=%s: %s", os.path.basename(out_path), e)
 
                 done_accum += row_count
-                pct = min(99, int(100 * done_accum / total_rows)) if total_rows else 99
                 _progress_write({
                     "status": "RUN",
-                    "phase_i": phase_i,
-                    "phase_total": phase_total,
-                    "phase": "分割保存中",
+                    **macro_progress_nm(phase_i, phase_total, unit=PROGRESS_UNIT_SPLIT),
+                    "phase": f"{phase_i}/{phase_total} 分割保存中",
+                    "detail": file_name,
                     "current_file": file_name,
-                    "done": done_accum,
-                    "total": total_rows,
-                    "pct": pct,
+                    "pct": csv_sp_pct(
+                        phase_i,
+                        phase_total,
+                        intra_done=done_accum,
+                        intra_total=max(1, total_rows),
+                    ),
                 })
 
             _progress_write({
                 "status": "DONE",
-                "phase_i": phase_total,
-                "phase_total": phase_total,
-                "done": total_rows,
-                "total": total_rows,
+                **macro_progress_nm(phase_total, phase_total, unit=PROGRESS_UNIT_SPLIT),
+                "phase": f"{phase_total}/{phase_total} 完了",
                 "pct": 100,
                 "show_done_dialog": True,
                 "done_items": done_items,

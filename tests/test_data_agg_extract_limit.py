@@ -111,3 +111,42 @@ def test_enforce_warn_continues(monkeypatch) -> None:
         read_count=9999,
     )
     enforce_extract_truncation_policy([rec], probe_caller="excel_batch_submit")
+
+
+def test_enforce_preview_master_aggregates_warnings_by_item(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    monkeypatch.setenv("HC_DATA_AGG_EXTRACT_TRUNC_POLICY", "warn")
+    recs = [
+        ExtractTruncationRecord(
+            file_path="a1.xlsx",
+            item_label="出荷日",
+            limit=100,
+            read_count=100,
+        ),
+        ExtractTruncationRecord(
+            file_path="a2.xlsx",
+            item_label="出荷日",
+            limit=100,
+            read_count=100,
+        ),
+        ExtractTruncationRecord(
+            file_path="b1.xlsx",
+            item_label="機器名",
+            limit=50,
+            read_count=50,
+        ),
+    ]
+    with caplog.at_level(logging.WARNING, logger="svc.data_agg_extract_limit"):
+        enforce_extract_truncation_policy(
+            recs,
+            scenario_id="sc1",
+            probe_caller="master_preview",
+            preview_master_mode=True,
+        )
+    warn_lines = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warn_lines) == 2
+    assert all("files=" in ln for ln in warn_lines)
+    assert not any("a1.xlsx" in ln for ln in warn_lines)

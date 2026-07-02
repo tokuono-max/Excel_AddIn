@@ -17,6 +17,12 @@ def test_progress_dialog_show_event_arms_wait_cursor() -> None:
     assert "self._progress_wait_cursor_on()" in _PROGRESS_SRC
     assert "_schedule_progress_wait_cursor_retries" in _PROGRESS_SRC
     assert "setOverrideCursor(Qt.CursorShape.WaitCursor)" in _PROGRESS_SRC
+    show_body = _PROGRESS_SRC.split("def showEvent(self, event)", 1)[1].split(
+        "\n    def ", 1
+    )[0]
+    # showEvent 先頭では cursor を付けない（前面化→reveal 後）
+    first_lines = show_body.strip().split("\n")[:8]
+    assert not any("_progress_wait_cursor_on()" in ln for ln in first_lines)
 
 
 def test_progress_dialog_teardown_disarms_wait_cursor() -> None:

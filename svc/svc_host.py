@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_host.py
 Created: 2026-02-11
-Updated: 2026-06-16
-Version: 0.4.41
+Updated: 2026-06-26
+Version: 0.4.42
 Purpose:
   UI Host（common foundation）。
   - Qt UI Server 起動・生存判定・終了要求を 1か所に集約する。
@@ -13,6 +13,7 @@ Purpose:
   - ブリッジ常駐（ensure_bridge）で load_csv を RunPython なしで受け付け、待ち時間短縮。
 
 History (latest 3):
+  - 0.4.42 (2026-06-26): 常駐ホスト生存時のリボン fast path（spawn/prewarm/register_book COM 省略）。
   - 0.4.41 (2026-06-16): restart_svc_server ログを recovery restart に変更（救済用である旨を明示）。
   - 0.4.40 (2026-06-14): B+ — 常駐 svc_server を維持。事前 COM 再起動を廃止（汚染時のみ recycle）。
   - 0.4.39 (2026-06-14): A+ — excel_com_session 経由で COM recycle を全 Excel action に統一。
@@ -56,7 +57,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 # ruff: noqa: E402
 # ==============================================================================
-__version__ = "0.4.41"
+__version__ = "0.4.42"
 import os
 import shlex
 import subprocess
@@ -174,6 +175,10 @@ def _excel_startup_svc_ui_bridge_register(target_hwnd: int, perf_prefix: str) ->
             int((time.perf_counter() - t0) * 1000),
         )
         _register_book(target_hwnd=target_hwnd)
+        if hwnd > 0:
+            from core.excel_book_register_gate import mark_excel_book_registered
+
+            mark_excel_book_registered(hwnd)
         plog.info(
             "%s phase=after_register_book cumulative_ms=%d",
             perf_prefix,
@@ -563,6 +568,15 @@ def is_bridge_running() -> bool:
     return is_main_runner_running()
 
 
+def all_python_hosts_running() -> bool:
+    """svc / ui / bridge がすべて mutex 生存しているか。"""
+    return (
+        is_svc_server_running()
+        and is_ui_server_running()
+        and is_bridge_running()
+    )
+
+
 def spawn_svc_server() -> None:
     """svc_server を起動する（未起動想定）。"""
 
@@ -833,25 +847,69 @@ def ensure_python_hosts_ready(target_hwnd: int | None = None) -> None:
     マルチ Excel / 新規ブックでは Workbook_Open の register_book 前にリボンが押されることがあるため、
     target_hwnd を渡してブック登録も行う。
 
+    常駐ホストがすべて生存かつ HWND 登録済み IPC がある場合は spawn / prewarm / register_book COM を省略する。
     B+: 常駐 svc_server は HWND キャッシュでマルチ Excel を扱い、COM 汚染時のみ recycle する。
     """
     hwnd = int(target_hwnd or 0)
+    plog = get_perf_logger(f"{__name__}.ensure_hosts")
+    t0 = time.perf_counter()
+
+    if all_python_hosts_running():
+        from core.excel_book_register_gate import (
+            mark_excel_book_registered,
+            should_skip_register_book_com,
+        )
+
+        if hwnd > 0 and should_skip_register_book_com(hwnd):
+            clear_shutdown_flags("ensure_python_hosts_ready_fast")
+            plog.info(
+                "ribbon_fast phase=skip_hosts_and_register cumulative_ms=%d hwnd=%s",
+                int((time.perf_counter() - t0) * 1000),
+                hwnd,
+            )
+            return
+        clear_shutdown_flags("ensure_python_hosts_ready")
+        if hwnd > 0:
+            from core.excel_session import register_book
+
+            register_book(target_hwnd=hwnd)
+            mark_excel_book_registered(hwnd)
+            plog.info(
+                "ribbon_fast phase=register_only cumulative_ms=%d hwnd=%s",
+                int((time.perf_counter() - t0) * 1000),
+                hwnd,
+            )
+        else:
+            plog.info(
+                "ribbon_fast phase=skip_hosts cumulative_ms=%d",
+                int((time.perf_counter() - t0) * 1000),
+            )
+        return
+
     if hwnd > 0:
         from core.excel_com_session import prepare_com_session_before_request
 
         prepare_com_session_before_request(hwnd)
     ensure_svc_ui_bridge_parallel()
     if hwnd > 0:
+        from core.excel_book_register_gate import mark_excel_book_registered
         from core.excel_session import register_book
 
         register_book(target_hwnd=hwnd)
+        mark_excel_book_registered(hwnd)
 
 
 def ensure_svc_ui_bridge_parallel() -> None:
     """svc / ui / bridge を並列 spawn し、xlwings prewarm と並行して mutex を待つ。"""
+    clear_shutdown_flags("ensure_svc_ui_bridge_parallel")
+    if all_python_hosts_running():
+        logger.info(
+            "[HOST] all python hosts already running — skip parallel spawn/prewarm"
+        )
+        return
+
     from core.ribbon_invoke import start_xlwings_import_prewarm
 
-    clear_shutdown_flags("ensure_svc_ui_bridge_parallel")
     start_xlwings_import_prewarm()
     try:
         _spawn_server_if_needed(

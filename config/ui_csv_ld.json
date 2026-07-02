@@ -17,6 +17,8 @@
         "TITLE": "ダイアログのタイトル",
         "FILTER": "ファイル種別フィルタ。例: CSVファイル (*.csv);;すべてのファイル (*.*)"
       },
+      "AUTOFIT_MAX_ROWS": "展開後の列幅AutoFit。出力行数がこの値未満なら実施、以上なら省略。0または省略で常に実施。",
+      "AUTOFILTER": "trueで各シート1行目（ヘッダ）にオートフィルタ＋1行目固定。省略時false。",
       "SCREENS": {
         "説明": "サブ画面（進捗・完了通知）。",
         "DONE": {
@@ -29,7 +31,7 @@
             "CENTER_ON_EXCEL": true,
             "DEFAULT_WIDTH": 360,
             "DEFAULT_HEIGHT": 220,
-            "TOPMOST": false
+            "TOPMOST": true
           }
         },
         "PROGRESS": {
@@ -51,6 +53,8 @@
     }
   },
   "_separator": "------------------- 以下、設定本体 -------------------",
+  "AUTOFIT_MAX_ROWS": 0,
+  "AUTOFILTER": true,
   "WINDOW": {
     "CENTER_ON_EXCEL": true,
     "SHOW_IN_TASKBAR": false,
@@ -74,7 +78,7 @@
         "DEFAULT_HEIGHT": 200,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
-        "TOPMOST": false,
+        "TOPMOST": true,
         "EXCEL_LOCK": false
       }
     },

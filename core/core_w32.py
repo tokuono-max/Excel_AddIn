@@ -3,8 +3,8 @@
 Python: 3.12
 Module: core/core_w32.py
 Created: 2026-01-30
-Updated: 2026-05-03
-Version: 2.1.8
+Updated: 2026-06-29
+Version: 2.2.0
 Purpose:
   Win32 API の薄いラッパ（UI非依存 / Tk 禁止）。
   - HWND の owner 設定（タスクバー抑止 / 裏回り防止）
@@ -16,6 +16,8 @@ Design:
   - 失敗しても例外を投げない（Excelロック解除漏れの方が致命）。
 
 History (latest 3):
+  - 2.2.0 (2026-06-29) win32_get_open_file_name / win32_get_save_file_name: comdlg32 直叩き（hwndOwner=Excel）。qt_name_filter_to_win32。
+  - 2.1.9 (2026-06-29) enum_visible_top_level_windows_for_pid: ネイティブファイルダイアログ前面化の HWND 探索用。
   - 2.1.8 (2026-05-03) get_process_image_path_for_diag: PID から QueryFullProcessImageNameW で exe パス短縮（EXCEL_FRONT_FOLLOW 診断の前景 PID 特定用）。
   - 2.1.7 (2026-04-13) WS_EX_TOOLWINDOW は既定で付与しない（タイトルバー min/max 表示のため）。付与は HC_USE_WS_EX_TOOLWINDOW_FOR_TASKBAR=1 またはウィジェット属性。get_window_exstyle_toolwindow 追加。set_owner から拡張スタイル適用を除去（_set_owner_hwnd の遅延経路のみ widget 付きで判定）。
   - 2.1.6 (2026-04-13) get_window_caption_style_summary（GWL_STYLE・最小化/最大化ボックス bit、HC_UI_WINDOW_CAPTION_DIAG 用）。
@@ -61,7 +63,200 @@ def enable_window(hwnd: int, enable: bool) -> None:
 
 
 # 変数: バージョン情報
-__version__ = "2.1.8"
+__version__ = "2.2.0"
+
+_comdlg32 = ctypes.windll.comdlg32
+
+_OFN_FILEMUSTEXIST = 0x00001000
+_OFN_PATHMUSTEXIST = 0x00000800
+_OFN_HIDEREADONLY = 0x00000004
+_OFN_OVERWRITEPROMPT = 0x00000002
+_OFN_EXPLORER = 0x00080000
+_OFN_ENABLESIZING = 0x00800000
+_OFN_NOCHANGEDIR = 0x00000008
+_WIN32_FILE_BUFFER_CHARS = 65536
+
+
+class _OPENFILENAMEW(ctypes.Structure):
+    _fields_ = [
+        ("lStructSize", wintypes.DWORD),
+        ("hwndOwner", wintypes.HWND),
+        ("hInstance", wintypes.HINSTANCE),
+        ("lpstrFilter", wintypes.LPCWSTR),
+        ("lpstrCustomFilter", wintypes.LPWSTR),
+        ("nMaxCustFilter", wintypes.DWORD),
+        ("nFilterIndex", wintypes.DWORD),
+        ("lpstrFile", wintypes.LPWSTR),
+        ("nMaxFile", wintypes.DWORD),
+        ("lpstrFileTitle", wintypes.LPWSTR),
+        ("nMaxFileTitle", wintypes.DWORD),
+        ("lpstrInitialDir", wintypes.LPCWSTR),
+        ("lpstrTitle", wintypes.LPCWSTR),
+        ("Flags", wintypes.DWORD),
+        ("nFileOffset", wintypes.WORD),
+        ("nFileExtension", wintypes.WORD),
+        ("lpstrDefExt", wintypes.LPCWSTR),
+        ("lCustData", wintypes.LPARAM),
+        ("lpfnHook", wintypes.LPVOID),
+        ("lpTemplateName", wintypes.LPCWSTR),
+        ("pvReserved", wintypes.LPVOID),
+        ("dwReserved", wintypes.DWORD),
+        ("FlagsEx", wintypes.DWORD),
+    ]
+
+
+def qt_name_filter_to_win32(filter_str: str) -> str:
+    """Qt の名前フィルタ（;; 区切り）を Win32 lpstrFilter 形式へ変換する。"""
+    pairs: list[str] = []
+    for seg in (filter_str or "").split(";;"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if "(" in seg and seg.endswith(")"):
+            i = seg.rfind("(")
+            desc = seg[:i].strip() or seg
+            pat = seg[i + 1 : -1].strip() or "*.*"
+        else:
+            desc = seg
+            pat = "*.*"
+        pairs.extend([desc, pat])
+    if not pairs:
+        pairs = ["すべてのファイル", "*.*"]
+    return "\0".join(pairs) + "\0\0"
+
+
+def _first_def_ext_from_win32_filter(win32_filter: str) -> str:
+    """Win32 フィルタの先頭パターンから拡張子（ドットなし）を推定する。"""
+    try:
+        parts = (win32_filter or "").split("\0")
+        if len(parts) < 2:
+            return ""
+        pat = (parts[1] or "").strip()
+        if not pat or pat == "*.*":
+            return ""
+        for token in pat.replace(",", " ").split():
+            t = token.strip()
+            if t.startswith("*.") and len(t) > 2:
+                return t[2:].lstrip(".")
+    except Exception:
+        pass
+    return ""
+
+
+def win32_get_open_file_name(
+    owner_hwnd: int,
+    title: str,
+    initial_dir: str,
+    filter_str: str,
+) -> str:
+    """Win32 GetOpenFileNameW。hwndOwner に Excel を渡し Qt ホストを出さない。"""
+    try:
+        owner = int(owner_hwnd or 0)
+        if not owner:
+            return ""
+        win32_filter = qt_name_filter_to_win32(filter_str)
+        file_buf = ctypes.create_unicode_buffer(_WIN32_FILE_BUFFER_CHARS)
+        ofn = _OPENFILENAMEW()
+        ofn.lStructSize = ctypes.sizeof(_OPENFILENAMEW)
+        ofn.hwndOwner = owner
+        ofn.lpstrFilter = win32_filter
+        ofn.lpstrFile = ctypes.cast(file_buf, wintypes.LPWSTR)
+        ofn.nMaxFile = _WIN32_FILE_BUFFER_CHARS
+        init_dir = (initial_dir or "").strip()
+        if init_dir:
+            ofn.lpstrInitialDir = init_dir
+        dlg_title = (title or "").strip()
+        if dlg_title:
+            ofn.lpstrTitle = dlg_title
+        ofn.Flags = (
+            _OFN_FILEMUSTEXIST
+            | _OFN_PATHMUSTEXIST
+            | _OFN_HIDEREADONLY
+            | _OFN_EXPLORER
+            | _OFN_ENABLESIZING
+            | _OFN_NOCHANGEDIR
+        )
+        if not _comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+            return ""
+        return (file_buf.value or "").strip()
+    except Exception:
+        return ""
+
+
+def win32_get_save_file_name(
+    owner_hwnd: int,
+    title: str,
+    initial_path: str,
+    filter_str: str,
+) -> str:
+    """Win32 GetSaveFileNameW。hwndOwner に Excel を渡す。"""
+    try:
+        owner = int(owner_hwnd or 0)
+        if not owner:
+            return ""
+        win32_filter = qt_name_filter_to_win32(filter_str)
+        ip = (initial_path or "").strip()
+        init_dir = ""
+        init_file = ""
+        if ip:
+            init_dir = os.path.dirname(ip) or ""
+            init_file = os.path.basename(ip) or ""
+        file_buf = ctypes.create_unicode_buffer(_WIN32_FILE_BUFFER_CHARS)
+        if init_file:
+            file_buf.value = init_file
+        ofn = _OPENFILENAMEW()
+        ofn.lStructSize = ctypes.sizeof(_OPENFILENAMEW)
+        ofn.hwndOwner = owner
+        ofn.lpstrFilter = win32_filter
+        ofn.lpstrFile = ctypes.cast(file_buf, wintypes.LPWSTR)
+        ofn.nMaxFile = _WIN32_FILE_BUFFER_CHARS
+        if init_dir:
+            ofn.lpstrInitialDir = init_dir
+        dlg_title = (title or "").strip()
+        if dlg_title:
+            ofn.lpstrTitle = dlg_title
+        def_ext = _first_def_ext_from_win32_filter(win32_filter)
+        if def_ext:
+            ofn.lpstrDefExt = def_ext
+        ofn.Flags = (
+            _OFN_OVERWRITEPROMPT
+            | _OFN_PATHMUSTEXIST
+            | _OFN_EXPLORER
+            | _OFN_ENABLESIZING
+            | _OFN_NOCHANGEDIR
+        )
+        if not _comdlg32.GetSaveFileNameW(ctypes.byref(ofn)):
+            return ""
+        return (file_buf.value or "").strip()
+    except Exception:
+        return ""
+
+
+def enum_visible_top_level_windows_for_pid(pid: int) -> list[int]:
+    """指定 PID の可視トップレベル HWND を列挙する（EnumWindows。失敗時 []）。"""
+    target = int(pid or 0)
+    if not target:
+        return []
+    out: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd: int, _lparam: int) -> bool:
+        try:
+            h = int(hwnd or 0)
+            if not h or not is_window_visible(h):
+                return True
+            if int(get_window_pid(h) or 0) != target:
+                return True
+            out.append(h)
+        except Exception:
+            pass
+        return True
+
+    try:
+        _user32.EnumWindows(_cb, 0)
+    except Exception:
+        return []
+    return out
 
 
 def get_foreground_window() -> int:

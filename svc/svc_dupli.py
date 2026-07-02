@@ -53,6 +53,11 @@ if _root not in sys.path:
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger  # noqa: E402
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle  # noqa: E402
+from core.progress_close_ack import (  # noqa: E402
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
 
 logger = get_logger(__name__)
 _dupli_diag = get_diag_logger("hc_csv_tool.diag.dupli")
@@ -78,9 +83,6 @@ _DUPLI_ANALYZE_STRIDE_CELLS = 2048
 _DUPLI_ANALYZE_STRIDE_ROWS = 32
 _DUPLI_ANALYZE_STRIDE_GROUPS = 12
 _DUPLI_ANALYZE_STRIDE_HL = 512
-_PROGRESS_CLOSE_ACK_TIMEOUT_SEC = 3.0
-_PROGRESS_CLOSE_ACK_POLL_SEC = 0.03
-
 
 class _DupliAnalyzeProgressEmitter:
     """PHASE_ANALYZE 中の pct を lo..hi に割り当て、単調に間引き更新する。"""
@@ -277,34 +279,6 @@ def _cancel_request_path(sheet_id: str) -> Path:
     d = Path(get_ipc_root()) / "progress"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"cancel_req_dupli_{sheet_id}.pkl"
-
-
-def _progress_closed_ack_path(sheet_id: str) -> Path:
-    """進捗ダイアログが閉じたことを示す ACK ファイル。"""
-    d = Path(get_ipc_root()) / "progress"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"progress_dupli_closed_{sheet_id}.pkl"
-
-
-def _wait_progress_closed_ack(path: Optional[Path], timeout_sec: float = _PROGRESS_CLOSE_ACK_TIMEOUT_SEC) -> None:
-    """
-    進捗画面のクローズACKを短時間待つ。
-    タイムアウト時はログだけ残して先へ進む（処理全体を止めない）。
-    """
-    if path is None:
-        return
-    p = path
-    t0 = time.perf_counter()
-    while True:
-        try:
-            if p.exists():
-                return
-        except Exception:
-            return
-        if (time.perf_counter() - t0) >= max(0.05, float(timeout_sec)):
-            logger.info("[DUPLI] progress close ack timeout: %s", str(p))
-            return
-        time.sleep(_PROGRESS_CLOSE_ACK_POLL_SEC)
 
 
 def _reset_cancel_path(path: Path) -> None:
@@ -1455,14 +1429,20 @@ def check_duplicates(
     sid = _sheet_id_resolve(ptr_s, sheet_id)
     prog_path = _progress_path(sid)
     cancel_path = _cancel_request_path(sid)
-    progress_closed_path = _progress_closed_ack_path(sid)
-    _reset_cancel_path(progress_closed_path)
+    progress_closed_path = progress_closed_ack_path("dupli", sid)
+    reset_progress_closed_ack(progress_closed_path)
     seq = [0]  # 進捗の表示順序用
     skip_status_restore = False
     hl_applied: list[list[int]] = []
 
     def _submit_done_after_progress_close(message: str, title: str) -> None:
-        _wait_progress_closed_ack(progress_closed_path)
+        wait_progress_closed_with_nudge(
+            progress_closed_path,
+            parent_hwnd=ph,
+            sheet_id=sid,
+            progress_path=prog_path,
+            log_tag="DUPLI",
+        )
         _submit_done_ui(ph, sid, message, title)
 
     def _upd(pct: int, phase: str, cur: str) -> None:
@@ -1907,7 +1887,13 @@ def check_duplicates(
         logger.info("[DUPLI] 完了 走査単位=%s 重複カウント=%s", scan_units, n)
         _status_bar_set(ptr_w, _msg(cfg, "STATUS_FINAL", count=n))
         done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
-        _wait_progress_closed_ack(progress_closed_path)
+        wait_progress_closed_with_nudge(
+            progress_closed_path,
+            parent_hwnd=ph,
+            sheet_id=sid,
+            progress_path=prog_path,
+            log_tag="DUPLI",
+        )
         _submit_done_ui(
             ph,
             sid,

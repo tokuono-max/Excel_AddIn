@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui_qt.ui_common import _normalize_message_newlines, show_warning_notice
+from ui_qt.ui_common import _normalize_message_newlines, ensure_front, show_warning_notice
 from ui_qt.ui_dialog_progress import raise_csv_sp_partner_progress
 
 try:
@@ -133,11 +133,18 @@ def _merge_window(cfg: dict[str, Any], main: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
+_CSV_SP_CFG_CACHE: dict[str, Any] | None = None
+
+
 def _get_cfg() -> dict[str, Any]:
     """config/ui_csv_sp.json を読み、辞書を返す。失敗時は空辞書。"""
+    global _CSV_SP_CFG_CACHE
+    if _CSV_SP_CFG_CACHE is not None:
+        return _CSV_SP_CFG_CACHE
     try:
         from core import core_cst as cst
-        return cst.get_ui_config_from_file_required("csv_sp")
+        _CSV_SP_CFG_CACHE = cst.get_ui_config_from_file_required("csv_sp")
+        return _CSV_SP_CFG_CACHE
     except Exception:
         return {}
 
@@ -174,6 +181,7 @@ class _SplitDialog(QDialog):
         self._cell_change_block = False
         try:
             self.setProperty("_hc_csv_sp_split_main", True)
+            self.setProperty("_hc_ensure_front_bring_excel_first", False)
         except Exception:
             pass
         try:
@@ -597,6 +605,15 @@ class _SplitDialog(QDialog):
                 enable_excel_window(ph, False)
             except Exception:
                 pass
+            try:
+                ensure_front(self, ph, bring_excel_first=False)
+            except Exception:
+                pass
+            for _ms in (0, 80, 200):
+                QTimer.singleShot(
+                    _ms,
+                    lambda p=ph, dlg=self: ensure_front(dlg, p, bring_excel_first=False),
+                )
 
     def closeEvent(self, event: Any) -> None:
         try:
@@ -641,6 +658,10 @@ class _ConflictDialog(QDialog):
                 self.setAttribute(Qt.WA_DeleteOnClose, True)
             except Exception:
                 pass
+        try:
+            self.setProperty("_hc_ensure_front_bring_excel_first", False)
+        except Exception:
+            pass
 
         cfg = _get_cfg()
         main = (cfg or {}).get("MAIN") or {}
@@ -735,6 +756,15 @@ class _ConflictDialog(QDialog):
                 enable_excel_window(ph, False)
             except Exception:
                 pass
+            try:
+                ensure_front(self, ph, bring_excel_first=False)
+            except Exception:
+                pass
+            for _ms in (0, 80, 200):
+                QTimer.singleShot(
+                    _ms,
+                    lambda p=ph, dlg=self: ensure_front(dlg, p, bring_excel_first=False),
+                )
 
     def _on_dup_context_menu(self, pos) -> None:
         try:
@@ -946,9 +976,14 @@ def create_dialog(
         from ui_qt.ui_common import create_progress_dialog
 
         ph = int(parent_hwnd or 0)
-        return create_progress_dialog(
+        dlg = create_progress_dialog(
             req, ph, parent_widget=None, progress_cfg=_merge_sp_progress_cfg(_get_cfg())
         )
+        try:
+            dlg.setProperty("_hc_ensure_front_bring_excel_first", False)
+        except Exception:
+            pass
+        return dlg
 
     if action == "done":
         from ui_qt.ui_common import _deep_merge, create_done_dialog
@@ -958,4 +993,11 @@ def create_dialog(
         done_cfg_merged = _deep_merge(main, done_cfg)
         return create_done_dialog(req, int(parent_hwnd or 0), None, done_cfg_merged)
 
-    return _SplitDialog(req, parent_hwnd, sheet_id)
+    dlg = _SplitDialog(req, parent_hwnd, sheet_id)
+    try:
+        from ui_qt.ipc_file import write_waitform_ready_signal
+
+        write_waitform_ready_signal(int(parent_hwnd or 0))
+    except Exception:
+        pass
+    return dlg

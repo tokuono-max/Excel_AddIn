@@ -70,8 +70,35 @@ def test_excel_unlock_pulse_chain_single_schedule_guard() -> None:
         encoding="utf-8"
     )
     assert "_excel_unlock_pulse_chain_scheduled" in text
-    assert "QTimer.singleShot(0, _first_pulse)" in text
-    for _ms in (90, 200, 450):
-        assert str(_ms) in text.split("_schedule_excel_unlock_pulse_chain", 1)[1].split(
-            "def _schedule_deferred_excel_owner_front", 1
-        )[0]
+    assert "_EXCEL_UNLOCK_FIRST_PULSE_DELAY_MS = 700" in text
+    assert "QTimer.singleShot(base, _first_pulse)" in text
+    chain_block = text.split("_schedule_excel_unlock_pulse_chain", 1)[1].split(
+        "def _schedule_main_opacity_reveal", 1
+    )[0]
+    assert "_EXCEL_UNLOCK_PULSE_RETRY_DELAYS_MS" in chain_block
+    assert "win32_only=True" in chain_block
+    assert 'get_excel_context_from_hwnd(ph, "")' in text
+
+
+def test_create_dialog_main_prepare_skips_ensure_front_and_opacity_reveal() -> None:
+    text = (Path(__file__).resolve().parent.parent / "ui_qt" / "ui_data_agg.py").read_text(
+        encoding="utf-8"
+    )
+    start = text.index('if action == "main":')
+    end = text.index('if action == "progress":', start)
+    block = text[start:end]
+    assert "_hc_prepare_skip_ensure_front" in block
+    assert "_main_opacity_reveal_pending" in block
+    assert "setWindowOpacity(0.0)" in block
+    assert block.index("setWindowOpacity(0.0)") < block.index("dlg.show()")
+
+
+def test_show_event_schedules_main_opacity_reveal() -> None:
+    text = (Path(__file__).resolve().parent.parent / "ui_qt" / "ui_data_agg.py").read_text(
+        encoding="utf-8"
+    )
+    start = text.index("def showEvent(self, event: QShowEvent)")
+    end = text.index("def resizeEvent(self, event: QResizeEvent)", start)
+    block = text[start:end]
+    assert "_schedule_main_opacity_reveal" in block
+    assert "_schedule_deferred_excel_owner_front()" not in block

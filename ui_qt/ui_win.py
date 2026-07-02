@@ -3,8 +3,8 @@
 Python: 3.12
 Module: ui_qt/ui_win.py
 Created: 2026-02-25
-Updated: 2026-05-03
-Version: 0.4.0
+Updated: 2026-06-29
+Version: 0.4.1
 Purpose:
   Qt UI サーバ側の「ウィンドウ制御（挙動）」を集約する。
   - Excel HWND への owner 紐付け（タスクバー抑止 / OS標準の親子Z連動）
@@ -17,6 +17,7 @@ Design:
   - 設定解釈は ui_common 側の責務。
 
 History (latest 3):
+  - 0.4.1 (2026-06-29) set_excel_root_enabled: ネイティブファイル選択中のみ Excel トップ HWND を EnableWindow（ルート有効のままだと OS ダイアログが背後に残ることがある）。
   - 0.4.0 (2026-05-03) 前景追従（start_front_follow / WinEvent）を削除。Excel 子 HWND ロックのみ本モジュールに残す。
   - 0.3.3 (2026-03-09) enable_excel_window: 有効化時にルートHWNDも含め、リボンのみ有効でシート操作が効かない事象を解消。
   - 0.3.2 (2026-02-28) Add lightweight foreground follow (raise only, no ping-pong)。
@@ -38,7 +39,18 @@ except Exception:  # pragma: no cover
     except Exception:
         _w32 = None  # type: ignore
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
+
+
+def set_excel_root_enabled(hwnd: int, enabled: bool) -> None:
+    """Excel トップ HWND のみ EnableWindow する（ネイティブ QFileDialog 表示中の前面化用）。"""
+    root = int(hwnd or 0)
+    if not root or _w32 is None:
+        return
+    try:
+        _w32.enable_windows([root], bool(enabled))
+    except Exception:
+        return
 
 
 def enable_excel_window(hwnd: int, enabled: bool) -> None:

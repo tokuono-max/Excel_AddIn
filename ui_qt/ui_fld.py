@@ -233,6 +233,19 @@ class _FolderTreeDialog(QDialog):
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
         QTimer.singleShot(50, lambda: self._select_path_in_tree(self._current_path))
+        try:
+            from ui_qt.ui_common import ensure_front
+
+            ph = int(getattr(self.parentWidget(), "_parent_hwnd", 0) or 0)
+            if ph:
+                ensure_front(self, ph, bring_excel_first=False)
+                for _ms in (80, 200):
+                    QTimer.singleShot(
+                        _ms,
+                        lambda p=ph, dlg=self: ensure_front(dlg, p, bring_excel_first=False),
+                    )
+        except Exception:
+            pass
         win_cfg = self._folder_cfg.get("WINDOW") or {}
         if int(win_cfg.get("DEFAULT_WIDTH") or 0) > 0 or int(win_cfg.get("DEFAULT_HEIGHT") or 0) > 0:
             QTimer.singleShot(80, self._apply_window_size)

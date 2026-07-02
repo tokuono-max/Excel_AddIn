@@ -3,12 +3,14 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-06-22
-Version: 0.4.48
+Updated: 2026-07-02
+Version: 0.4.50
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.50 (2026-07-02) 起動: prepare は ensure_front スキップ＋show 前 opacity 0→reveal。pulse 初回 700ms・再試行は Win32 のみ（COM 4 連打抑制）。上下黒塗り緩和。
+  - 0.4.49 (2026-06-30) 起動 pulse: 初回を 350ms 遅延（描画後 COM）、get_excel_context は sheet_id なし（guid_scan 回避で UI フリーズ・黒塗り緩和）。
   - 0.4.48 (2026-06-22) showEvent: 同期 _pulse を廃止し _schedule_excel_unlock_pulse_chain に統合（QTimer(0)+90/200/450ms・二重 guid_scan 防止）。create_dialog の重複 deferred pulse を削除。
   - 0.4.47 (2026-06-22) create_dialog(main): WaitForm 合図を prepare 直後に移動。起動時の同期 _pulse を廃止し show 後 QTimer(0) で非同期実行（COM 競合・WaitForm 待ち短縮。guid_scan は維持）。
   - 0.4.46 (2026-06-22) create_dialog(main): 起動区間のフェーズ計測プローブ（DATA_AGG_TRACE phase=… elapsed_ms/step_ms）。_pulse 内 COM サブ区間も診断時に出力。
@@ -272,7 +274,11 @@ def _data_agg_summary_table_tooltip(display: str) -> str:
     return (display or "").replace(" | ", "\n")
 
 
-__version__ = "0.4.48"
+__version__ = "0.4.50"
+
+# EXCEL_LOCK=false 時の起動 pulse: show 直後の描画を優先し COM を遅延する（初回のみ COM、再試行は Win32）。
+_EXCEL_UNLOCK_FIRST_PULSE_DELAY_MS = 700
+_EXCEL_UNLOCK_PULSE_RETRY_DELAYS_MS = (90, 200, 450)
 
 # メイン項目表: 連携参照行・結合参照行の背景（連携優先で灰）
 _ROW_BG_LINK = QColor("#E0E0E0")
@@ -497,6 +503,9 @@ class _DataAggMainWindow(QDialog):
         self._excel_menu_lock_app: Any = None
         self._excel_lock_interactive_prev: bool | None = None
         self._excel_deferred_owner_front_scheduled: bool = False
+        self._main_opacity_reveal_pending: bool = False
+        self._main_opacity_reveal_scheduled: bool = False
+        self._excel_pulse_ctx_app: Any = None
         self._messages = _get_cfg().get("MESSAGES") or {}
         self._ui = (self._main_cfg.get("UI") or {})
         _u = lambda k, d: _ui_disp_str(self._ui, k, d)
@@ -1199,6 +1208,7 @@ class _DataAggMainWindow(QDialog):
     def _pulse_excel_unlock_if_excel_lock_off(
         self,
         *,
+        win32_only: bool = False,
         _create_dialog_probe: bool = False,
         _probe_t0: float = 0.0,
         _probe_t_prev: float = 0.0,
@@ -1246,16 +1256,26 @@ class _DataAggMainWindow(QDialog):
         except Exception:
             pass
         _probe_sub("pulse_after_enable_win32")
+        if win32_only:
+            _probe_sub("pulse_win32_only_done")
+            return (probe_t0, probe_t_prev) if _create_dialog_probe else None
         try:
             from core.core_xlc import (
                 excel_try_set_main_commandbars_enabled,
                 get_excel_context_from_hwnd,
             )
 
-            ctx = get_excel_context_from_hwnd(ph, self._sheet_id)
-            _probe_sub("pulse_after_get_ctx")
-            if ctx:
-                app, *_rest = ctx
+            # CommandBars / Interactive は App 単位。起動 pulse で guid_scan すると UI が長時間ブロックする。
+            app = getattr(self, "_excel_pulse_ctx_app", None)
+            if app is None:
+                ctx = get_excel_context_from_hwnd(ph, "")
+                _probe_sub("pulse_after_get_ctx")
+                if ctx:
+                    app, *_rest = ctx
+                    self._excel_pulse_ctx_app = app
+            else:
+                _probe_sub("pulse_after_get_ctx_cached")
+            if app is not None:
                 excel_try_set_main_commandbars_enabled(app, True)
                 _probe_sub("pulse_after_cmdbars")
                 try:
@@ -1278,7 +1298,8 @@ class _DataAggMainWindow(QDialog):
     def _schedule_excel_unlock_pulse_chain(self) -> None:
         """EXCEL_LOCK=false 時: Win32/COM 解禁を非同期 1 本化（show をブロックしない）。
 
-        QTimer(0) で初回 pulse、90/200/450 ms で再試行（ensure_front 後の無効化取りこぼし緩和）。
+        初回 pulse は _EXCEL_UNLOCK_FIRST_PULSE_DELAY_MS 後（描画完了後に COM）。
+        その後 90/200/450 ms オフセットで再試行（ensure_front 後の無効化取りこぼし緩和）。
         showEvent から複数回呼ばれても 1 チェーンだけ予約する。
         """
         if getattr(self, "_excel_unlock_pulse_chain_scheduled", False):
@@ -1303,7 +1324,7 @@ class _DataAggMainWindow(QDialog):
 
         self._excel_unlock_pulse_chain_scheduled = True
 
-        def _run_pulse(*, use_create_probe: bool) -> None:
+        def _run_pulse(*, use_create_probe: bool, win32_only: bool = False) -> None:
             try:
                 from shiboken6 import Shiboken
 
@@ -1324,6 +1345,7 @@ class _DataAggMainWindow(QDialog):
                         parent_hwnd=ph,
                     )
                 probe_out = self._pulse_excel_unlock_if_excel_lock_off(
+                    win32_only=win32_only,
                     _create_dialog_probe=use_create_probe and probe_t0 > 0,
                     _probe_t0=probe_t0 if use_create_probe else 0.0,
                     _probe_t_prev=t_prev if use_create_probe else 0.0,
@@ -1342,21 +1364,86 @@ class _DataAggMainWindow(QDialog):
                 pass
 
         def _first_pulse() -> None:
-            _run_pulse(use_create_probe=True)
+            _run_pulse(use_create_probe=True, win32_only=False)
 
         try:
-            QTimer.singleShot(0, _first_pulse)
-            for _ms in (90, 200, 450):
-                QTimer.singleShot(int(_ms), lambda _u=False: _run_pulse(use_create_probe=_u))
+            base = int(_EXCEL_UNLOCK_FIRST_PULSE_DELAY_MS)
+            QTimer.singleShot(base, _first_pulse)
+            for _ms in _EXCEL_UNLOCK_PULSE_RETRY_DELAYS_MS:
+                QTimer.singleShot(
+                    base + int(_ms),
+                    lambda _u=False: _run_pulse(use_create_probe=_u, win32_only=True),
+                )
         except Exception:
             self._excel_unlock_pulse_chain_scheduled = False
+
+    def _schedule_main_opacity_reveal(self) -> None:
+        """show 前 opacity 0 のメイン画面を、配置・前面化後に不透明化する（上下黒塗り抑制）。"""
+        if not getattr(self, "_main_opacity_reveal_pending", False):
+            self._schedule_deferred_excel_owner_front()
+            return
+        if getattr(self, "_main_opacity_reveal_scheduled", False):
+            return
+        ph = int(self._parent_hwnd or 0)
+        if not ph:
+            try:
+                self.setWindowOpacity(1.0)
+            except Exception:
+                pass
+            self._main_opacity_reveal_pending = False
+            return
+        self._main_opacity_reveal_scheduled = True
+        er = _excel_rect_tuple_from_req(getattr(self, "_req", None) or {})
+
+        def _reveal() -> None:
+            try:
+                from shiboken6 import Shiboken
+
+                if not Shiboken.isValid(self) or not self.isVisible():
+                    return
+            except Exception:
+                return
+            try:
+                from ui_qt.ui_common import _set_owner_hwnd, center_on_excel, ensure_front
+
+                try:
+                    _set_owner_hwnd(self, ph)
+                except Exception:
+                    pass
+                try:
+                    center_on_excel(self, ph, er)
+                except Exception:
+                    pass
+                try:
+                    ensure_front(self, ph, bring_excel_first=False)
+                except Exception:
+                    pass
+                try:
+                    self.setWindowOpacity(1.0)
+                except Exception:
+                    pass
+                self._main_opacity_reveal_pending = False
+            except Exception:
+                try:
+                    self.setWindowOpacity(1.0)
+                except Exception:
+                    pass
+                self._main_opacity_reveal_pending = False
+
+        try:
+            QTimer.singleShot(50, _reveal)
+        except Exception:
+            _reveal()
 
     def _schedule_deferred_excel_owner_front(self) -> None:
         """DATA_AGG_MAIN は apply_window_config で遅延オーナーが付かないため、表示後に再適用する。
 
         位置は create_dialog の prepare_dialog（center_on_excel）に任せ、ここではオーナー確定と
         1 回の前面化のみに留めてちらつきを抑える。
+        opacity reveal 待ちのときは _schedule_main_opacity_reveal に任せる。
         """
+        if getattr(self, "_main_opacity_reveal_pending", False):
+            return
         if self._excel_deferred_owner_front_scheduled:
             return
         ph = int(self._parent_hwnd or 0)
@@ -1376,12 +1463,13 @@ class _DataAggMainWindow(QDialog):
 
         def _front() -> None:
             try:
-                ensure_front(self, ph)
+                ensure_front(self, ph, bring_excel_first=False)
             except Exception:
                 pass
 
         QTimer.singleShot(0, _owner)
         QTimer.singleShot(50, _owner)
+        QTimer.singleShot(0, _front)
         QTimer.singleShot(120, _front)
 
     def _create_excel_options_tab(
@@ -3972,7 +4060,7 @@ class _DataAggMainWindow(QDialog):
                 self._schedule_excel_unlock_pulse_chain()
             except Exception:
                 pass
-        self._schedule_deferred_excel_owner_front()
+        self._schedule_main_opacity_reveal()
         lock_on_show = bool(
             (self._window_cfg or {}).get("EXCEL_MENU_BAR_LOCK_ON_SHOW", False)
         ) and bool(want_hwnd_lock)
@@ -4013,6 +4101,9 @@ class _DataAggMainWindow(QDialog):
         self._excel_menu_bar_lock_applied = False
         self._excel_unlock_pulse_chain_scheduled = False
         self._excel_create_probe_t0 = 0.0
+        self._excel_pulse_ctx_app = None
+        self._main_opacity_reveal_pending = False
+        self._main_opacity_reveal_scheduled = False
         self._stop_scan_thread()
         try:
             if self._batch_poll_timer is not None:
@@ -6445,6 +6536,10 @@ def create_dialog(
         try:
             from ui_qt.ui_common import prepare_dialog_excel_center_before_show
 
+            try:
+                dlg.setProperty("_hc_prepare_skip_ensure_front", True)
+            except Exception:
+                pass
             prepare_dialog_excel_center_before_show(
                 dlg, ph, _excel_rect_tuple_from_req(req), win_cfg
             )
@@ -6469,6 +6564,12 @@ def create_dialog(
             parent_hwnd=ph,
         )
         dlg._excel_create_probe_t0 = t_create0
+        if ph:
+            try:
+                dlg._main_opacity_reveal_pending = True
+                dlg.setWindowOpacity(0.0)
+            except Exception:
+                dlg._main_opacity_reveal_pending = False
         dlg.show()
         t_create_prev = _log_data_agg_create_dialog_phase(
             "show_done",

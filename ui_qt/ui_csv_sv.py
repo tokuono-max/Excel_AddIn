@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: ui_qt/ui_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-06-06
-Version: 1.4.2
+Updated: 2026-06-29
+Version: 1.4.6
 Purpose:
   CSV保存用 UI（ファイル保存先選択・進捗表示）。機能ごとにセパレート（ui_csv_mg に依存しない）。
   - 設定は config/ui_csv_sv.json を参照（外部ファイルのみ・救済なし）。
@@ -12,6 +12,10 @@ Purpose:
   - ファイル選択はネイティブのみ。Excel を親にした QWidget を渡し、表示中は Excel 操作を無効化。
 
 History (latest 3):
+  - 1.4.6 (2026-06-29) 保存ダイアログ: ui_fil v0.4.0（comdlg32 直叩き。QFileDialog ホスト廃止）。
+  - 1.4.5 (2026-06-29) 保存ダイアログ: ui_fil.show_save_file_dialog_for_excel（QFileDialog.exec＋FG監視）。
+  - 1.4.4 (2026-06-29) ネイティブ保存ダイアログ: ui_fil.prepare/restore_native_file_dialog_excel に集約（他機能連続後の背後表示対策）。
+  - 1.4.3 (2026-06-29) ネイティブ保存ダイアログ: ensure_front を bring_excel_first=true に戻し processEvents（Excel 背後に開く事象の修正。csv_ld 同型）。
   - 1.4.2 (2026-06-06) ネイティブ保存ダイアログ直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
   - 1.4.1 (2026-04-07) 保存ダイアログ終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
   - 1.4.0 (2026-03-09) 進捗完了時に完了通知を表示。_done_cfg で SCREENS.DONE を渡す。
@@ -25,7 +29,7 @@ from typing import Any
 
 from PySide6.QtWidgets import QWidget
 
-__version__ = "1.4.2"
+__version__ = "1.4.6"
 
 _DEFAULT_TITLE = "名前を付けてCSVを保存"
 _DEFAULT_FILTER = "CSVファイル (*.csv);;すべてのファイル (*.*)"
@@ -59,39 +63,21 @@ class _CsvSaveFileDialog:
 
     def exec(self) -> int:
         """保存先選択ダイアログを表示。Excel 親子・前面・表示中は Excel 操作無効。ネイティブのみ。"""
-        parent_widget = None
         ph = int(self._parent_hwnd or 0)
         path = ""
         try:
-            if ph:
-                try:
-                    from ui_qt.ui_common import _set_owner_hwnd
-                    parent_widget = QWidget()
-                    parent_widget.winId()
-                    _set_owner_hwnd(parent_widget, ph)
-                except Exception:
-                    parent_widget = None
-
             if self._initial_dir and os.path.isdir(self._initial_dir):
                 initial_path = os.path.join(self._initial_dir, self._default_name + ".csv")
             else:
                 initial_path = self._default_name + ".csv"
 
-            if ph:
-                try:
-                    from ui_qt.ui_win import enable_excel_window
-                    enable_excel_window(ph, False)
-                except Exception:
-                    pass
             from ui_qt import ui_fil
-            path = ui_fil.show_save_file_dialog(parent_widget, self._title, initial_path, self._filter)
+
+            path = ui_fil.show_save_file_dialog_for_excel(
+                ph, self._title, initial_path, self._filter
+            )
         finally:
             if ph:
-                try:
-                    from ui_qt.ui_win import enable_excel_window
-                    enable_excel_window(ph, True)
-                except Exception:
-                    pass
                 try:
                     from core import core_w32 as _w32
 

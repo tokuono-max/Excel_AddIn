@@ -4,13 +4,19 @@ Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
 Updated: 2026-06-22 (JST)
-Version: 1.4.29
+Version: 1.4.35
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
+  - 1.4.34 (2026-06-29) 進捗を done/total 行数同期に統一。読込中も N/M 更新。pct 明示送信を廃止。
+  - 1.4.33 (2026-06-29) 進捗バー: 工程3の疑似クリープ廃止・done_delay 400ms・DONE 後待機 0.25s で完了通知を短縮。
+  - 1.4.32 (2026-06-29) 完了通知の前面化: ScreenUpdating 復帰を進捗クローズ ACK 待ちの前へ移動（DoneDialog 表示後の Excel 前面奪取を抑制）。
+  - 1.4.31 (2026-06-29) 進捗クローズ ACK を共通モジュールへ統一（15秒+nudge）。3秒タイムアウトの独自待機を廃止。
+  - 1.4.30 (2026-06-29) 展開後 AutoFit/AutoFilter を ui_csv_mg.json（AUTOFIT_MAX_ROWS / AUTOFILTER）に統一。mode_append・start_row=1 のみフィルタ。
   - 1.4.29 (2026-06-22) 結合直前の Book/Sheet 解決を _attach_book+GUID に変更（apps.active 廃止）。
   - 1.4.28 (2026-06-13) 進捗表示: Excel書き込み→CSVファイル結合中。
   - 1.4.27 (2026-06-13) 進捗 UI 共通設定（poll/creep）とファイル確定直後の砂時計 ON。
@@ -27,7 +33,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.29"
+__version__ = "1.4.36"
 import os
 import re
 import threading
@@ -61,6 +67,26 @@ except Exception:  # pragma: no cover
     core_stat = None  # type: ignore
 
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle
+from core.csv_tool_progress_pct import (
+    MG_PHASE_TOTAL,
+    PROGRESS_UNIT_PHASE,
+    csv_mg_pct,
+    macro_progress_nm,
+)
+from core.progress_close_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
+from svc.csv_excel_post_write import (
+    CSV_MG_FEATURE_KEY,
+    apply_csv_autofilter_mg,
+    apply_csv_autofit_sheet,
+    csv_post_write_step_phase_label,
+    load_csv_ui_excel_opts,
+    should_apply_csv_autofit,
+    should_apply_csv_mg_autofilter,
+)
 from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
@@ -130,8 +156,6 @@ def _progress_write(path: Path, obj: dict[str, Any]) -> None:
 
 # 進捗ファイルごとに単調増加する seq（UI 側の古い更新無視と整合）
 _PROGRESS_SEQ: dict[str, int] = {}
-_PROGRESS_CLOSE_ACK_TIMEOUT_SEC = 3.0
-_PROGRESS_CLOSE_ACK_POLL_SEC = 0.03
 
 
 def _progress_key(path: Path) -> str:
@@ -139,28 +163,6 @@ def _progress_key(path: Path) -> str:
         return str(path.resolve())
     except Exception:
         return str(path)
-
-
-def _progress_closed_ack_path(sheet_id: str) -> Path:
-    d = Path(get_ipc_root()) / "progress"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"progress_csv_mg_closed_{sheet_id}.pkl"
-
-
-def _wait_progress_closed_ack(path: Path | None, timeout_sec: float = _PROGRESS_CLOSE_ACK_TIMEOUT_SEC) -> None:
-    if path is None:
-        return
-    t0 = time.perf_counter()
-    while True:
-        try:
-            if path.exists():
-                return
-        except Exception:
-            return
-        if (time.perf_counter() - t0) >= max(0.05, float(timeout_sec)):
-            logger.info("[CSV_MG] progress close ack timeout: %s", str(path))
-            return
-        time.sleep(_PROGRESS_CLOSE_ACK_POLL_SEC)
 
 
 def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> None:
@@ -215,9 +217,10 @@ def _submit_progress_ui(
                 "phase_total": int(phase_total),
                 "excel_lock": True,
             },
-            done_delay_ms=1400,
+            done_delay_ms=400,
             no_native_window=True,
         )
+        req_inner.setdefault("bring_excel_first", False)
         if progress_closed_path is not None:
             cp = str(progress_closed_path).strip()
             if cp:
@@ -482,11 +485,8 @@ def _watch_result(
                     progress_path.parent.mkdir(parents=True, exist_ok=True)
                 except Exception:
                     pass
-                progress_closed_path = _progress_closed_ack_path(sheet_id or "csv_mg")
-                try:
-                    progress_closed_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                progress_closed_path = progress_closed_ack_path("csv_mg", sheet_id or "csv_mg")
+                reset_progress_closed_ack(progress_closed_path)
                 try:
                     progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
                 except Exception:
@@ -495,11 +495,10 @@ def _watch_result(
                     progress_path,
                     {
                         "status": "RUN",
+                        **macro_progress_nm(1, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
                         "phase_i": 1,
-                        "phase": "開始",
-                        "done": 0,
-                        "total": 0,
-                        "pct": 0,
+                        "phase": f"1/{MG_PHASE_TOTAL} 開始",
+                        "pct": csv_mg_pct(1),
                     },
                 )
                 try:
@@ -568,6 +567,47 @@ def _read_csv_header_and_data(path: str) -> tuple[list[Any], list[list[Any]]]:
     return header_row, data_rows
 
 
+def _estimate_csv_data_rows(path: str) -> int:
+    """進捗用のおおよそのデータ行数（ヘッダ1行を除く。全量読込前の total 見積り）。"""
+    p = os.path.abspath(str(path))
+    for enc in ("utf-8-sig", "utf-8", "cp932"):
+        try:
+            with open(p, encoding=enc, newline="") as f:
+                n = sum(1 for _ in f)
+            return max(0, n - 1)
+        except Exception:
+            continue
+    return 0
+
+
+def _mg_write_progress(
+    progress_path: Path,
+    *,
+    phase_i: int,
+    phase: str,
+    detail: str = "",
+    current_file: str = "",
+    intra_done: int = 0,
+    intra_total: int = 0,
+) -> None:
+    """進捗: 右下=工程 N/M、バー=加重 pct、行数等は detail。"""
+    pi = int(phase_i)
+    body: dict[str, Any] = {
+        "status": "RUN",
+        **macro_progress_nm(pi, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
+        "phase_i": pi,
+        "phase": str(phase or "").strip() or "処理中",
+        "pct": csv_mg_pct(pi, intra_done=intra_done, intra_total=intra_total),
+    }
+    det = str(detail or "").strip()
+    if det:
+        body["detail"] = det
+    cf = str(current_file or "").strip()
+    if cf:
+        body["current_file"] = cf
+    _progress_write_monotonic(progress_path, body)
+
+
 def _excel_defined_name_lead_ok(ch: str) -> bool:
     """Excel（日本語 UI）の定義名: 先頭は英字・かな・漢字・アンダースコア等（数字不可）。"""
     if not ch:
@@ -615,6 +655,7 @@ def _merge_files_to_sheet(
     - 進捗は progress_path(pkl) が指定されたときのみ出力する
     - スレッドから呼ばれるため、COM初期化/解除をこの関数内で行う
     """
+    _screen_updating_restored = False
     try:
         import pythoncom  # noqa: WPS433
 
@@ -625,12 +666,18 @@ def _merge_files_to_sheet(
     try:
         t_merge_exec0 = time.perf_counter()
         mode_key = (mode or "mode_append").strip().lower()
+        mg_af_max_rows, mg_autofilter = load_csv_ui_excel_opts(CSV_MG_FEATURE_KEY)
         if mode_key not in ("mode_append", "mode_replace", "mode_preview"):
             mode_key = "mode_append"
 
         tables: list[tuple[str, list[list[Any]], int, int]] = []
         done_items: list[dict[str, Any]] = []
         total_rows = 0
+        rows_prepared = 0
+        plan_total = max(
+            1,
+            sum(_estimate_csv_data_rows(os.path.abspath(str(p))) for p in paths),
+        )
         seq = 0
         for file_idx, p in enumerate(paths):
             seq += 1
@@ -662,6 +709,17 @@ def _merge_files_to_sheet(
             if rows > 0 and cols > 0:
                 tables.append((name, values_to_write, rows, cols))
                 total_rows += rows
+                rows_prepared += rows
+                if progress_path is not None:
+                    _mg_write_progress(
+                        progress_path,
+                        phase_i=2,
+                        phase=f"2/{MG_PHASE_TOTAL} 読込/準備",
+                        detail=f"ファイル {seq}/{len(paths)} — {name}",
+                        current_file=name,
+                        intra_done=seq,
+                        intra_total=max(1, len(paths)),
+                    )
 
         prep_ms = _elapsed_ms(t_merge_exec0)
         logger.info(
@@ -676,17 +734,15 @@ def _merge_files_to_sheet(
             time.perf_counter(),
         )
 
-        if progress_path is not None:
-            _progress_write_monotonic(
+        progress_total = max(1, total_rows)
+        if progress_path is not None and total_rows > 0:
+            _mg_write_progress(
                 progress_path,
-                {
-                    "status": "RUN",
-                    "phase_i": 2,
-                    "phase": "読込/準備",
-                    "done": 0,
-                    "total": total_rows,
-                    "pct": 0,
-                },
+                phase_i=2,
+                phase=f"2/{MG_PHASE_TOTAL} 読込/準備",
+                detail=f"累計 {total_rows:,} 行",
+                intra_done=len(paths),
+                intra_total=max(1, len(paths)),
             )
 
         _phase("P3-0", step="resolve_workbook_sheet")
@@ -769,6 +825,15 @@ def _merge_files_to_sheet(
         done_rows = 0
         max_col = 0
         sht_name = (getattr(sht, "name", None) or getattr(sht, "Name", None) or "Sheet1")
+        if progress_path is not None and progress_total > 0:
+            _mg_write_progress(
+                progress_path,
+                phase_i=3,
+                phase=f"3/{MG_PHASE_TOTAL} CSVファイル結合中",
+                detail="0 / {:,} 行".format(progress_total),
+                intra_done=0,
+                intra_total=progress_total,
+            )
 
         # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に遅延）
         t_excel_write0 = time.perf_counter()
@@ -795,18 +860,14 @@ def _merge_files_to_sheet(
                 )
 
                 if progress_path is not None:
-                    pct = int(done_rows * 100 / max(total_rows, 1))
-                    _progress_write_monotonic(
+                    _mg_write_progress(
                         progress_path,
-                        {
-                            "status": "RUN",
-                            "phase_i": 3,
-                            "phase": "CSVファイル結合中",
-                            "done": done_rows,
-                            "total": total_rows,
-                            "pct": pct,
-                            "current_file": file_name,
-                        },
+                        phase_i=3,
+                        phase=f"3/{MG_PHASE_TOTAL} CSVファイル結合中",
+                        detail=f"{done_rows:,} / {progress_total:,} 行",
+                        current_file=file_name,
+                        intra_done=done_rows,
+                        intra_total=progress_total,
                     )
 
                 for i0 in range(0, len(values), rows_per_chunk):
@@ -816,10 +877,16 @@ def _merge_files_to_sheet(
                                 progress_path,
                                 {
                                     "status": "CANCEL",
+                                    **macro_progress_nm(
+                                        3, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE
+                                    ),
                                     "phase_i": 3,
-                                    "phase": "CSVファイル結合中",
-                                    "done": done_rows,
-                                    "total": total_rows,
+                                    "phase": f"3/{MG_PHASE_TOTAL} CSVファイル結合中",
+                                    "pct": csv_mg_pct(
+                                        3,
+                                        intra_done=done_rows,
+                                        intra_total=progress_total,
+                                    ),
                                 },
                             )
                         return
@@ -829,18 +896,14 @@ def _merge_files_to_sheet(
 
                     done_rows += len(chunk)
                     if progress_path is not None:
-                        pct = int(done_rows * 100 / max(total_rows, 1))
-                        _progress_write_monotonic(
+                        _mg_write_progress(
                             progress_path,
-                            {
-                                "status": "RUN",
-                                "phase_i": 3,
-                                "phase": "CSVファイル結合中",
-                                "done": done_rows,
-                                "total": total_rows,
-                                "pct": pct,
-                                "current_file": file_name,
-                            },
+                            phase_i=3,
+                            phase=f"3/{MG_PHASE_TOTAL} CSVファイル結合中",
+                            detail=f"{done_rows:,} / {progress_total:,} 行",
+                            current_file=file_name,
+                            intra_done=done_rows,
+                            intra_total=progress_total,
                         )
 
                 # セルコメント: シート名-追加行番号 ファイル名 \n 追加行数
@@ -885,35 +948,67 @@ def _merge_files_to_sheet(
                 cur_row += rows
 
             # 有効領域外をクリア（UsedRange の拡大防止）
+            if progress_path is not None and progress_total > 0:
+                _mg_write_progress(
+                    progress_path,
+                    phase_i=3,
+                    phase=f"3/{MG_PHASE_TOTAL} 仕上げ中",
+                    intra_done=progress_total,
+                    intra_total=progress_total,
+                )
             if xlc and max_col > 0 and cur_row > start_row:
                 try:
                     xlc.clear_used_range_overflow(sht, cur_row - 1, max_col)
                 except Exception:
                     pass
 
-            # 出力完了後: 列幅オートフィット（行数が core_cst.AUTOFIT_MAX_ROWS 超過時はスキップ）
+            # 出力完了後: AutoFit / AutoFilter（ui_csv_mg.json）
             if max_col > 0 and cur_row > start_row:
                 last_row = cur_row - 1
                 autofit_rows = last_row - start_row + 1
-                max_af_rows = int(getattr(cst, "AUTOFIT_MAX_ROWS", 100000) or 100000)
+                will_af = should_apply_csv_autofit(autofit_rows, mg_af_max_rows)
+                will_filter = should_apply_csv_mg_autofilter(
+                    enabled=mg_autofilter,
+                    start_row=start_row,
+                    mode=mode_key,
+                )
                 if progress_path is not None:
-                    _progress_write_monotonic(
+                    _mg_write_progress(
                         progress_path,
-                        {
-                            "status": "RUN",
-                            "phase_i": 3,
-                            "phase": "列幅調整中",
-                            "done": total_rows,
-                            "total": total_rows,
-                            "pct": 99,
-                        },
+                        phase_i=3,
+                        phase=csv_post_write_step_phase_label(
+                            "autofit_run" if will_af else "autofit_skip",
+                            phase_prefix=f"3/{MG_PHASE_TOTAL}",
+                        ),
+                        intra_done=progress_total,
+                        intra_total=progress_total,
                     )
-                if autofit_rows <= max_af_rows:
-                    try:
-                        rng = sht.range((start_row, 1), (last_row, max_col))
-                        rng.columns.autofit()
-                    except Exception:
-                        pass
+                if will_af:
+                    apply_csv_autofit_sheet(
+                        sht,
+                        min_row=start_row,
+                        max_row=last_row,
+                        max_col=max_col,
+                    )
+                if progress_path is not None:
+                    _mg_write_progress(
+                        progress_path,
+                        phase_i=3,
+                        phase=csv_post_write_step_phase_label(
+                            "autofilter_run" if will_filter else "autofilter_skip",
+                            phase_prefix=f"3/{MG_PHASE_TOTAL}",
+                        ),
+                        intra_done=progress_total,
+                        intra_total=progress_total,
+                    )
+                apply_csv_autofilter_mg(
+                    sht,
+                    last_row=last_row,
+                    max_col=max_col,
+                    enabled=mg_autofilter,
+                    start_row=start_row,
+                    mode=mode_key,
+                )
 
             # HC_STATUS_INFO とステータスバー
             if core_stat is not None:
@@ -945,16 +1040,16 @@ def _merge_files_to_sheet(
                     progress_path,
                     {
                         "status": "DONE",
+                        **macro_progress_nm(4, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
                         "phase_i": 4,
-                        "phase": "完了",
-                        "done": total_rows,
-                        "total": total_rows,
+                        "phase": f"4/{MG_PHASE_TOTAL} 完了",
                         "pct": 100,
                         "show_done_dialog": True,
                         "done_items": done_ser,
+                        "done_delay_ms": 400,
                     },
                 )
-                wait_after_progress_done(min_sec=1.0)
+                wait_after_progress_done(min_sec=0.25)
 
         excel_write_ms = _elapsed_ms(t_excel_write0)
         logger.info(
@@ -983,7 +1078,19 @@ def _merge_files_to_sheet(
         )
         parent_hwnd2 = int(parent_hwnd or 0)
         if progress_path is not None:
-            _wait_progress_closed_ack(progress_closed_path)
+            if xlc is not None and not _screen_updating_restored:
+                try:
+                    xlc.restore_screen_updating(sht)
+                    _screen_updating_restored = True
+                except Exception:
+                    pass
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                parent_hwnd=int(parent_hwnd or 0),
+                sheet_id=str(sheet_guid or "_"),
+                progress_path=progress_path,
+                log_tag="CSV_MG",
+            )
         elif parent_hwnd2:
             _phase("P4-9", step="done_popup_fallback", items=len(done_ser))
             _submit_done_ui(
@@ -998,7 +1105,7 @@ def _merge_files_to_sheet(
                 {"status": "ERROR", "phase_i": 4, "phase": "エラー", "detail": str(ex)},
             )
     finally:
-        if xlc is not None:
+        if xlc is not None and not _screen_updating_restored:
             try:
                 _sht_restore = sht
             except NameError:

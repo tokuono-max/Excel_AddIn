@@ -35,14 +35,16 @@ if _root not in sys.path:
 from core.core_log import get_diag_logger, get_logger, get_perf_logger  # noqa: E402
 from core.core_value_shape import shape_date_value  # noqa: E402
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle  # noqa: E402
+from core.progress_close_ack import (  # noqa: E402
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
 
 logger = get_logger(__name__)
 _dt_ymd_diag = get_diag_logger("hc_csv_tool.diag.dt_ymd")
 _perf = get_perf_logger("svc.svc_dt_ymd.perf")
 __version__ = "1.1.2"
-
-_PROGRESS_CLOSE_ACK_TIMEOUT_SEC = 3.0
-_PROGRESS_CLOSE_ACK_POLL_SEC = 0.03
 
 
 def _elapsed_ms(since: float) -> int:
@@ -192,29 +194,6 @@ def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     except Exception:
         pass
     return None
-
-
-def _progress_closed_ack_path(sheet_id: str) -> Path:
-    d = Path(get_ipc_root()) / "progress"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"progress_dt_ymd_closed_{sheet_id}.pkl"
-
-
-def _wait_progress_closed_ack(path: Optional[Path], timeout_sec: float = _PROGRESS_CLOSE_ACK_TIMEOUT_SEC) -> None:
-    if path is None:
-        return
-    p = path
-    t0 = time.perf_counter()
-    while True:
-        try:
-            if p.exists():
-                return
-        except Exception:
-            return
-        if (time.perf_counter() - t0) >= max(0.05, float(timeout_sec)):
-            logger.info("[DT_YMD] progress close ack timeout: %s", str(p))
-            return
-        time.sleep(_PROGRESS_CLOSE_ACK_POLL_SEC)
 
 
 def _submit_progress_ui(
@@ -493,7 +472,7 @@ def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> N
     saved_status = _status_bar_save(ptr_w)  # 終了時に必ず復元
     sid = _sheet_id_resolve(ptr_s, sheet_id)
     prog_path = _progress_path(sid)
-    progress_closed_path = _progress_closed_ack_path(sid)
+    progress_closed_path = progress_closed_ack_path("dt_ymd", sid)
     progress_close_waited = False
     seq = [0]  # 進捗の表示順序用
 
@@ -598,7 +577,13 @@ def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> N
                 _dt_ymd_trace("abort_matrix_read_failed", t_flow, area=a_idx)
                 _progress_write(prog_path, {"status": "DONE", "seq": 999})
                 if not progress_close_waited:
-                    _wait_progress_closed_ack(progress_closed_path)
+                    wait_progress_closed_with_nudge(
+                        progress_closed_path,
+                        parent_hwnd=ph,
+                        sheet_id=sid,
+                        progress_path=prog_path,
+                        log_tag="DT_YMD",
+                    )
                     progress_close_waited = True
                 _status_bar_set(ptr_w, _msg(cfg, "ERROR_PREFIX"))
                 done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
@@ -636,7 +621,13 @@ def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> N
         if non_empty_count >= 1 and val_success_n == 0:
             _progress_write(prog_path, {"status": "DONE", "seq": 999})
             if not progress_close_waited:
-                _wait_progress_closed_ack(progress_closed_path)
+                wait_progress_closed_with_nudge(
+                    progress_closed_path,
+                    parent_hwnd=ph,
+                    sheet_id=sid,
+                    progress_path=prog_path,
+                    log_tag="DT_YMD",
+                )
                 progress_close_waited = True
             _status_bar_set(ptr_w, _msg(cfg, "WARNING_NOT_DATE"))
             done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
@@ -699,7 +690,13 @@ def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> N
 
         _progress_write(prog_path, {"status": "DONE", "seq": 999})
         if not progress_close_waited:
-            _wait_progress_closed_ack(progress_closed_path)
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                parent_hwnd=ph,
+                sheet_id=sid,
+                progress_path=prog_path,
+                log_tag="DT_YMD",
+            )
             progress_close_waited = True
         logger.info("[DT_YMD] 完了 走査=%s 変換件数=%s", processed_rows, val_success_n)
         logger.info("[DT_YMD] 運用ログ 日付変換 走査=%s 変換件数=%s", processed_rows, val_success_n)

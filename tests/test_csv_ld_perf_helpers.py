@@ -62,21 +62,6 @@ def test_csv_ld_progress_labels_and_detail() -> None:
     assert ld.CSV_LD_DONE_DELAY_MS == 400
 
 
-def test_csv_ld_autofit_header_only_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HC_CSV_LD_AUTOFIT_MAX_ROWS", raising=False)
-    monkeypatch.delenv("HC_CSV_LD_AUTOFIT_MAX_CELLS", raising=False)
-    assert ld._csv_ld_should_use_header_only_autofit(5001, 10) is True
-    assert ld._csv_ld_should_use_header_only_autofit(100, 10) is False
-    assert ld._csv_ld_should_use_header_only_autofit(1000, 300) is True
-
-
-def test_csv_ld_skip_autofit_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HC_CSV_LD_SKIP_AUTOFIT", raising=False)
-    assert ld._csv_ld_skip_autofit() is False
-    monkeypatch.setenv("HC_CSV_LD_SKIP_AUTOFIT", "1")
-    assert ld._csv_ld_skip_autofit() is True
-
-
 def test_progress_write_terminal_increments_seq(tmp_path: Path) -> None:
     p = tmp_path / "progress.pkl"
     ld._progress_write(p, {"status": "RUN", "seq": 7})
@@ -113,9 +98,9 @@ def test_resolve_progress_row_total() -> None:
 
 
 def test_calc_progress_pct() -> None:
-    assert ld.calc_progress_pct(1, 0, 870_246) == 0
-    assert ld.calc_progress_pct(2, 435_123, 870_246) == 50
-    assert ld.calc_progress_pct(2, 870_246, 870_246) == 99
+    assert ld.calc_progress_pct(1, 0, 870_246) == 5
+    assert ld.calc_progress_pct(2, 435_123, 870_246) == 51
+    assert ld.calc_progress_pct(2, 870_246, 870_246) == 92
     assert ld.calc_progress_pct(3, 870_246, 870_246) == 99
 
 

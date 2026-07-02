@@ -108,15 +108,21 @@ def _dupli_ui_diag(msg: str, *args: object) -> None:
 # モードレスで開いたレポートダイアログをリストで保持し、GC で回収されないようにする
 _open_report_dialogs: list[QDialog] = []
 
+_DUPLI_CFG_CACHE: dict[str, Any] | None = None
+
 
 def _get_cfg() -> dict[str, Any]:
     """
     重複チェック用の画面設定を config/ui_dupli.json から読み込む。
     読込失敗時は UiConfigLoadError が発生する（救済なし）。
     """
+    global _DUPLI_CFG_CACHE
+    if _DUPLI_CFG_CACHE is not None:
+        return _DUPLI_CFG_CACHE
     from core import core_cst as cst
 
-    return cst.get_ui_config_from_file_required("dupli")
+    _DUPLI_CFG_CACHE = cst.get_ui_config_from_file_required("dupli")
+    return _DUPLI_CFG_CACHE
 
 
 def _resolve_xlwings_book(app: Any, book_name: str) -> Any:
@@ -2162,6 +2168,12 @@ def create_dialog(
         cfg = _get_cfg()
         dlg = DupliReportDialog(req, int(parent_hwnd or 0), cfg, sheet_id=str(sheet_id or ""))
         ph = int(parent_hwnd or 0)
+        try:
+            from ui_qt.ipc_file import write_waitform_ready_signal
+
+            write_waitform_ready_signal(ph)
+        except Exception:
+            pass
         try:
             from ui_qt.ui_common import excel_rect_tuple_from_req, prepare_dialog_excel_center_before_show
 

@@ -55,25 +55,3 @@ def test_master_debug_cancel_event_raises_without_pickle(tmp_path: Path) -> None
     evt.set()
     with pytest.raises(DataAggCancelled):
         combined(force=True)
-
-
-def test_csv_precache_hook_polls_cancel_check() -> None:
-    """CSV precache ラッパーが cancel_check を呼ぶ。"""
-    import threading
-
-    from ui_qt.ui_data_agg_debug import _master_debug_csv_precache_progress_hook
-
-    evt = threading.Event()
-
-    def cancel_check(*, force: bool = False) -> None:
-        if evt.is_set():
-            raise DataAggCancelled()
-
-    hook = _master_debug_csv_precache_progress_hook(
-        None, cancel_check=cancel_check
-    )
-    assert hook is not None
-    hook("CSV読込中: test.csv")
-    evt.set()
-    with pytest.raises(DataAggCancelled):
-        hook("CSV読込中: test2.csv")

@@ -35,6 +35,12 @@ def try_show_immediate_progress_after_pick(
         root = Path(str(ipc_file.get_ipc_root()))
         progress_path = root / "progress" / f"progress_{feat}_{sid}.pkl"
         progress_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from ui_qt.ui_dialog_progress import dismiss_progress_dialogs_for_path
+
+            dismiss_progress_dialogs_for_path(str(progress_path))
+        except Exception:
+            pass
         ipc_file.write_pickle(
             progress_path,
             initial_run_progress_pickle(
@@ -49,6 +55,10 @@ def try_show_immediate_progress_after_pick(
                 "progress_path": str(progress_path),
                 "phase_total": int(phase_total),
                 "excel_lock": True,
+                "bring_excel_first": False,
+                "refront_on_run": feat == "ld",
+                # comdlg32 直後: show 前 opacity 0 → 前面化 → reveal（Excel COM 砂時計は reveal 後）
+                "opacity_reveal_before_show": True,
             },
             done_delay_ms=done_delay_ms,
             no_native_window=True,
@@ -58,15 +68,24 @@ def try_show_immediate_progress_after_pick(
         excel_rect = get_window_rect(int(parent_hwnd or 0))
         if excel_rect is not None:
             progress_req_dict["excel_rect"] = excel_rect
-        try:
-            from core.core_cursor import progress_dialog_wait_cursor_on
-
-            progress_dialog_wait_cursor_on(sid)
-        except Exception:
-            pass
         progress_dlg = mod.create_dialog(progress_req_dict, int(parent_hwnd or 0), sid)
         if hasattr(progress_dlg, "show"):
             progress_dlg.show()
+            if feat == "ld":
+                try:
+                    from ui_qt.ui_dialog_progress import ensure_progress_dialog_front
+
+                    ensure_progress_dialog_front(progress_dlg)
+                except Exception:
+                    pass
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+            except Exception:
+                pass
             logger.debug(
                 "[CSV_TOOL] immediate progress shown feature=%s sheet_id=%s t=%.3f",
                 feat,

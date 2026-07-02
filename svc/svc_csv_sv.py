@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: svc/svc_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-06-22
-Version: 1.3.11
+Updated: 2026-06-30
+Version: 1.3.13
 Purpose:
   CSV保存（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_csv_sv（ファイル「名前を付けて保存」ダイアログ）で行う。
@@ -13,9 +13,9 @@ Purpose:
   - 完了時は csv_ld と同様の完了通知（シート名・ファイル名・容量・行数）を表示。
 
 History (latest 3):
+  - 1.3.13 (2026-06-30) 進捗 pickle: 書込失敗ログ・リトライ・seq 同期・DONE read-back 検証。SaveBlock はメインスレッド書込既定。
+  - 1.3.12 (2026-06-30) 進捗クローズ ACK 待ち＋nudge（csv_ld/mg 同型）。即時進捗・submit 双方で progress_closed_path を渡す。
   - 1.3.11 (2026-06-22) 保存ダイアログ待ち後に Book/Sheet を再取得（COM 切れ緩和。csv_ld と同経路）。
-  - 1.3.10 (2026-06-13) 進捗 UI 共通設定（poll/creep）と即時表示連携。保存先確定直後の砂時計 ON。
-  - 1.3.9 (2026-06-04) 保存: 既定で画面上の表示文字列をチャンク Copy→クリップボードで読込。文字列行列を csv.writer で直接出力（日付正規化不要）。HC_CSV_SV_USE_VALUE_READ=1 で従来 .value 経路。
   - 1.3.8 (2026-06-04) 性能: 保存前チェックを先頭行サンプルのみに変更（全 UsedRange 読込廃止）。大容量は日付正規化スキップ。保存計測ログ分割。
   - 1.3.6 (2026-06-04) 保存終了時に EnableEvents=True を保証（restore_excel_host_after_operation）。シート切替イベント復帰。
   - 1.3.5 (2026-06-04) 保存処理中の砂時計 ON（保存先確定後〜完了）。長いシート読込中は tick で再武装。
@@ -50,10 +50,27 @@ from core.core_cursor import (
     progress_dialog_wait_cursor_on,
 )
 from core.csv_tool_progress_ui import enrich_progress_req_dict
+from core.csv_tool_progress_pct import (
+    PROGRESS_UNIT_PHASE,
+    SV_PHASE_TOTAL,
+    SaveBlockProgressTicker,
+    csv_sv_pct,
+    macro_progress_nm,
+)
+from core.progress_close_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
+from core.progress_pickle_write import (
+    sync_progress_seq_from_pickle,
+    write_progress_done_verified,
+    write_progress_monotonic,
+)
 from ui_qt.ipc_file import get_ipc_root, get_last_folder, get_request_dir, read_pickle, set_last_folder, write_pickle
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.11"
+__version__ = "1.3.12"
 
 try:
     from core import core_xlc as xlc
@@ -246,38 +263,52 @@ def _progress_path(sheet_id: str) -> Path:
     return d / f"progress_sv_{sheet_id}.pkl"
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    try:
-        write_pickle(path, obj)
-    except Exception:
-        pass
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    from core.progress_pickle_write import write_progress_pickle
+
+    return write_progress_pickle(path, obj, log_tag="CSV_SV")
 
 
-_PROGRESS_SEQ: dict[str, int] = {}
+def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> bool:
+    return write_progress_monotonic(path, obj, log_tag="CSV_SV")
 
 
-def _progress_key(path: Path) -> str:
-    try:
-        return str(path.resolve())
-    except Exception:
-        return str(path)
+def _progress_write_done_verified(path: Path, obj: dict[str, Any]) -> bool:
+    return write_progress_done_verified(path, obj, log_tag="CSV_SV")
 
 
-def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> None:
-    """UI の seq 順序保証用に単調増加 seq を付与して進捗を書く。"""
-    key = _progress_key(path)
-    n = _PROGRESS_SEQ.get(key, -1) + 1
-    _PROGRESS_SEQ[key] = n
-    merged = dict(obj)
-    merged["seq"] = n
-    _progress_write(path, merged)
+def _sv_write_progress(
+    progress_path: Path,
+    *,
+    phase_i: int,
+    phase: str,
+    detail: str = "",
+    intra_done: int = 0,
+    intra_total: int = 0,
+    pct: int | None = None,
+) -> None:
+    """進捗: 右下=工程 N/M、バー=加重 pct。"""
+    pi = int(phase_i)
+    body: dict[str, Any] = {
+        "status": "RUN",
+        **macro_progress_nm(pi, SV_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
+        "phase_i": pi,
+        "phase": str(phase or "").strip() or "処理中",
+        "pct": (
+            int(pct)
+            if pct is not None
+            else csv_sv_pct(pi, intra_done=intra_done, intra_total=intra_total)
+        ),
+    }
+    det = str(detail or "").strip()
+    if det:
+        body["detail"] = det
+    _progress_write_monotonic(progress_path, body)
 
 
 def _calc_sv_read_pct(done_rows: int, total_rows: int) -> int:
-    """Excel 読込フェーズ用バー目標（全体の 0–49%）。"""
-    if total_rows <= 0:
-        return 0
-    return min(49, int(done_rows * 49 / total_rows))
+    """後方互換: Excel 読込フェーズ用バー目標。"""
+    return csv_sv_pct(1, intra_done=done_rows, intra_total=total_rows)
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -296,7 +327,11 @@ def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 
 
 def _submit_progress_ui(
-    parent_hwnd: int, sheet_id: str, progress_path: Path, phase_total: int
+    parent_hwnd: int,
+    sheet_id: str,
+    progress_path: Path,
+    phase_total: int,
+    progress_closed_path: Path | None = None,
 ) -> None:
     """ui_server へ進捗ウィンドウ表示を要求する（モデルレス）。送信時点の Excel 矩形を渡し中央配置の基準にする。"""
     try:
@@ -317,6 +352,8 @@ def _submit_progress_ui(
             done_delay_ms=400,
             no_native_window=True,
         )
+        if progress_closed_path is not None:
+            req_inner["progress_closed_path"] = str(progress_closed_path)
         if excel_rect is not None:
             req_inner["excel_rect"] = list(excel_rect)
         payload = {
@@ -509,16 +546,13 @@ def _read_matrix_safe(
         list_total.extend(list_chunk)
         if progress_path is not None and total_rows > 0:
             done = len(list_total)
-            _progress_write_monotonic(
+            _sv_write_progress(
                 progress_path,
-                {
-                    "status": "RUN",
-                    "phase_i": 1,
-                    "phase": "データ読込中",
-                    "done": done,
-                    "total": total_rows,
-                    "pct": _calc_sv_read_pct(done, total_rows),
-                },
+                phase_i=1,
+                phase=f"1/{SV_PHASE_TOTAL} データ読込中",
+                detail=f"{done:,} / {total_rows:,} 行",
+                intra_done=done,
+                intra_total=total_rows,
             )
     return list_total
 
@@ -553,16 +587,13 @@ def _read_matrix_display_text(
                 pass
         if progress_path is not None and total_rows > 0:
             done = len(list_total)
-            _progress_write_monotonic(
+            _sv_write_progress(
                 progress_path,
-                {
-                    "status": "RUN",
-                    "phase_i": 1,
-                    "phase": "データ読込中",
-                    "done": done,
-                    "total": total_rows,
-                    "pct": _calc_sv_read_pct(done, total_rows),
-                },
+                phase_i=1,
+                phase=f"1/{SV_PHASE_TOTAL} データ読込中",
+                detail=f"{done:,} / {total_rows:,} 行",
+                intra_done=done,
+                intra_total=total_rows,
             )
     return list_total
 
@@ -682,13 +713,33 @@ def _do_save_csv_body(
     val_row_count = api_range.rows.count
     val_total = max(1, val_row_count)
 
+    progress_closed_path: Path | None = None
+    progress_ack_expected = bool(progress_ui_already_shown)
+    if progress_path is not None:
+        sync_progress_seq_from_pickle(progress_path)
+        progress_closed_path = progress_closed_ack_path(
+            "csv_sv", sheet_id or sheet_id_for_progress or "_"
+        )
+        reset_progress_closed_ack(progress_closed_path)
+
     if progress_path is not None and not progress_ui_already_shown and parent_hwnd:
-        _submit_progress_ui(parent_hwnd, sheet_id or sheet_id_for_progress or "_", progress_path, total_steps)
+        _submit_progress_ui(
+            parent_hwnd,
+            sheet_id or sheet_id_for_progress or "_",
+            progress_path,
+            total_steps,
+            progress_closed_path=progress_closed_path,
+        )
+        progress_ack_expected = True
 
     if progress_path is not None:
-        _progress_write_monotonic(
+        _sv_write_progress(
             progress_path,
-            {"status": "RUN", "phase_i": 1, "phase": "データ読込中", "done": 0, "total": val_total, "pct": 0},
+            phase_i=1,
+            phase=f"1/{SV_PHASE_TOTAL} データ読込中",
+            detail=f"0 / {val_total:,} 行",
+            intra_done=0,
+            intra_total=val_total,
         )
     use_display_text = _csv_sv_use_display_text()
     set_excel_performance_mode(book.app, True, disable_events=False)
@@ -731,50 +782,37 @@ def _do_save_csv_body(
                 progress_path,
                 {
                     "status": "DONE",
-                    "phase_i": total_steps,
-                    "phase": "完了",
-                    "done": 0,
-                    "total": val_total,
+                    **macro_progress_nm(SV_PHASE_TOTAL, SV_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
+                    "phase_i": SV_PHASE_TOTAL,
+                    "phase": f"{SV_PHASE_TOTAL}/{SV_PHASE_TOTAL} 完了",
                     "pct": 100,
                 },
             )
         _bring_excel_to_front(parent_hwnd)
         return
 
-    if progress_path is not None:
-        _progress_write_monotonic(
+    row_count_saved = len(list_matrix_2d)
+    str_fn_saved = os.path.basename(str_save_path)
+
+    def _save_pct_tick(pct_val: int) -> None:
+        if progress_path is None:
+            return
+        _sv_write_progress(
             progress_path,
-            {
-                "status": "RUN",
-                "phase_i": 2,
-                "phase": "ファイル保存中",
-                "done": val_total,
-                "total": val_total,
-                "pct": 50,
-            },
+            phase_i=2,
+            phase=f"2/{SV_PHASE_TOTAL} ファイル保存中",
+            detail=str_fn_saved,
+            pct=int(pct_val),
         )
 
-    row_count_saved = len(list_matrix_2d)
     normalize_ms = 0
     dataframe_ms = 0
     do_normalize = False
 
-    if progress_path is not None:
-        _progress_write_monotonic(
-            progress_path,
-            {
-                "status": "RUN",
-                "phase_i": 2,
-                "phase": "ファイル保存中",
-                "done": val_total,
-                "total": val_total,
-                "pct": 60,
-            },
-        )
-
     if use_display_text:
         t_csv0 = time.perf_counter()
-        _write_string_matrix_to_csv(str_save_path, list_matrix_2d)  # type: ignore[arg-type]
+        with SaveBlockProgressTicker(_save_pct_tick, row_count=row_count_saved):
+            _write_string_matrix_to_csv(str_save_path, list_matrix_2d)  # type: ignore[arg-type]
         to_csv_ms = _elapsed_ms(t_csv0)
         write_ms = to_csv_ms
         logger.info(
@@ -796,6 +834,7 @@ def _do_save_csv_body(
 
         do_normalize = _should_normalize_dates_for_save(row_count_saved)
         t_norm0 = time.perf_counter()
+        _save_pct_tick(csv_sv_pct(2, intra_done=0, intra_total=1))
         if do_normalize:
             matrix_for_csv = _normalize_matrix_dates_for_csv(list_matrix_2d)
         else:
@@ -806,31 +845,19 @@ def _do_save_csv_body(
             )
         normalize_ms = _elapsed_ms(t_norm0)
 
-        if progress_path is not None:
-            _progress_write_monotonic(
-                progress_path,
-                {
-                    "status": "RUN",
-                    "phase_i": 2,
-                    "phase": "ファイル保存中",
-                    "done": val_total,
-                    "total": val_total,
-                    "pct": 75,
-                },
-            )
-
         t_df0 = time.perf_counter()
         df = pd.DataFrame(matrix_for_csv)
         dataframe_ms = _elapsed_ms(t_df0)
 
         t_csv0 = time.perf_counter()
-        df.to_csv(
-            str_save_path,
-            encoding="utf-8-sig",
-            index=False,
-            header=False,
-            quoting=csv.QUOTE_MINIMAL,
-        )
+        with SaveBlockProgressTicker(_save_pct_tick, row_count=row_count_saved):
+            df.to_csv(
+                str_save_path,
+                encoding="utf-8-sig",
+                index=False,
+                header=False,
+                quoting=csv.QUOTE_MINIMAL,
+            )
         to_csv_ms = _elapsed_ms(t_csv0)
         write_ms = normalize_ms + dataframe_ms + to_csv_ms
         logger.info(
@@ -853,22 +880,10 @@ def _do_save_csv_body(
             time.perf_counter(),
         )
 
-    if progress_path is not None and use_display_text:
-        _progress_write_monotonic(
-            progress_path,
-            {
-                "status": "RUN",
-                "phase_i": 2,
-                "phase": "ファイル保存中",
-                "done": val_total,
-                "total": val_total,
-                "pct": 75,
-            },
-        )
+    _save_pct_tick(95)
 
-    str_fn_saved = os.path.basename(str_save_path)
-    val_rows_saved = len(list_matrix_2d)
     str_size_saved = _get_formatted_size(str_save_path)
+    val_rows_saved = row_count_saved
     ptr_s_name = getattr(ptr_s, "name", "") or "Sheet1"
 
     # 完了通知は csv_ld と同様の情報（シート名・ファイル名・容量・行数）を表示する
@@ -886,23 +901,42 @@ def _do_save_csv_body(
     except Exception:
         pass
     if progress_path is not None:
-        _progress_write_monotonic(
-            progress_path,
-            {
-                "status": "DONE",
-                "phase_i": total_steps,
-                "phase": "完了",
-                "done": val_total,
-                "total": val_total,
-                "pct": 100,
-                "show_done_dialog": True,
-                "done_items": [
-                    {"no": 1, "name": str_fn_saved, "rows": val_rows_saved},
-                ],
-                "done_detail_text": done_detail_text,
-            },
-        )
+        done_body: dict[str, Any] = {
+            "status": "DONE",
+            **macro_progress_nm(SV_PHASE_TOTAL, SV_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
+            "phase_i": SV_PHASE_TOTAL,
+            "phase": f"{SV_PHASE_TOTAL}/{SV_PHASE_TOTAL} 完了",
+            "pct": 100,
+            "show_done_dialog": True,
+            "done_items": [
+                {"no": 1, "name": str_fn_saved, "rows": val_rows_saved},
+            ],
+            "done_detail_text": done_detail_text,
+        }
+        if not _progress_write_done_verified(progress_path, done_body):
+            logger.error(
+                "[CSV_SV] progress DONE write/verify failed path=%s file=%s",
+                progress_path,
+                str_fn_saved,
+            )
+            _progress_write_monotonic(
+                progress_path,
+                {
+                    "status": "ERROR",
+                    "phase": "進捗通知エラー",
+                    "detail": "進捗完了の反映に失敗しました。保存は完了しています。",
+                    "pct": 0,
+                },
+            )
     logger.info("[CSV_SV] 完了 ファイル=%s 行数=%s", str_fn_saved, val_rows_saved)
+    if progress_path is not None and progress_ack_expected:
+        wait_progress_closed_with_nudge(
+            progress_closed_path,
+            parent_hwnd=int(parent_hwnd or 0),
+            sheet_id=str(sheet_id or sheet_id_for_progress or "_"),
+            progress_path=progress_path,
+            log_tag="CSV_SV",
+        )
 
 
 def _watch_result(

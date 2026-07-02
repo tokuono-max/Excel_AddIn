@@ -3,14 +3,20 @@
 Python: 3.12+
 Module: ui_qt/ui_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-06-06
-Version: 1.3.11
+Updated: 2026-06-30
+Version: 1.3.17
 Purpose:
   CSV読込用 UI（ファイル選択・進捗表示）。機能ごとにセパレート（ui_csv_mg に依存しない）。
   - 設定は config/ui_csv_ld.json を参照。ファイル選択は Qt を使わずネイティブダイアログのみ（Excel を親にした QWidget を渡す）。
   - 進捗は no_native_window で枠だけ表示を回避。
 
 History (latest 3):
+  - 1.3.17 (2026-06-30) 進捗 show 直後に ensure_progress_dialog_front を同期呼び出し（2巡目 ld 進捗 Z順）。
+  - 1.3.16 (2026-06-29) ファイル選択: ui_fil v0.4.0（comdlg32 直叩き。QFileDialog ホスト廃止）。
+  - 1.3.15 (2026-06-29) ファイル選択: ui_fil.show_open_file_dialog_for_excel（QFileDialog.exec＋FG監視。不可視 QWidget 廃止）。
+  - 1.3.14 (2026-06-29) ネイティブファイル選択: ui_fil.prepare_native_file_dialog_excel に集約（ロック後再前面化＋Excel ルート無効化。他機能連続後の背後表示対策）。
+  - 1.3.13 (2026-06-29) ネイティブファイル選択: ensure_front を bring_excel_first=true に戻し processEvents（Excel 背後に開く事象の修正）。
+  - 1.3.12 (2026-06-29) ファイル選択: 確定後の Excel 前面化を廃止。表示前 ensure_front(bring_excel_first=false)。
   - 1.3.11 (2026-06-06) ネイティブファイル選択直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
   - 1.3.10 (2026-04-10) 計測: ネイティブファイル選択直前に `[CSV_LD_UI] phase=native_file_dialog_open`（区間 A 終点の目安）。docs/csv_ld_perf_measurement.md 参照。
   - 1.3.9 (2026-04-07) ファイル選択終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
@@ -22,11 +28,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication
 
 from core.core_log import get_logger
 
-__version__ = "1.3.11"
+__version__ = "1.3.17"
 
 _logger_ld_ui = get_logger(__name__)
 
@@ -63,46 +69,22 @@ class _CsvLoadFileDialog:
 
     def exec(self) -> int:
         """ファイル選択ダイアログを表示。表示中は Excel 操作を無効化し、OK/キャンセル後に有効化。Qt は使わずネイティブのみ。"""
-        parent_widget = None
         ph = int(self._parent_hwnd or 0)
         path = ""
         try:
-            if ph:
-                try:
-                    from ui_qt.ui_common import _set_owner_hwnd
-                    parent_widget = QWidget()
-                    parent_widget.winId()
-                    _set_owner_hwnd(parent_widget, ph)
-                except Exception:
-                    parent_widget = None
-            if ph:
-                try:
-                    from ui_qt.ui_win import enable_excel_window
-                    enable_excel_window(ph, False)
-                except Exception:
-                    pass
             initial_dir = str(self._req_dict.get("initial_dir") or "").strip()
-            from ui_qt import ui_fil
-
             _logger_ld_ui.info(
                 "[CSV_LD_UI] phase=native_file_dialog_open sheet_id=%s hwnd=%s",
                 self._sheet_id,
                 ph,
             )
-            path = ui_fil.show_open_file_dialog(parent_widget, self._title, initial_dir, self._filter)
-        finally:
-            if ph:
-                try:
-                    from ui_qt.ui_win import enable_excel_window
-                    enable_excel_window(ph, True)
-                except Exception:
-                    pass
-                try:
-                    from core import core_w32 as _w32
+            from ui_qt import ui_fil
 
-                    _w32.bring_to_front(ph)
-                except Exception:
-                    pass
+            path = ui_fil.show_open_file_dialog_for_excel(
+                ph, self._title, initial_dir, self._filter
+            )
+        except Exception:
+            path = ""
 
         path = (path or "").strip()
         if path:
@@ -123,6 +105,12 @@ class _CsvLdProgressWrapper:
 
     def show(self) -> None:
         self._dlg.show()
+        try:
+            from ui_qt.ui_dialog_progress import ensure_progress_dialog_front
+
+            ensure_progress_dialog_front(self._dlg)
+        except Exception:
+            pass
         try:
             QApplication.processEvents()
         except Exception:
