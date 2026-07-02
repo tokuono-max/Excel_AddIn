@@ -3,11 +3,16 @@
 Python: 3.12
 Module: svc/svc_dt_hm.py
 Created: 2026-03-06
-Updated: 2026-04-06
-Version: 1.1.2
+Updated: 2026-07-02
+Version: 1.1.7
 Purpose:
   日付・時刻変換（選択範囲を YYYY/MM/DD HH:MM 形式へ一括変換）。処理は本モジュール、画面は ui_qt.ui_dt_hm + config/ui_dt_hm.json。
 History (latest 3):
+  - 1.1.7 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
+  - 1.1.6 (2026-07-02) Undo 部分スナップショット: 選択外接矩形のみ save_undo_snapshot に渡す。
+  - 1.1.5 (2026-07-02) 完了通知 UX: progress DONE に done_delay_ms、ACK 待ち中 ScreenUpdating 維持、完了 UI 送出後は bring_to_front スキップ。
+  - 1.1.4 (2026-07-02) 解析ベクトル化・COM 読込チャンク拡大・ほぼ全行変化時の一括書込 fast path。
+  - 1.1.3 (2026-07-02) 選択範囲を UsedRange 交差に縮小、変更行のみ書込、書込中 ScreenUpdating 停止。
   - 1.1.2 (2026-06-13) Version / __version__ / History 番号を同期。
   - 1.1.0 (2026-04-06) HC_LOG_PERF: [DT_HM_PERF]。診断: [DT_HM_TRACE]。
   - 1.0.0 (2026-03-18) hc_dt_hm から分離。core_xlc/get_excel_context_from_hwnd、進捗IPC、完了通知。
@@ -40,11 +45,22 @@ from core.progress_close_ack import (  # noqa: E402
     reset_progress_closed_ack,
     wait_progress_closed_with_nudge,
 )
+from core.progress_pickle_write import (  # noqa: E402
+    dispatch_progress_write,
+    write_progress_done_with_fallback,
+)
+from svc.dt_convert_helpers import (  # noqa: E402
+    count_rows_to_write,
+    format_datetime_column,
+    read_sheet_matrix as _read_sheet_matrix_impl,
+    trim_areas_to_used_range,
+    write_changed_slices,
+)
 
 logger = get_logger(__name__)
 _dt_hm_diag = get_diag_logger("hc_csv_tool.diag.dt_hm")
 _perf = get_perf_logger("svc.svc_dt_hm.perf")
-__version__ = "1.1.2"
+__version__ = "1.1.4"
 
 
 def _elapsed_ms(since: float) -> int:
@@ -156,23 +172,30 @@ def _progress_path(sheet_id: str) -> Path:
     return d / f"progress_dt_hm_{sheet_id}.pkl"
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    """
-    進捗情報を Pickle で path に書き出す。
-    seq が未指定の場合は既存ファイルの seq をインクリメントして順序を保証する。
-    """
-    try:
-        from ui_qt.ipc_file import read_pickle
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    """進捗情報を Pickle で path に書き出す（verified / monotonic seq）。"""
+    return dispatch_progress_write(path, obj, log_tag="DT_HM")
 
-        obj = dict(obj)
-        if "seq" not in obj:
-            try:
-                prev = read_pickle(path)
-                seq = int(prev.get("seq", -1)) + 1 if isinstance(prev, dict) else 0
-            except Exception:
-                seq = 0
-            obj["seq"] = seq
-        write_pickle(path, obj)
+
+DT_PROGRESS_DONE_DELAY_MS = 400
+
+
+def _progress_write_done(path: Path) -> bool:
+    return write_progress_done_with_fallback(
+        path,
+        {
+            "status": "DONE",
+            "seq": 999,
+            "done_delay_ms": DT_PROGRESS_DONE_DELAY_MS,
+        },
+        log_tag="DT_HM",
+        user_message="進捗完了の反映に失敗しました。日付・時刻変換は完了しています。",
+    )
+
+
+def _restore_excel_screen_updating(ptr_a: Any) -> None:
+    try:
+        ptr_a.api.ScreenUpdating = True
     except Exception:
         pass
 
@@ -405,22 +428,17 @@ def _read_sheet_matrix(
     シートの指定範囲 (y1,x1) から yn×xn をチャンク単位で読み、2 次元リストで返す。
     読込中は on_pct で進捗コールバックを呼ぶ。失敗時は None。
     """
-    msg_read = _msg(cfg, "PHASE_READ")
-    custom = (cfg.get("MESSAGES") or {}).get("PROGRESS_CUSTOM_READ") or "読込中"
-    chunk_rows = max(200, min(5000, yn))
-    acc: list[list[Any]] = []
-    try:
-        for r0 in range(0, yn, chunk_rows):
-            r1 = min(r0 + chunk_rows, yn)
-            pct = int(5 + (r1 / max(yn, 1)) * 35)
-            on_pct(pct, msg_read, custom)
-            rng = ptr_s.range((y1 + r0, x1), (y1 + r1 - 1, x1 + xn - 1))
-            part = rng.value
-            sub = _normalize_2d(part, r1 - r0, xn)
-            acc.extend(sub)
-        return acc if len(acc) == yn else None
-    except Exception:
-        return None
+    return _read_sheet_matrix_impl(
+        ptr_s,
+        y1,
+        x1,
+        yn,
+        xn,
+        on_pct,
+        msg_read=_msg(cfg, "PHASE_READ"),
+        custom_read=(cfg.get("MESSAGES") or {}).get("PROGRESS_CUSTOM_READ") or "読込中",
+        normalize_2d=_normalize_2d,
+    )
 
 
 def _sheet_id_resolve(ptr_s: Any, sheet_id: str) -> str:
@@ -474,6 +492,8 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
     prog_path = _progress_path(sid)
     progress_closed_path = progress_closed_ack_path("dt_hm", sid)
     progress_close_waited = False
+    done_ui_submitted = False
+    screen_updating_held = False
     seq = [0]  # 進捗の表示順序用
 
     def _upd(pct: int, phase: str, cur: str) -> None:
@@ -502,6 +522,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             _status_bar_set(ptr_w, _msg(cfg, "NO_SELECTION"))
             done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
             _submit_done_ui(ph, sid, _msg(cfg, "NO_SELECTION"), str(done_cfg.get("TITLE") or "日付・時刻変換"))
+            done_ui_submitted = True
             return
 
         areas: list[tuple[int, int, int, int]] = []
@@ -525,22 +546,40 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             val_xn = int(ptr_sel.columns.count)
             if val_yn >= 1 and val_xn >= 1:
                 areas.append((val_y1, val_x1, val_yn, val_xn))
+        rows_before_trim = int(sum(a[2] for a in areas))
+        areas = trim_areas_to_used_range(ptr_s, areas)
         total_sel_rows = int(sum(a[2] for a in areas))
         total_sel_cols = int(sum(a[3] for a in areas))
         logger.info(
-            "[DT_HM] 選択範囲 areas=%s rows=%s cols=%s",
+            "[DT_HM] 選択範囲 areas=%s rows=%s cols=%s (trim前 rows=%s)",
             len(areas),
             total_sel_rows,
             total_sel_cols,
+            rows_before_trim,
         )
-        _perf_dt_hm("after_selection", t_flow, areas=len(areas), rows=total_sel_rows, cols=total_sel_cols)
-        _dt_hm_trace("after_selection", t_flow, areas=len(areas), rows=total_sel_rows, cols=total_sel_cols)
+        _perf_dt_hm(
+            "after_selection",
+            t_flow,
+            areas=len(areas),
+            rows=total_sel_rows,
+            cols=total_sel_cols,
+            rows_before_trim=rows_before_trim,
+        )
+        _dt_hm_trace(
+            "after_selection",
+            t_flow,
+            areas=len(areas),
+            rows=total_sel_rows,
+            cols=total_sel_cols,
+            rows_before_trim=rows_before_trim,
+        )
         if not areas:
             _perf_dt_hm("early_empty_selection", t_flow)
             _dt_hm_trace("early_empty_selection", t_flow)
             _status_bar_set(ptr_w, _msg(cfg, "NO_SELECTION"))
             done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
             _submit_done_ui(ph, sid, _msg(cfg, "NO_SELECTION"), str(done_cfg.get("TITLE") or "日付・時刻変換"))
+            done_ui_submitted = True
             return
 
         # 進捗画面を表示し、UI サーバに進捗表示を依頼（3 フェーズ: 読込・解析・書込）
@@ -566,7 +605,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
         val_success_n = 0
         non_empty_count = 0
         processed_rows = 0
-        converted_areas: list[tuple[int, int, list[list[object]]]] = []
+        converted_areas: list[tuple[int, int, list[list[object]], list[list[object]]]] = []
         for a_idx, (val_y1, val_x1, val_yn, val_xn) in enumerate(areas, start=1):
             pct_read = int(5 + ((a_idx - 1) / max(1, len(areas))) * 30)
             _upd(pct_read, _msg(cfg, "PHASE_READ"), f"area {a_idx}/{len(areas)}")
@@ -575,7 +614,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
                 logger.warning("[DT_HM] 読込失敗 area=%s", a_idx)
                 _perf_dt_hm("abort_matrix_read_failed", t_flow, area=a_idx)
                 _dt_hm_trace("abort_matrix_read_failed", t_flow, area=a_idx)
-                _progress_write(prog_path, {"status": "DONE", "seq": 999})
+                _progress_write_done(prog_path)
                 if not progress_close_waited:
                     wait_progress_closed_with_nudge(
                         progress_closed_path,
@@ -588,6 +627,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
                 _status_bar_set(ptr_w, _msg(cfg, "ERROR_PREFIX"))
                 done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
                 _submit_done_ui(ph, sid, _msg(cfg, "ERROR_PREFIX"), str(done_cfg.get("TITLE") or "日付・時刻変換"))
+                done_ui_submitted = True
                 return
             _upd(
                 int(35 + (a_idx / max(1, len(areas))) * 15),
@@ -597,19 +637,15 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             df_worker = pd.DataFrame(arr)
             for j_idx in range(val_xn):
                 ser_col = df_worker.iloc[:, j_idx]
-                non_empty_count += int((ser_col.notna() & (ser_col.astype(str).str.strip() != "")).sum())
-            for j_idx in range(val_xn):
-                ser_col = df_worker.iloc[:, j_idx]
                 ser_dt = _parse_datetime_with_normalized_fallback(ser_col)
-                ser_fmt = ser_dt.dt.strftime("%Y/%m/%d %H:%M")
-                ser_final = [
-                    (f if pd.notna(d) else shape_datetime_value(o))
-                    for o, d, f in zip(ser_col.tolist(), ser_dt.tolist(), ser_fmt.tolist())
-                ]
-                df_worker.iloc[:, j_idx] = ser_final
-                ser_mask = ser_dt.notnull()
-                val_success_n += int(ser_mask.sum())
-            converted_areas.append((val_y1, val_x1, df_worker.values.tolist()))
+                ser_out, col_success, col_non_empty = format_datetime_column(
+                    ser_col, ser_dt, "%Y/%m/%d %H:%M", shape_datetime_value
+                )
+                df_worker.iloc[:, j_idx] = ser_out.to_numpy()
+                val_success_n += col_success
+                non_empty_count += col_non_empty
+            final_rows = df_worker.to_numpy(dtype=object).tolist()
+            converted_areas.append((val_y1, val_x1, arr, final_rows))
             processed_rows += val_yn
 
         _perf_dt_hm("after_matrix_read", t_flow, rows=processed_rows, cols=total_sel_cols)
@@ -619,7 +655,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
 
         # 日付形式チェック: 空でないセルが1つ以上あるが、いずれも日付でない場合はワーニングのみで変換しない
         if non_empty_count >= 1 and val_success_n == 0:
-            _progress_write(prog_path, {"status": "DONE", "seq": 999})
+            _progress_write_done(prog_path)
             if not progress_close_waited:
                 wait_progress_closed_with_nudge(
                     progress_closed_path,
@@ -632,6 +668,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             _status_bar_set(ptr_w, _msg(cfg, "WARNING_NOT_DATE"))
             done_cfg = (cfg.get("SCREENS") or {}).get("DONE") or {}
             _submit_warning_ui(ph, sid, _msg(cfg, "WARNING_NOT_DATE"), str(done_cfg.get("TITLE") or "日付・時刻変換"))
+            done_ui_submitted = True
             logger.warning("[DT_HM] 運用ログ 日付形式なし 走査=%s 非日付セルのみ", processed_rows)
             _perf_dt_hm("early_warning_not_date", t_flow)
             _dt_hm_trace("early_warning_not_date", t_flow)
@@ -640,45 +677,63 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
         # 書込フェーズ: Interactive 停止、write_chunk で Excel に反映（進捗 50〜100%）
         _upd(50, _msg(cfg, "PHASE_WRITE"), (cfg.get("MESSAGES") or {}).get("PROGRESS_CUSTOM_WRITE") or "書込中")
         try:
+            from svc.dt_convert_helpers import snapshot_region_from_areas
             from svc.svc_undo import save_undo_snapshot
 
-            save_undo_snapshot(ptr_w, sheet_id=sheet_id, target_hwnd=ph, excel_hwnd=ph)
+            _snap_region = snapshot_region_from_areas(areas)
+            save_undo_snapshot(
+                ptr_w,
+                sheet_id=sheet_id,
+                target_hwnd=ph,
+                excel_hwnd=ph,
+                snapshot_region=_snap_region,
+            )
         except Exception as e:
             logger.warning("[DT_HM] save_undo_snapshot failed (undo unavailable): %s", e)
         ptr_a.api.Interactive = False
         try:
-            from core import core_xlc
-
-            total_rows_all = max(1, sum(len(a[2]) for a in converted_areas))
+            try:
+                ptr_a.api.ScreenUpdating = False
+                screen_updating_held = True
+            except Exception:
+                pass
+            mostly_changed = val_success_n >= max(1, int(processed_rows * 0.9))
+            total_rows_all = max(
+                1,
+                sum(
+                    count_rows_to_write(o, f, mostly_changed=mostly_changed)
+                    for _, _, o, f in converted_areas
+                ),
+            )
             written_rows = 0
-            for y1_i, x1_i, arr_i in converted_areas:
-                total_rows_i = len(arr_i)
+            for y1_i, x1_i, orig_i, final_i in converted_areas:
+                area_written_base = written_rows
 
-                def _write_progress_cb(done: int) -> None:
-                    if total_rows_i > 0:
-                        seq[0] += 1
-                        pct = int(50 + ((written_rows + done) / total_rows_all) * 50)
-                        _progress_write(
-                            prog_path,
-                            {
-                                "status": "RUN",
-                                "phase": _msg(cfg, "PHASE_WRITE"),
-                                "pct": min(100, pct),
-                                "done": pct,
-                                "total": 100,
-                                "seq": seq[0],
-                            },
-                        )
+                def _write_progress_cb(done: int, _base: int = area_written_base) -> None:
+                    seq[0] += 1
+                    pct = int(50 + ((_base + done) / total_rows_all) * 50)
+                    _progress_write(
+                        prog_path,
+                        {
+                            "status": "RUN",
+                            "phase": _msg(cfg, "PHASE_WRITE"),
+                            "pct": min(100, pct),
+                            "done": pct,
+                            "total": 100,
+                            "seq": seq[0],
+                        },
+                    )
 
-                core_xlc.write_chunk(
+                written_rows += write_changed_slices(
                     ptr_s,
                     y1_i,
                     x1_i,
-                    arr_i,
+                    orig_i,
+                    final_i,
                     progress_cb=_write_progress_cb,
                     text_mode=True,
+                    mostly_changed=mostly_changed,
                 )
-                written_rows += total_rows_i
         finally:
             try:
                 ptr_a.api.Interactive = True
@@ -688,7 +743,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
         _perf_dt_hm("after_write_chunk", t_flow, success_n=val_success_n)
         _dt_hm_trace("after_write_chunk", t_flow, success_n=val_success_n)
 
-        _progress_write(prog_path, {"status": "DONE", "seq": 999})
+        _progress_write_done(prog_path)
         if not progress_close_waited:
             wait_progress_closed_with_nudge(
                 progress_closed_path,
@@ -698,6 +753,9 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
                 log_tag="DT_HM",
             )
             progress_close_waited = True
+        if screen_updating_held:
+            _restore_excel_screen_updating(ptr_a)
+            screen_updating_held = False
         logger.info("[DT_HM] 完了 走査=%s 変換件数=%s", processed_rows, val_success_n)
         logger.info("[DT_HM] 運用ログ 日付・時刻変換 走査=%s 変換件数=%s", processed_rows, val_success_n)
         _status_bar_set(ptr_w, _msg(cfg, "STATUS_DONE", scanned=processed_rows, count=val_success_n))
@@ -708,6 +766,7 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             _msg(cfg, "STATUS_DONE", scanned=processed_rows, count=val_success_n),
             str(done_cfg.get("TITLE") or "日付・時刻変換"),
         )
+        done_ui_submitted = True
         _perf_dt_hm("after_done_ui", t_flow, success_n=val_success_n)
         _dt_hm_trace("after_done_ui", t_flow, success_n=val_success_n)
 
@@ -722,19 +781,23 @@ def convert_date_ymd_hm(target_hwnd: Optional[int] = None, sheet_id: str = "") -
             ptr_a.api.Interactive = True
         except Exception:
             pass
+        if screen_updating_held:
+            _restore_excel_screen_updating(ptr_a)
+            screen_updating_held = False
         try:
-            _progress_write(prog_path, {"status": "DONE", "seq": 999})
+            _progress_write_done(prog_path)
         except Exception:
             pass
         try:
             _status_bar_restore(ptr_w, saved_status)
         except Exception:
             pass
-        try:
-            from core import core_w32
+        if not done_ui_submitted:
+            try:
+                from core import core_w32
 
-            core_w32.bring_to_front(ph)
-        except Exception:
-            pass
+                core_w32.bring_to_front(ph)
+            except Exception:
+                pass
         _perf_dt_hm("flow_end", t_flow)
         _dt_hm_trace("flow_end", t_flow)

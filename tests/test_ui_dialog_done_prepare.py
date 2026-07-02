@@ -58,3 +58,19 @@ def test_done_opacity_reveal_after_show(_app: QApplication) -> None:
     assert dlg.windowOpacity() == 1.0
     assert bool(getattr(dlg, "_done_opacity_reveal_pending", False)) is False
     dlg.close()
+
+
+def test_done_detail_only_skips_file_list(_app: QApplication) -> None:
+    dlg = create_done_dialog(
+        {"detail_text": "日付変換完了\n走査: 1 行\n変換: 1 件"},
+        0,
+        None,
+        {
+            "TITLE": "日付変換",
+            "MSG_HEADER": "",
+            "ICON": "Information",
+            "WINDOW": {"DEFAULT_WIDTH": 360, "DEFAULT_HEIGHT": 120},
+        },
+    )
+    assert getattr(dlg, "_done_plain", None) is None
+    dlg.close()

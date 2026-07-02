@@ -944,6 +944,19 @@ def want_excel_child_hwnd_lock_while_modal(win_cfg: dict) -> bool:
     return bool(w.get("EXCEL_CHILD_HWND_LOCK_WHILE_MODAL", True))
 
 
+def want_bring_excel_first_while_modal(win_cfg: dict) -> bool:
+    """
+    ensure_front の bring_excel_first。明示 BRING_EXCEL_FIRST があればそれに従う。
+    未指定時は TOPMOST 完了通知はダイアログ先行（Excel 選択ちらつき抑制）、それ以外は EXCEL_LOCK に合わせる。
+    """
+    w = win_cfg or {}
+    if "BRING_EXCEL_FIRST" in w:
+        return bool(w.get("BRING_EXCEL_FIRST"))
+    if w.get("TOPMOST") or w.get("ALWAYS_IN_FRONT_OF_EXCEL"):
+        return False
+    return want_excel_child_hwnd_lock_while_modal(w)
+
+
 def done_dialog_show_event_on_excel(
     w: QWidget,
     parent_hwnd: int,
@@ -963,7 +976,7 @@ def done_dialog_show_event_on_excel(
     win_cfg = (screen_cfg or {}).get("WINDOW") or {}
     want_lock = want_excel_child_hwnd_lock_while_modal(win_cfg)
     want_front = bool(win_cfg.get("TOPMOST") or win_cfg.get("ALWAYS_IN_FRONT_OF_EXCEL"))
-    bring_excel_first = bool(want_lock)
+    bring_excel_first = want_bring_excel_first_while_modal(win_cfg)
     if ph:
         try:
             if bool(win_cfg.get("CENTER_ON_EXCEL", True)):

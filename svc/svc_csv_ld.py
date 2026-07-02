@@ -3,14 +3,16 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-06-14
-Version: 1.3.35
+Updated: 2026-07-02
+Version: 1.3.37
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.37 (2026-07-02) 進捗 pickle を core.progress_pickle_write に統一。DONE 検証・失敗ログ・ERROR fallback。
+  - 1.3.36 (2026-06-30) （未コミット系の版上げを含む）
   - 1.3.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
   - 1.3.34 (2026-06-29) 工程3進捗に AutoFit/AutoFilter の実行・省略を明示。ACK タイムアウト時に ui_server へ nudge。
   - 1.3.33 (2026-06-29) 展開後 AutoFit/AutoFilter を ui_csv_ld.json（AUTOFIT_MAX_ROWS / AUTOFILTER）に統一。環境変数 HC_CSV_LD_AUTOFIT_* / SKIP_AUTOFIT 廃止。
@@ -70,6 +72,15 @@ from core.csv_tool_progress_pct import (
     csv_ld_pct,
     macro_progress_nm,
 )
+from core.progress_pickle_write import (
+    adopt_progress_seq,
+    sync_progress_seq_from_pickle,
+    write_progress_done_verified,
+    write_progress_error_fallback,
+    write_progress_monotonic,
+    write_progress_pickle,
+    write_progress_terminal_verified,
+)
 from core.excel_host_restore import restore_excel_host_after_operation
 from core.excel_perf_mode import set_excel_performance_mode
 from core.core_cursor import (
@@ -88,7 +99,9 @@ from svc.csv_excel_post_write import (
 )
 from svc.svc_host import ensure_ui_server
 
-__version__ = "1.3.36"
+__version__ = "1.3.37"
+
+_CSV_LD_LOG_TAG = "CSV_LD"
 
 
 def _log_jit_breakdown(
@@ -225,7 +238,6 @@ def _ld_run_progress(
     current_file: str = "",
     intra_done: int = 0,
     intra_total: int = 0,
-    seq: int | None = None,
 ) -> None:
     """進捗 RUN: 右下=工程 N/M、バー=加重 pct、行数は detail。"""
     pi = int(phase_i)
@@ -242,15 +254,12 @@ def _ld_run_progress(
     cf = str(current_file or "").strip()
     if cf:
         body["current_file"] = cf
-    if seq is not None:
-        body["seq"] = int(seq)
-    _progress_write(progress_path, body)
+    write_progress_monotonic(progress_path, body, log_tag=_CSV_LD_LOG_TAG)
 
 
 def _write_csv_ld_phase3_step_progress(
     progress_path: Path,
     *,
-    seq: int,
     step: str,
     prog_row_total: int,
     str_fname: str,
@@ -275,7 +284,6 @@ def _write_csv_ld_phase3_step_progress(
         current_file=str_fname,
         intra_done=prog_row_total,
         intra_total=max(1, prog_row_total),
-        seq=seq,
     )
 
 
@@ -461,26 +469,36 @@ def _progress_path(sheet_id: str) -> Path:
     return d / f"progress_ld_{sheet_id}.pkl"
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    try:
-        write_pickle(path, obj)
-    except Exception:
-        pass
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    """進捗 pickle 書込（テスト互換・明示 seq も可）。"""
+    body = dict(obj)
+    status = str(body.get("status", "RUN") or "RUN").strip().upper()
+    if status == "DONE":
+        return write_progress_done_verified(path, body, log_tag=_CSV_LD_LOG_TAG)
+    if status in ("ERROR", "CANCEL"):
+        return write_progress_terminal_verified(
+            path,
+            body,
+            expected_status=status,
+            log_tag=_CSV_LD_LOG_TAG,
+        )
+    if "seq" in body:
+        adopt_progress_seq(path, int(body["seq"]))
+        return write_progress_pickle(path, body, log_tag=_CSV_LD_LOG_TAG)
+    return write_progress_monotonic(path, body, log_tag=_CSV_LD_LOG_TAG)
 
 
-def _read_progress_last_seq(path: Path | None) -> int:
-    """進捗 pickle の直近 seq（無い・読取失敗時は 0）。"""
-    if path is None:
-        return 0
-    try:
-        if not path.exists() or path.stat().st_size <= 0:
-            return 0
-        d = read_pickle(path)
-        if not isinstance(d, dict):
-            return 0
-        return max(0, int(d.get("seq", 0) or 0))
-    except Exception:
-        return 0
+def _progress_write_done_with_fallback(path: Path, done_body: dict[str, Any]) -> bool:
+    """DONE を検証付きで書き、失敗時は ERROR 終端で UI を閉じられるようにする。"""
+    if write_progress_done_verified(path, done_body, log_tag=_CSV_LD_LOG_TAG):
+        return True
+    logger.error("[CSV_LD] progress DONE write/verify failed path=%s", path)
+    write_progress_error_fallback(
+        path,
+        log_tag=_CSV_LD_LOG_TAG,
+        user_message="進捗完了の反映に失敗しました。読込は完了しています。",
+    )
+    return False
 
 
 def _progress_write_terminal(
@@ -493,11 +511,37 @@ def _progress_write_terminal(
     """終端進捗（DONE/ERROR/CANCEL）を seq 単調増加で書く。戻り値は書き込んだ seq。"""
     if path is None:
         return 0
-    next_seq = int(seq) if seq is not None else (_read_progress_last_seq(path) + 1)
-    payload: dict[str, Any] = {"status": str(status or "").strip(), "seq": next_seq}
-    payload.update(fields)
-    _progress_write(path, payload)
-    return next_seq
+    payload: dict[str, Any] = {"status": str(status or "").strip(), **fields}
+    st = payload["status"].upper()
+    if seq is not None:
+        adopt_progress_seq(path, int(seq) - 1)
+    if st == "DONE":
+        if not write_progress_done_verified(path, payload, log_tag=_CSV_LD_LOG_TAG):
+            write_progress_error_fallback(
+                path,
+                log_tag=_CSV_LD_LOG_TAG,
+                user_message="進捗完了の反映に失敗しました。読込は完了しています。",
+            )
+    elif st in ("ERROR", "CANCEL"):
+        if not write_progress_terminal_verified(
+            path,
+            payload,
+            expected_status=st,
+            log_tag=_CSV_LD_LOG_TAG,
+        ):
+            write_progress_monotonic(path, payload, log_tag=_CSV_LD_LOG_TAG)
+    else:
+        write_progress_monotonic(path, payload, log_tag=_CSV_LD_LOG_TAG)
+    try:
+        d = read_pickle(path)
+        if isinstance(d, dict):
+            try:
+                return max(0, int(d.get("seq", 0)))
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    return int(seq) if seq is not None else 0
 
 
 def _capture_book_attach_keys(book: Any) -> tuple[int, str, str]:
@@ -938,7 +982,7 @@ def _execute_jit_import(
     )
 
     def _emit_write_progress(done_rows: int, *, time_only: bool = False) -> None:
-        nonlocal progress_seq, last_progress_rows, last_progress_mono
+        nonlocal last_progress_rows, last_progress_mono
         if progress_path is None:
             return
         emit_ok = False
@@ -969,9 +1013,7 @@ def _execute_jit_import(
             current_file=str_fname,
             intra_done=done_rows,
             intra_total=prog_row_total,
-            seq=progress_seq,
         )
-        progress_seq += 1
         last_progress_rows = done_rows
         last_progress_mono = time.monotonic()
     # 読込値は全て文字列として扱う（空セルは NaN にせず '' のまま）
@@ -986,8 +1028,6 @@ def _execute_jit_import(
 
     # 工程: 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了
     total_steps = 4
-    # 準備中を _do_load_csv で既に seq=0 で出している場合は phase1 を seq=1 から開始
-    progress_seq = 2 if progress_ui_already_shown else 0
     if progress_path is not None:
         _ld_run_progress(
             progress_path,
@@ -999,9 +1039,7 @@ def _execute_jit_import(
             current_file=str_fname,
             intra_done=0,
             intra_total=max(1, prog_row_total),
-            seq=progress_seq,
         )
-        progress_seq += 1
         if progress_ui_already_shown:
             time.sleep(0.05)
         else:
@@ -1026,9 +1064,7 @@ def _execute_jit_import(
                 current_file=str_fname,
                 intra_done=0,
                 intra_total=max(1, prog_row_total),
-                seq=progress_seq,
             )
-            progress_seq += 1
 
     # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に ACK 待ちで遅延）
     t_csv_read_wait0 = time.perf_counter()
@@ -1182,13 +1218,11 @@ def _execute_jit_import(
             if progress_path is not None:
                 _write_csv_ld_phase3_step_progress(
                     progress_path,
-                    seq=progress_seq,
                     step="autofit_run" if will_af else "autofit_skip",
                     prog_row_total=prog_row_total,
                     str_fname=str_fname,
                     sheet_part=sheet_part,
                 )
-                progress_seq += 1
             try:
                 t_af0 = time.perf_counter()
                 for s in book.sheets:
@@ -1205,27 +1239,23 @@ def _execute_jit_import(
                         if progress_path is not None:
                             _write_csv_ld_phase3_step_progress(
                                 progress_path,
-                                seq=progress_seq,
                                 step="autofilter_run",
                                 prog_row_total=prog_row_total,
                                 str_fname=str_fname,
                                 sheet_part=sheet_part,
                             )
-                            progress_seq += 1
                         apply_csv_autofilter_ld(
                             s, last_row=last_row_i, max_col=max_col
                         )
                     elif progress_path is not None:
                         _write_csv_ld_phase3_step_progress(
                             progress_path,
-                            seq=progress_seq,
                             step="autofilter_skip",
                             prog_row_total=prog_row_total,
                             str_fname=str_fname,
                             sheet_part=sheet_part,
                             extra="設定オフ",
                         )
-                        progress_seq += 1
                     break
                 ms_autofit += _elapsed_ms(t_af0)
             except Exception:
@@ -1234,7 +1264,6 @@ def _execute_jit_import(
                 xlc.yield_to_excel()
 
     if progress_path is not None:
-        logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
         data_rows = max(0, val_total - 1)
         done_detail_text = (
             f"シート名：{str_base_resolved}\n"
@@ -1244,7 +1273,7 @@ def _execute_jit_import(
             f"データ：{data_rows} 行\n"
             f"総数(ヘッダ含)：{val_total} 行"
         )
-        _progress_write(
+        _progress_write_done_with_fallback(
             progress_path,
             {
                 "status": "DONE",
@@ -1259,9 +1288,9 @@ def _execute_jit_import(
                 ],
                 "done_detail_text": done_detail_text,
                 "done_delay_ms": CSV_LD_DONE_DELAY_MS,
-                "seq": progress_seq,
             },
         )
+        logger.info("[CSV_LD] 完了 行数=%s シート数=%s", val_total, curr_part_idx)
         # UI が進捗クローズ＋完了通知表示まで終えるのを ACK で待つ（finally の restore より先に UI を完了させる）
     jit_total_ms = _elapsed_ms(t_jit_body0)
     _log_jit_breakdown(
@@ -1302,6 +1331,8 @@ def _do_load_csv(
     progress_path = _progress_path(sheet_id)
     progress_closed_path = progress_closed_ack_path(sheet_id)
     reset_progress_closed_ack(progress_closed_path)
+    if progress_ui_already_shown:
+        sync_progress_seq_from_pickle(progress_path)
     progress_ack_expected = bool(progress_ui_already_shown)
     # 進捗を早期表示（ui_server が既に表示済みでない場合のみ。csv_ld ファイル選択経路では ui_server が即表示するためスキップ）
     if not progress_ui_already_shown:
@@ -1309,7 +1340,6 @@ def _do_load_csv(
             progress_path,
             phase_i=0,
             phase="準備中...",
-            seq=0,
         )
         if parent_hwnd:
             _submit_progress_ui(
@@ -1357,7 +1387,6 @@ def _do_load_csv(
             phase=_csv_ld_progress_phase_label(1, "ファイル解析中"),
             detail=_csv_ld_progress_detail(extra=f"行数確認中 — {str_fname_early}"),
             current_file=str_fname_early,
-            seq=1,
         )
 
     t_rows0 = time.perf_counter()

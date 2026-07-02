@@ -4,7 +4,7 @@ Python: 3.12
 Module: ui_qt/ui_dialog_done.py
 Created: 2026-03-10
 Updated: 2026-07-02
-Version: 0.2.6
+Version: 0.2.7
 Purpose:
   共通完了通知ダイアログ（DoneDialog）および create_done_dialog を提供する。
   ui_common の Done 実装を本モジュールへ移し、画面種別ごとの責務分離を行う。
@@ -17,7 +17,7 @@ Purpose:
   - 呼び出し側は ui_common.create_done_dialog / create_dialog 経由のため既存コード変更不要。
 
 History (latest 3):
-  - 0.2.6 (2026-07-02) _prepare_done_before_show: サイズ確定→winId の順に変更。show 前 opacity 0、showEvent 後に配置確定して不透明化（大枠チラつき抑制）。
+  - 0.2.7 (2026-07-02) MSG_HEADER 空文字明示時は detail_text のみ表示（dt_ymd/dt_hm 等）。リスト枠を出さない。
   - 0.2.5 (2026-06-13) showEvent: done_dialog_show_event_on_excel に一本化（EXCEL_LOCK=false 時は Excel を先に前面化しない）。
   - 0.2.4 (2026-04-08) 名前列幅を実ファイル名長＋上限で算出（短い名前での過剰幅を抑制）。req.output_dir を MSG_OUTPUT_DIR_PREFIX で表示。
   - 0.2.3 (2026-04-08) DEFAULT_WIDTH=0 時、一覧幅に合わせダイアログ幅を確保（行数・容量列の見切れ抑制）。items の rows/row_count・size_bytes フォールバック。
@@ -72,7 +72,7 @@ from ui_qt.ui_common import (
 # 定数: アイコン既定ピクセル（ui_common の _ICON_SIZE_M と揃える。ICON_SIZE 未指定時のフォールバック）
 _ICON_SIZE_M = 24
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 
 
 def _fmt_size_bytes(n: int, unit: str = "auto", decimals: int = 1) -> str:
@@ -155,7 +155,23 @@ class DoneDialog(QDialog):
 
         # 変数: レイアウト構築開始（縦方向・上寄せ）
         lay = QVBoxLayout(self)
-        msg_header = _normalize_message_newlines(str(_cfg.get("MSG_HEADER") or "結合完了しました。"))
+        hdr_raw = _cfg.get("MSG_HEADER")
+        if hdr_raw is not None:
+            msg_header = _normalize_message_newlines(str(hdr_raw))
+        else:
+            msg_header = _normalize_message_newlines("結合完了しました。")
+        if detail_text and not msg_header.strip():
+            header_row_text = _normalize_message_newlines(detail_text)
+            detail_body = ""
+            use_list_section = False
+        elif detail_text:
+            header_row_text = msg_header
+            detail_body = _normalize_message_newlines(detail_text)
+            use_list_section = False
+        else:
+            header_row_text = msg_header
+            detail_body = ""
+            use_list_section = True
         # 判定: アイコン表示（ICON が設定されていれば S/M/L でサイズ取得し pixmap を取得）
         icon_key = str(_cfg.get("ICON") or "").strip().lower()
         sz = _icon_size_pixels_from_config(_cfg.get("ICON_SIZE"), default_pixels=_ICON_SIZE_M)
@@ -179,25 +195,29 @@ class DoneDialog(QDialog):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
             row.addWidget(icon_lbl)
-            _lbl = QLabel(msg_header)
+            _lbl = QLabel(header_row_text)
             _lbl.setAlignment(
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
+            _lbl.setWordWrap(True)
+            _lbl.setTextFormat(Qt.TextFormat.PlainText)
             row.addWidget(_lbl)
             row.addStretch(1)
             lay.addLayout(row)
         else:
-            _lbl = QLabel(msg_header)
+            _lbl = QLabel(header_row_text)
             _lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            _lbl.setWordWrap(True)
+            _lbl.setTextFormat(Qt.TextFormat.PlainText)
             lay.addWidget(_lbl)
-        # 判定: detail_text ありなら 1 件用詳細表示（改行正規化・折り返し）。なければ件数＋リスト表示
-        if detail_text:
-            _dt_lbl = QLabel(_normalize_message_newlines(detail_text))
+        # 判定: detail_body ありならヘッダ下に追加表示。なければ件数＋リスト表示
+        if detail_body:
+            _dt_lbl = QLabel(detail_body)
             _dt_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             _dt_lbl.setWordWrap(True)
             _dt_lbl.setTextFormat(Qt.TextFormat.PlainText)
             lay.addWidget(_dt_lbl)
-        else:
+        elif use_list_section:
             # 結合ファイル数・総行数ラベル＋ファイル一覧（QPlainTextEdit: QListWidget より行間を詰める）
             win0 = (_cfg.get("WINDOW") or {})
             dwa = int(win0.get("DEFAULT_WIDTH") or 0)

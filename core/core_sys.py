@@ -3,8 +3,8 @@
 Pythonバージョン: 3.10+
 モジュール名: core_sys
 作成日: 2025-12-05
-更新日: 2026-01-26
-バージョン: 1.0.2
+更新日: 2026-07-02
+バージョン: 1.0.3
 概要:
     物理ファイルシステム操作、実行パス特定、および物理キャッシュ（Pickle）の管理を担当。
     方程式「hc + sys (System)」に基づき、アドインの動作環境に関する低層ロジックを管理する。
@@ -13,15 +13,18 @@ Pythonバージョン: 3.10+
     保守性を確保するため、すべての主要ロジックに詳細な意図（目的）を付与。
 
 改訂履歴:
+    1.0.3: CacheManager をキー別ファイル＋zlib 圧縮に変更（Undo 保存・読込の高速化）。旧単一 pkl は読込・削除時のみ互換参照。
     1.0.2: 原子分解レベルの更なる深化と、例外ガードの厳格化。
     1.0.1: キャッシュ保存先を Windows Temp ディレクトリに変更。
     1.0.0: 新規分割作成。パッケージ化構造への対応。
 """
 
 import os
+import re
 import sys
 import pickle
 import tempfile
+import zlib
 from typing import Any, Optional
 
 # ==============================================================================
@@ -131,127 +134,121 @@ def get_file_size_str(abs_path_val: str) -> str:
 class CacheManager:
     """
     概要: Pickle 形式を用いた物理キャッシュ（Undo用データ）の読み書きを管理。
-    【重要】本バージョンより、Windows の一時フォルダ（Tmp）へ保存先を物理固定。
+    キーごとに %TEMP% 配下の個別ファイルへ保存（zlib 圧縮）。旧単一 pkl は読込互換のみ。
     """
+
+    _COMPRESS_LEVEL = 1
 
     @staticmethod
     def _get_abs_path_atomic() -> str:
         """
         Method Name : _get_abs_path_atomic
-        Return      : str : キャッシュファイルの絶対物理パス
-        概要: OS 標準の一時ディレクトリを原子特定し、保存用パスを構築。
+        Return      : str : レガシー単一キャッシュファイルの絶対物理パス
         """
-        # 【目的】Windows の Tmp フォルダ（%TEMP%）を物理的に特定するため。
-        # 命令分離: tempfile ライブラリの組み込み関数を実行。
         str_tmp_dir_root = tempfile.gettempdir()
-
-        # 変数: 保存ファイル名の取得（core.hc_cst 参照）。
         str_cache_fn = c.CACHE_FILE_NAME
+        return os.path.join(str_tmp_dir_root, str_cache_fn)
 
-        # 命令分離: 一時フォルダとファイル名の物理的なパス結合。
-        str_full_abs_p = os.path.join(str_tmp_dir_root, str_cache_fn)
+    @staticmethod
+    def _get_entries_dir() -> str:
+        """キー別 Undo エントリを格納するディレクトリ。"""
+        base = os.path.splitext(os.path.basename(c.CACHE_FILE_NAME))[0] or "header_converter_cache"
+        path_dir = os.path.join(tempfile.gettempdir(), f"{base}_undo")
+        try:
+            os.makedirs(path_dir, exist_ok=True)
+        except Exception:
+            pass
+        return path_dir
 
-        # 返却。
-        return str_full_abs_p
+    @staticmethod
+    def _entry_path(key_str: str) -> str:
+        safe = re.sub(r'[\\/:*?"<>|]', "_", str(key_str or "").strip()) or "undo"
+        if len(safe) > 180:
+            import hashlib
+
+            digest = hashlib.sha256(safe.encode("utf-8", errors="replace")).hexdigest()[:16]
+            safe = f"{safe[:120]}_{digest}"
+        return os.path.join(CacheManager._get_entries_dir(), f"{safe}.undo.pkl")
+
+    @staticmethod
+    def _serialize_payload(data_payload: Any) -> bytes:
+        raw = pickle.dumps(data_payload, protocol=pickle.HIGHEST_PROTOCOL)
+        return zlib.compress(raw, level=CacheManager._COMPRESS_LEVEL)
+
+    @staticmethod
+    def _deserialize_payload(blob: bytes) -> Any:
+        try:
+            raw = zlib.decompress(blob)
+        except zlib.error:
+            raw = blob
+        return pickle.loads(raw)
+
+    @staticmethod
+    def _atomic_write_bytes(path: str, data: bytes) -> None:
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as f_ptr_write:
+            f_ptr_write.write(data)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _legacy_load(key_str: str) -> Optional[Any]:
+        path_p_load = CacheManager._get_abs_path_atomic()
+        if not os.path.exists(path_p_load):
+            return None
+        try:
+            with open(path_p_load, "rb") as f_ptr_load:
+                dict_master_v = pickle.load(f_ptr_load)
+                if key_str in dict_master_v:
+                    return dict_master_v.get(key_str)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _legacy_delete(key_str: str) -> None:
+        path_p_del = CacheManager._get_abs_path_atomic()
+        if not os.path.exists(path_p_del):
+            return
+        try:
+            with open(path_p_del, "rb") as f_ptr_edit:
+                dict_master_edit = pickle.load(f_ptr_edit)
+            if key_str not in dict_master_edit:
+                return
+            del dict_master_edit[key_str]
+            with open(path_p_del, "wb") as f_ptr_sync:
+                pickle.dump(dict_master_edit, f_ptr_sync)
+        except Exception:
+            pass
 
     @staticmethod
     def save(key_str: str, data_payload: Any) -> None:
-        """
-        Method Name : save
-        Arguments   : key_str (str) : 固体識別キー, data_payload (Any) : 保存データ
-        概要: 指定された物理キーでデータを Windows Tmp フォルダへ永続化。
-        """
-        # 変数: Tmp フォルダ内のパス。
-        path_p_save = CacheManager._get_abs_path_atomic()
-
-        # 変数: 全体バッファ辞書の初期化。
-        dict_data_buf = {}
-
-        # 判定コメント: 既存キャッシュファイルの物理存在を確認。
-        bool_f_exists = os.path.exists(path_p_save)
-
-        if bool_f_exists:
-            try:
-                # 命令分離: 物理リードオープン。
-                with open(path_p_save, "rb") as f_ptr_read:
-                    # 命令分離: 全内容をメモリへ吸引。
-                    dict_data_buf = pickle.load(f_ptr_read)
-            except Exception:
-                # 判定コメント: 読込失敗時は空の辞書から再構成。
-                dict_data_buf = {}
-
-        # 命令分離: 指定キーに基づいた原子エントリの追加・更新。
-        dict_data_buf[key_str] = data_payload
-
+        """指定キーのペイロードを個別ファイルへ保存（全件 pkl の読込・書込を避ける）。"""
+        path_entry = CacheManager._entry_path(key_str)
         try:
-            # 命令分離: 物理ディスク（Tmp）への書き出しを執行。
-            with open(path_p_save, "wb") as f_ptr_write:
-                # 命令分離: シリアライズ（Pickle）の実行。
-                pickle.dump(dict_data_buf, f_ptr_write)
+            CacheManager._atomic_write_bytes(path_entry, CacheManager._serialize_payload(data_payload))
         except Exception:
-            # 沈黙。
             pass
 
     @staticmethod
     def load(key_str: str) -> Optional[Any]:
-        """
-        Method Name : load
-        Arguments   : key_str (str) : 取得対象キー
-        概要: 一時フォルダ内のキャッシュから指定データを原子吸引。
-        """
-        # 変数: 物理パスの捕捉。
-        path_p_load = CacheManager._get_abs_path_atomic()
-
-        # 判定コメント: キャッシュファイル自体の存否確認。
-        bool_exists = os.path.exists(path_p_load)
-        if not bool_exists:
-            return None
-
-        try:
-            # 命令分離: 物理オープン（バイナリリード）。
-            with open(path_p_load, "rb") as f_ptr_load:
-                # 命令分離: デシリアライズ執行。
-                dict_master_v = pickle.load(f_ptr_load)
-
-                # 判定コメント: 指定キーが物理的に含まれているか。
-                if key_str in dict_master_v:
-                    # 変数: データの原子抽出。
-                    val_data_res = dict_master_v.get(key_str)
-                    return val_data_res
-        except Exception:
-            # 沈黙。
-            pass
-
-        return None
+        """個別ファイルを優先読込。無ければレガシー単一 pkl から取得。"""
+        path_entry = CacheManager._entry_path(key_str)
+        if os.path.exists(path_entry):
+            try:
+                with open(path_entry, "rb") as f_ptr_load:
+                    return CacheManager._deserialize_payload(f_ptr_load.read())
+            except Exception:
+                pass
+        return CacheManager._legacy_load(key_str)
 
     @staticmethod
     def delete(key_str: str) -> None:
-        """
-        Method Name : delete
-        Arguments   : key_str (str) : 抹消対象キー
-        概要: 指定されたキャッシュエントリを原子レベルで抹消。
-        """
-        # 変数: パス捕捉。
-        path_p_del = CacheManager._get_abs_path_atomic()
-
-        # 判定コメント: 存在確認。
-        bool_f_exists = os.path.exists(path_p_del)
-        if not bool_f_exists:
-            return
-
+        """個別ファイルとレガシー辞書の両方からキーを削除。"""
+        path_entry = CacheManager._entry_path(key_str)
         try:
-            # 命令分離: 全ロードの執行。
-            with open(path_p_del, "rb") as f_ptr_edit:
-                dict_master_edit = pickle.load(f_ptr_edit)
-
-            # 判定コメント: キーの存在を確認。
-            if key_str in dict_master_edit:
-                # 命令分離: 辞書からの物理削除。
-                del dict_master_edit[key_str]
-
-                # 命令分離: 物理ディスクへの書き戻し同期。
-                with open(path_p_del, "wb") as f_ptr_sync:
-                    pickle.dump(dict_master_edit, f_ptr_sync)
-        except Exception:
-            # 沈黙。
+            os.remove(path_entry)
+        except FileNotFoundError:
             pass
+        except Exception:
+            pass
+        CacheManager._legacy_delete(key_str)

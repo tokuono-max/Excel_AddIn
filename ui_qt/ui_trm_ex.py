@@ -3,10 +3,12 @@
 Python: 3.12
 Module: ui_qt/ui_trm_ex.py
 Created: 2026-03-19
-Version: 1.1.2
+Version: 1.2.1
 Purpose:
   文頭・文末トリムの UI（選択ダイアログ・完了通知）。設定は config/ui_trm_ex.json 必須。
 History (latest 3):
+  - 1.2.1 (2026-07-02) CHOICE: アイコンと文言を横並びにし、固定高さによる余白を解消。
+  - 1.2.0 (2026-07-02) CHOICE: デフォルトボタンを全削除に。viewport 着色の ScreenUpdating 固定でちらつき抑制。
   - 1.1.2 (2026-05-05) progress action を追加。svc_trm_ex の実行中進捗を共通 ProgressDialog で表示。
   - 1.1.1 (2026-04-13) CHOICE: prepare 後に遅延 _set_owner_hwnd 再試行（apply_window_config の CHOICE スキップ分の補強）。JSON は EXCEL_KEEP_FOREGROUND 既定オフ・VIEWPORT POLL_MS 緩めは設定側。
   - 1.1.0 (2026-04-13) 選択ダイアログ表示中、文頭・文末検出セルを viewport 追従で着色（ui_dupli と同系）。閉じる／ボタン確定時に全解除＋sidecar 削除。
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLa
 
 from ui_qt import ipc_file
 
-__version__ = "1.1.2"
+__version__ = "1.2.1"
 
 _log_trm_ui = logging.getLogger(__name__)
 
@@ -104,6 +106,10 @@ class _TrmExChoiceDialog(QDialog):
             (),
             (),
         )
+        self._vp_screen_frozen = False
+        self._vp_prev_screen: Any = True
+        self._vp_prev_calc: Any = None
+        self._btn_all: QPushButton | None = None
         _full_cfg = _get_cfg()
         _vp_cfg = _full_cfg.get("VIEWPORT_HIGHLIGHT") or {}
         try:
@@ -182,7 +188,12 @@ class _TrmExChoiceDialog(QDialog):
         )
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
         icon_key = str(self._choice_cfg.get("ICON") or "").strip()
+        row_body = QHBoxLayout()
+        row_body.setSpacing(10)
+        row_body.setContentsMargins(0, 0, 0, 0)
         if icon_key:
             try:
                 sz = _icon_size_pixels_from_config(self._choice_cfg.get("ICON_SIZE"), default_pixels=24)
@@ -191,13 +202,23 @@ class _TrmExChoiceDialog(QDialog):
                     icon_lbl = QLabel(self)
                     icon_lbl.setPixmap(px)
                     icon_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-                    lay.addWidget(icon_lbl)
+                    icon_lbl.setSizePolicy(
+                        icon_lbl.sizePolicy().horizontalPolicy(),
+                        icon_lbl.sizePolicy().Policy.Fixed,
+                    )
+                    row_body.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
             except Exception:
                 pass
         msg_lbl = QLabel(_normalize_message_newlines(message))
         msg_lbl.setWordWrap(True)
-        msg_lbl.setMinimumWidth(320)
-        lay.addWidget(msg_lbl)
+        msg_lbl.setMinimumWidth(300)
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        msg_lbl.setSizePolicy(
+            msg_lbl.sizePolicy().Policy.Expanding,
+            msg_lbl.sizePolicy().Policy.Minimum,
+        )
+        row_body.addWidget(msg_lbl, 1)
+        lay.addLayout(row_body)
 
         row_btns = QHBoxLayout()
         row_btns.addStretch(1)
@@ -212,6 +233,11 @@ class _TrmExChoiceDialog(QDialog):
         btn_all = QPushButton(str(self._choice_cfg.get("BTN_ALL") or "全削除"))
         btn_all.setToolTip(str(self._choice_cfg.get("BTN_ALL_TOOLTIP") or ""))
         btn_all.clicked.connect(lambda: self._on_choice("all"))
+        default_btn = str(self._choice_cfg.get("DEFAULT_BUTTON") or "all").strip().lower()
+        if default_btn == "all":
+            btn_all.setDefault(True)
+            btn_all.setAutoDefault(True)
+            self._btn_all = btn_all
         row_btns.addWidget(btn_all)
         btn_cancel = QPushButton(str(self._choice_cfg.get("BTN_CANCEL") or "キャンセル"))
         btn_cancel.setToolTip(str(self._choice_cfg.get("BTN_CANCEL_TOOLTIP") or ""))
@@ -235,6 +261,28 @@ class _TrmExChoiceDialog(QDialog):
         self._vp_timer.timeout.connect(self._trm_viewport_highlight_tick)  # type: ignore[attr-defined]
         self._vp_timer.setInterval(self._vp_poll_ms)
 
+    def _trm_restore_excel_screen_if_frozen(self) -> None:
+        if not self._vp_screen_frozen or not int(self._parent_hwnd or 0):
+            self._vp_screen_frozen = False
+            return
+        try:
+            from xlwings import App
+            from xlwings._xlwindows import App as WinApp
+
+            app = App(impl=WinApp(xl=int(self._parent_hwnd)))
+            api = app.api
+            try:
+                api.Calculation = self._vp_prev_calc
+            except Exception:
+                pass
+            try:
+                api.ScreenUpdating = self._vp_prev_screen
+            except Exception:
+                pass
+        except Exception:
+            pass
+        self._vp_screen_frozen = False
+
     def _trm_teardown_highlight(self) -> None:
         """着色タイマー停止・表示中＋画面外の検出セル背景をすべて解除し、sidecar を削除する。"""
         if self._viewport_teardown_done:
@@ -249,6 +297,7 @@ class _TrmExChoiceDialog(QDialog):
         self._vp_applied = []
         self._vp_skip_bounds = None
         self._vp_skip_paint = ((), ())
+        self._trm_restore_excel_screen_if_frozen()
         try:
             sp = self._sidecar_path
             if sp is not None and sp.is_file():
@@ -368,13 +417,16 @@ class _TrmExChoiceDialog(QDialog):
             paint_sig = (sig_l, sig_t)
             if self._vp_skip_bounds == bounds and self._vp_skip_paint == paint_sig:
                 return
-            prev_screen = True
-            prev_calc: Any = _XL_CALC_AUTO_UI
+            if not self._vp_screen_frozen:
+                try:
+                    self._vp_prev_screen = api.ScreenUpdating
+                    self._vp_prev_calc = api.Calculation
+                    api.ScreenUpdating = False
+                    api.Calculation = _XL_CALC_MANUAL_UI
+                    self._vp_screen_frozen = True
+                except Exception:
+                    pass
             try:
-                prev_screen = api.ScreenUpdating
-                prev_calc = api.Calculation
-                api.ScreenUpdating = False
-                api.Calculation = _XL_CALC_MANUAL_UI
                 for quad in self._vp_applied:
                     if len(quad) < 4:
                         continue
@@ -398,15 +450,8 @@ class _TrmExChoiceDialog(QDialog):
                         self._vp_applied.append([r1, c1, r2, c2])
                     except Exception:
                         pass
-            finally:
-                try:
-                    api.Calculation = prev_calc
-                except Exception:
-                    pass
-                try:
-                    api.ScreenUpdating = prev_screen
-                except Exception:
-                    pass
+            except Exception:
+                pass
             self._vp_skip_bounds = bounds
             self._vp_skip_paint = paint_sig
         except Exception as exc:
@@ -443,11 +488,17 @@ class _TrmExChoiceDialog(QDialog):
             and self._parent_hwnd
         ):
             try:
-                QTimer.singleShot(0, self._trm_viewport_highlight_tick)
+                QTimer.singleShot(300, self._trm_viewport_highlight_tick)
             except Exception:
                 pass
             try:
                 self._vp_timer.start()
+            except Exception:
+                pass
+        btn_all = getattr(self, "_btn_all", None)
+        if btn_all is not None:
+            try:
+                btn_all.setFocus()
             except Exception:
                 pass
 

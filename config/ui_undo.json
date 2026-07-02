@@ -112,7 +112,8 @@
         "DEFAULT_WIDTH": 0,
         "DEFAULT_HEIGHT": 0,
         "TOPMOST": true,
-        "EXCEL_LOCK": false
+        "EXCEL_LOCK": false,
+        "BRING_EXCEL_FIRST": false
       }
     }
   }

@@ -4,10 +4,11 @@ Python: 3.12
 Module: svc/svc_col_dl.py
 Created: 2026-03-06
 Updated: 2026-05-05
-Version: 1.2.1
+Version: 1.2.2
 Purpose:
   空白列削除（Excel UsedRange）。データ行のみ空欄判定（1 行目除外）、確認後に列全体削除。
 History (latest 3):
+  - 1.2.2 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.2.1 (2026-05-05) 進捗→サブ画面順序を ACK 待ちで保証。progress_closed_path を進捗UIへ渡し、進捗クローズ後に preview/done を表示（sleep 依存を廃止）。
   - 1.2.0 (2026-04-10) ヘッダ行除外の空欄判定、進捗キャンセル、確認モーダル、Interactive・完了待機。
   - 1.1.0 (2026-04-06) HC_LOG_PERF: [COL_DL_PERF] phase / cumulative_ms。診断: [COL_DL_TRACE]。
@@ -36,11 +37,12 @@ from core.progress_close_ack import (  # noqa: E402
     reset_progress_closed_ack,
     wait_progress_closed_with_nudge,
 )
+from core.progress_pickle_write import dispatch_progress_write  # noqa: E402
 
 logger = get_logger(__name__)
 _col_diag = get_diag_logger("hc_csv_tool.diag.col_dl")
 _perf = get_perf_logger("svc.svc_col_dl.perf")
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 
 class _ColDlCancelled(Exception):
@@ -209,25 +211,9 @@ def _wait_ui_dispatch_result(result_path: Path, timeout_sec: float = 120.0) -> d
     return None
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    """
-    進捗情報を Pickle で path に書き出す。
-    seq が未指定の場合は既存ファイルの seq をインクリメントして順序を保証する。
-    """
-    try:
-        from ui_qt.ipc_file import read_pickle
-
-        obj = dict(obj)
-        if "seq" not in obj:
-            try:
-                prev = read_pickle(path)
-                seq = int(prev.get("seq", -1)) + 1 if isinstance(prev, dict) else 0
-            except Exception:
-                seq = 0
-            obj["seq"] = seq
-        write_pickle(path, obj)
-    except Exception:
-        pass
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    """進捗情報を Pickle で path に書き出す（verified / monotonic seq）。"""
+    return dispatch_progress_write(path, obj, log_tag="COL_DL")
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:

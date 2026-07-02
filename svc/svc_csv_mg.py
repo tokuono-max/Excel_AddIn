@@ -3,14 +3,16 @@
 Python: 3.12+
 Module: svc/svc_csv_mg.py
 Created: 2026-02-11
-Updated: 2026-06-22 (JST)
-Version: 1.4.35
+Updated: 2026-07-02 (JST)
+Version: 1.4.37
 Purpose:
   CSV結合（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_server.py（Qt UIサーバ）で行う。
   - svc は Excel 操作と業務処理に専念し、UIとは IPC(Pickle) で通信する。
 
 History (latest 3):
+  - 1.4.37 (2026-07-02) 進捗 pickle を core.progress_pickle_write に統一。DONE 検証・失敗ログ・ERROR fallback。
+  - 1.4.36 (2026-06-30) （未コミット系の版上げを含む）
   - 1.4.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
   - 1.4.34 (2026-06-29) 進捗を done/total 行数同期に統一。読込中も N/M 更新。pct 明示送信を廃止。
   - 1.4.33 (2026-06-29) 進捗バー: 工程3の疑似クリープ廃止・done_delay 400ms・DONE 後待機 0.25s で完了通知を短縮。
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-__version__ = "1.4.36"
+__version__ = "1.4.37"
 import os
 import re
 import threading
@@ -77,6 +79,13 @@ from core.progress_close_ack import (
     progress_closed_ack_path,
     reset_progress_closed_ack,
     wait_progress_closed_with_nudge,
+)
+from core.progress_pickle_write import (
+    reset_progress_seq,
+    write_progress_done_verified,
+    write_progress_error_fallback,
+    write_progress_monotonic,
+    write_progress_terminal_verified,
 )
 from svc.csv_excel_post_write import (
     CSV_MG_FEATURE_KEY,
@@ -147,31 +156,11 @@ def _progress_path(sheet_id: str) -> Path:
     return d / f"progress_{sheet_id}.pkl"
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    try:
-        write_pickle(path, obj)
-    except Exception:
-        pass
+_CSV_MG_LOG_TAG = "CSV_MG"
 
 
-# 進捗ファイルごとに単調増加する seq（UI 側の古い更新無視と整合）
-_PROGRESS_SEQ: dict[str, int] = {}
-
-
-def _progress_key(path: Path) -> str:
-    try:
-        return str(path.resolve())
-    except Exception:
-        return str(path)
-
-
-def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> None:
-    key = _progress_key(path)
-    n = _PROGRESS_SEQ.get(key, -1) + 1
-    _PROGRESS_SEQ[key] = n
-    merged = dict(obj)
-    merged["seq"] = n
-    _progress_write(path, merged)
+def _progress_write_monotonic(path: Path, obj: dict[str, Any]) -> bool:
+    return write_progress_monotonic(path, obj, log_tag=_CSV_MG_LOG_TAG)
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -1036,19 +1025,28 @@ def _merge_files_to_sheet(
 
             if progress_path is not None:
                 _phase("P4-9", step="done_progress_pickle", items=len(done_ser))
-                _progress_write_monotonic(
-                    progress_path,
-                    {
-                        "status": "DONE",
-                        **macro_progress_nm(4, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
-                        "phase_i": 4,
-                        "phase": f"4/{MG_PHASE_TOTAL} 完了",
-                        "pct": 100,
-                        "show_done_dialog": True,
-                        "done_items": done_ser,
-                        "done_delay_ms": 400,
-                    },
-                )
+                done_body: dict[str, Any] = {
+                    "status": "DONE",
+                    **macro_progress_nm(4, MG_PHASE_TOTAL, unit=PROGRESS_UNIT_PHASE),
+                    "phase_i": 4,
+                    "phase": f"4/{MG_PHASE_TOTAL} 完了",
+                    "pct": 100,
+                    "show_done_dialog": True,
+                    "done_items": done_ser,
+                    "done_delay_ms": 400,
+                }
+                if not write_progress_done_verified(
+                    progress_path, done_body, log_tag=_CSV_MG_LOG_TAG
+                ):
+                    logger.error(
+                        "[CSV_MG] progress DONE write/verify failed path=%s",
+                        progress_path,
+                    )
+                    write_progress_error_fallback(
+                        progress_path,
+                        log_tag=_CSV_MG_LOG_TAG,
+                        user_message="進捗完了の反映に失敗しました。結合は完了しています。",
+                    )
                 wait_after_progress_done(min_sec=0.25)
 
         excel_write_ms = _elapsed_ms(t_excel_write0)
@@ -1100,10 +1098,16 @@ def _merge_files_to_sheet(
     except Exception as ex:
         logger.error("[CSV_MG] 結合失敗: %s", ex, exc_info=True)
         if progress_path is not None:
-            _progress_write_monotonic(
+            if not write_progress_terminal_verified(
                 progress_path,
                 {"status": "ERROR", "phase_i": 4, "phase": "エラー", "detail": str(ex)},
-            )
+                expected_status="ERROR",
+                log_tag=_CSV_MG_LOG_TAG,
+            ):
+                _progress_write_monotonic(
+                    progress_path,
+                    {"status": "ERROR", "phase_i": 4, "phase": "エラー", "detail": str(ex)},
+                )
     finally:
         if xlc is not None and not _screen_updating_restored:
             try:
@@ -1117,7 +1121,7 @@ def _merge_files_to_sheet(
                     pass
         if progress_path is not None:
             try:
-                _PROGRESS_SEQ.pop(_progress_key(progress_path), None)
+                reset_progress_seq(progress_path)
             except Exception:
                 pass
         try:

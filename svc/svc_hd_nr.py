@@ -4,12 +4,13 @@ Python: 3.10+
 Module: svc/svc_hd_nr
 Created: 2026-03-05
 Updated: 2026-04-06
-Version: 2.4.9
+Version: 2.5.0
 Purpose:
   行整形（ヘッダブロック横結合）。選択行をヘッダブロックとし、行を横列に結合してデータ領域を整形する。
   データ領域は一括読込→メモリ内で一括 reshape（numpy）→一括書込で高速化。チャンクループは行わない。  UI: ui_hd_nr + ui_common。JSON: config/ui_hd_nr.json。
 
 History (latest 3):
+  - 2.5.0 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（sleep 依存廃止、csv_ld 同型）。
   - 2.4.9 (2026-06-06) ハング緩和: clear/autofit/DONE を suspend with 内に統一（indent 修正）。
   - 2.4.8 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
   - 2.4.7 (2026-04-06) HC_LOG_PERF: [HD_NR_PERF] phase / cumulative_ms。診断: [HD_NR_TRACE]。
@@ -35,14 +36,22 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger
-from core.core_progress_wait import wait_after_progress_done
+from core.progress_close_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
+from core.progress_pickle_write import (
+    dispatch_progress_write,
+    write_progress_done_with_fallback,
+)
 from ui_qt.ipc_file import get_ipc_root, get_request_dir, read_pickle, write_pickle
 from svc.svc_host import ensure_ui_server
 
 logger = get_logger(__name__)
 _hd_nr_diag = get_diag_logger("hc_csv_tool.diag.hd_nr")
 _perf_hd_nr = get_perf_logger("svc.svc_hd_nr.perf")
-__version__ = "2.4.9"
+__version__ = "2.5.0"
 
 
 def _elapsed_ms_hd_nr(since: float) -> int:
@@ -278,6 +287,8 @@ def _submit_progress_ui(
     sheet_id: str,
     progress_path: Path,
     phase_total: int,
+    *,
+    progress_closed_path: Path | None = None,
 ) -> None:
     """進捗画面表示を UI サーバへ依頼（モデルレス）。"""
     req_dir = get_request_dir()
@@ -296,6 +307,10 @@ def _submit_progress_ui(
     er_p = _get_window_rect(int(parent_hwnd or 0))
     if er_p is not None:
         pr["excel_rect"] = list(er_p)
+    if progress_closed_path is not None:
+        cp = str(progress_closed_path).strip()
+        if cp:
+            pr["progress_closed_path"] = cp
     payload = {
         "parent_hwnd": int(parent_hwnd),
         "result_path": result_path,
@@ -469,12 +484,21 @@ def insert_header(
     except Exception:
         pass
     _PROGRESS_PHASES = 3  # シート読込 / 整形 / シート書込み
-    _submit_progress_ui(hwnd, sheet_id, progress_path, _PROGRESS_PHASES)
+    progress_closed_path = progress_closed_ack_path("hd_nr", sheet_id or "_")
+    reset_progress_closed_ack(progress_closed_path)
+    _submit_progress_ui(
+        hwnd,
+        sheet_id,
+        progress_path,
+        _PROGRESS_PHASES,
+        progress_closed_path=progress_closed_path,
+    )
     time.sleep(0.5)
 
     def _write_progress(done: int, total: int, phase: str) -> None:
-        try:
-            write_pickle(progress_path, {
+        dispatch_progress_write(
+            progress_path,
+            {
                 "status": "RUN",
                 "phase_i": done,
                 "phase_total": total,
@@ -482,9 +506,9 @@ def insert_header(
                 "done": done,
                 "total": total,
                 "pct": int(100 * done / total) if total else 0,
-            })
-        except Exception:
-            pass
+            },
+            log_tag="HD_NR",
+        )
 
     # 一括読込: データ領域を1回で取得
     data_2d: List[List[Any]] = []
@@ -637,8 +661,9 @@ def insert_header(
             _write_progress(3, _PROGRESS_PHASES, "シート書込み中")
 
             if shortage_output_rows:
-                try:
-                    write_pickle(progress_path, {
+                write_progress_done_with_fallback(
+                    progress_path,
+                    {
                         "status": "DONE",
                         "phase_i": _PROGRESS_PHASES,
                         "phase_total": _PROGRESS_PHASES,
@@ -646,13 +671,14 @@ def insert_header(
                         "total": _PROGRESS_PHASES,
                         "pct": 100,
                         "show_done_dialog": False,
-                    })
-                except Exception:
-                    pass
-                wait_after_progress_done(min_sec=0.5)
+                    },
+                    log_tag="HD_NR",
+                    user_message="進捗完了の反映に失敗しました。行整形は完了しています。",
+                )
             else:
-                try:
-                    write_pickle(progress_path, {
+                write_progress_done_with_fallback(
+                    progress_path,
+                    {
                         "status": "DONE",
                         "phase_i": _PROGRESS_PHASES,
                         "phase_total": _PROGRESS_PHASES,
@@ -662,10 +688,17 @@ def insert_header(
                         "show_done_dialog": True,
                         "done_items": [{"no": 1, "name": "行整形", "rows": total_chunks}],
                         "done_detail_text": f"シート名：{sheet_name}\\n整形ブロック数：{total_chunks}",
-                    })
-                except Exception:
-                    pass
-                wait_after_progress_done(min_sec=1.0)
+                    },
+                    log_tag="HD_NR",
+                    user_message="進捗完了の反映に失敗しました。行整形は完了しています。",
+                )
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                progress_path=progress_path,
+                log_tag="HD_NR",
+                parent_hwnd=int(hwnd or 0),
+                sheet_id=str(sheet_id or "_"),
+            )
     finally:
         xlc.restore_screen_updating(ptr_s)
 

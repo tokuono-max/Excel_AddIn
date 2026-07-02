@@ -3,12 +3,15 @@
 Python: 3.12
 Module: svc/svc_trm_ex.py
 Created: 2026-03-19
-Version: 1.2.5
+Version: 1.3.1
 Purpose:
   文頭・文末トリム（選択範囲の空白削除）。選択範囲または有効データ領域を走査し、
   文頭/文末の件数表示後に「文頭削除」「文末削除」「全削除」のいずれかを実行。Undo 対応。
   画面は ui_qt.ui_trm_ex + config/ui_trm_ex.json。
 History (latest 1):
+  - 1.3.1 (2026-07-02) 走査進捗を選択 UI 直前で 100% DONE クローズ（背面表示の解消）。適用フェーズで進捗を再表示。
+  - 1.3.0 (2026-07-02) 速度: UsedRange 交差・チャンク読込・対象セルのみ適用/差分書込。region スナップショット。走査段階から進捗表示。
+  - 1.2.6 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.2.5 (2026-06-29) 進捗クローズ ACK を共通モジュールへ統一（15秒+nudge）。3秒タイムアウトの独自待機を廃止。
   - 1.2.4 (2026-05-05) progress n/m の定義を変更。m=前後空白ありセル数（choice に応じた変換対象数）、n=変換中セル数。
   - 1.2.3 (2026-05-05) progress n/m をセル数ベースへ変更。更新頻度はセル進捗ステップ＋時間間引きで制御。
@@ -37,13 +40,22 @@ from core.progress_close_ack import (  # noqa: E402
     reset_progress_closed_ack,
     wait_progress_closed_with_nudge,
 )
+from core.progress_pickle_write import dispatch_progress_write  # noqa: E402
+from svc.dt_convert_helpers import (  # noqa: E402
+    read_sheet_matrix,
+    snapshot_region_from_areas,
+    trim_areas_to_used_range,
+    write_changed_slices,
+)
 
 _TRM_HL_SIDECAR_GLOB = "trm_ex_hl_rects_*.pkl"
 
 logger = get_logger(__name__)
 _trm_diag = get_diag_logger("hc_csv_tool.diag.trm_ex")
 _perf = get_perf_logger("svc.svc_trm_ex.perf")
-__version__ = "1.2.5"
+__version__ = "1.3.1"
+
+_TRM_PHASE_TOTAL = 3
 
 
 def _elapsed_ms(since: float) -> int:
@@ -188,6 +200,120 @@ def _normalize_2d(raw: Any, yn: int, xn: int) -> list[list[Any]]:
     return out
 
 
+def _areas_to_tuples(areas: list[dict[str, Any]]) -> list[tuple[int, int, int, int]]:
+    out: list[tuple[int, int, int, int]] = []
+    for a in areas:
+        yn_i = int(a.get("yn") or 0)
+        xn_i = int(a.get("xn") or 0)
+        if yn_i < 1 or xn_i < 1:
+            continue
+        out.append((int(a["y1"]), int(a["x1"]), yn_i, xn_i))
+    return out
+
+
+def _tuples_to_areas(tuples: list[tuple[int, int, int, int]]) -> list[dict[str, Any]]:
+    return [{"y1": y1, "x1": x1, "yn": yn, "xn": xn} for y1, x1, yn, xn in tuples]
+
+
+def _scan_trim_targets(
+    arr: list[list[Any]],
+    y1_i: int,
+    x1_i: int,
+) -> tuple[
+    int,
+    int,
+    int,
+    list[list[int]],
+    list[list[int]],
+    list[tuple[int, int, bool, bool]],
+]:
+    """文字列セルの文頭/文末空白を 1 パスで検出。適用対象 (ri, ci, lead, trail) も返す。"""
+    n_leading = 0
+    n_trailing = 0
+    n_any_target = 0
+    hl_leading: list[list[int]] = []
+    hl_trailing: list[list[int]] = []
+    targets: list[tuple[int, int, bool, bool]] = []
+    for ri, row in enumerate(arr):
+        for ci, cell in enumerate(row):
+            if not isinstance(cell, str):
+                continue
+            lead_hit = cell != cell.lstrip()
+            trail_hit = cell != cell.rstrip()
+            if not lead_hit and not trail_hit:
+                continue
+            r_abs = y1_i + ri
+            c_abs = x1_i + ci
+            if lead_hit:
+                n_leading += 1
+                hl_leading.append([r_abs, c_abs, r_abs, c_abs])
+            if trail_hit:
+                n_trailing += 1
+                hl_trailing.append([r_abs, c_abs, r_abs, c_abs])
+            n_any_target += 1
+            targets.append((ri, ci, lead_hit, trail_hit))
+    return n_leading, n_trailing, n_any_target, hl_leading, hl_trailing, targets
+
+
+def _apply_trim_targets(
+    arr: list[list[Any]],
+    targets: list[tuple[int, int, bool, bool]],
+    choice: str,
+    *,
+    progress_cb: Any | None = None,
+    total_target_cells: int = 1,
+) -> tuple[int, int]:
+    """検出済み対象セルのみ lstrip/rstrip/strip を適用。"""
+    n_leading_done = 0
+    n_trailing_done = 0
+    done_cells = 0
+    emit_step = max(1, int(total_target_cells) // 200)
+    last_emit = -1
+    last_emit_at = time.perf_counter()
+    emit_interval = 0.05
+    for ri, ci, lead_hit, trail_hit in targets:
+        cell = arr[ri][ci]
+        if not isinstance(cell, str):
+            continue
+        if choice == "leading":
+            if not lead_hit:
+                continue
+            new_val = cell.lstrip()
+            if new_val != cell:
+                n_leading_done += 1
+            arr[ri][ci] = new_val
+        elif choice == "trailing":
+            if not trail_hit:
+                continue
+            new_val = cell.rstrip()
+            if new_val != cell:
+                n_trailing_done += 1
+            arr[ri][ci] = new_val
+        else:
+            new_val = cell.strip()
+            if lead_hit:
+                n_leading_done += 1
+            if trail_hit:
+                n_trailing_done += 1
+            arr[ri][ci] = new_val
+        done_cells += 1
+        if progress_cb is None:
+            continue
+        now = time.perf_counter()
+        if (
+            done_cells >= total_target_cells
+            or (done_cells - last_emit) >= emit_step
+            or (now - last_emit_at) >= emit_interval
+        ):
+            try:
+                progress_cb(done_cells)
+            except Exception:
+                pass
+            last_emit = done_cells
+            last_emit_at = now
+    return n_leading_done, n_trailing_done
+
+
 def _rgb_to_excel_bgr_int(r: int, g: int, b: int) -> int:
     """Excel / xlwings Range.color 用の BGR パック整数（dupli._highlight_bgr と同式）。"""
     return int(r) + int(g) * 256 + int(b) * 65536
@@ -268,19 +394,8 @@ def _progress_path(sheet_id: str) -> Path:
     return d / f"progress_trm_ex_{sheet_id}.pkl"
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    try:
-        d = dict(obj)
-        if "seq" not in d:
-            try:
-                prev = read_pickle(path)
-                seq = int(prev.get("seq", -1)) + 1 if isinstance(prev, dict) else 0
-            except Exception:
-                seq = 0
-            d["seq"] = seq
-        write_pickle(path, d)
-    except Exception:
-        pass
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    return dispatch_progress_write(path, obj, log_tag="TRM_EX")
 
 
 def _submit_progress_ui(
@@ -626,56 +741,167 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             xn=total_cols,
         )
 
-        # 各 area を読込み 2 次元化して保持
+        trimmed = trim_areas_to_used_range(ptr_s, _areas_to_tuples(areas))
+        if trimmed:
+            areas = _tuples_to_areas(trimmed)
+            areas_total = max(1, len(areas))
+            total_rows = sum(int(a["yn"]) for a in areas)
+            total_cols = max(int(a["xn"]) for a in areas) if areas else 0
+            range_src = f"{range_src}_used_trim"
+        _perf_trm(
+            "after_used_range_trim",
+            t_flow,
+            source=range_src,
+            areas=areas_total,
+            yn=total_rows,
+            xn=total_cols,
+        )
+        _trm_trace(
+            "after_used_range_trim",
+            t_flow,
+            source=range_src,
+            areas=areas_total,
+            yn=total_rows,
+            xn=total_cols,
+        )
+
+        if not areas:
+            _status_bar_set(ptr_w, _msg(cfg, "NO_DATA"))
+            _submit_no_target_ui(ph, sheet_id, _msg(cfg, "NO_DATA"), cfg)
+            _perf_trm("early_no_data_after_trim", t_flow)
+            _trm_trace("early_no_data_after_trim", t_flow)
+            return
+
+        scan_progress_started = False
+
+        def _close_scan_progress() -> None:
+            nonlocal progress_close_waited
+            if not scan_progress_started or progress_close_waited:
+                return
+            _progress_write(
+                progress_path,
+                {
+                    "status": "DONE",
+                    "pct": 100,
+                    "phase_i": 1,
+                    "phase_total": _TRM_PHASE_TOTAL,
+                    "phase": _msg(cfg, "PHASE_SCAN"),
+                    "message": _msg(cfg, "PROGRESS_CUSTOM_SCAN"),
+                    "done": 1,
+                    "total": 1,
+                },
+            )
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                parent_hwnd=ph,
+                sheet_id=sid,
+                progress_path=progress_path,
+                log_tag="TRM_EX",
+            )
+            progress_close_waited = True
+
+        def _emit_scan_progress(pct: int, done: int, total: int, phase: str, custom: str) -> None:
+            _progress_write(
+                progress_path,
+                {
+                    "status": "RUN",
+                    "phase_i": 1,
+                    "phase_total": _TRM_PHASE_TOTAL,
+                    "phase": phase,
+                    "message": custom,
+                    "pct": max(0, min(40, int(pct))),
+                    "done": int(done),
+                    "total": max(1, int(total)),
+                },
+            )
+
+        try:
+            reset_progress_closed_ack(progress_closed_path)
+        except Exception:
+            pass
+        _emit_scan_progress(0, 0, 1, _msg(cfg, "PHASE_READ"), _msg(cfg, "PROGRESS_CUSTOM_READ"))
+        _submit_progress_ui(
+            ph,
+            sid,
+            progress_path,
+            phase_total=_TRM_PHASE_TOTAL,
+            progress_closed_path=progress_closed_path,
+        )
+        scan_progress_started = True
+        time.sleep(0.25)
+
+        msg_read = _msg(cfg, "PHASE_READ")
+        msg_scan = _msg(cfg, "PHASE_SCAN")
+        custom_read = _msg(cfg, "PROGRESS_CUSTOM_READ")
+        custom_scan = _msg(cfg, "PROGRESS_CUSTOM_SCAN")
+
+        # 各 area をチャンク読込し 2 次元化して保持
         area_payloads: list[dict[str, Any]] = []
         for a_idx, a in enumerate(areas, start=1):
             y1_i = int(a["y1"])
             x1_i = int(a["x1"])
             yn_i = int(a["yn"])
             xn_i = int(a["xn"])
-            try:
-                rng = ptr_s.range((y1_i, x1_i), (y1_i + yn_i - 1, x1_i + xn_i - 1))
-                raw = rng.value
-                arr_i = _normalize_2d(raw, yn_i, xn_i)
-            except Exception as e:
-                logger.warning("[TRM_EX] 読込失敗 area=%s: %s", a_idx, e)
+
+            def _on_read_pct(pct: int, _phase: str, _custom: str, *, _a_idx: int = a_idx) -> None:
+                _emit_scan_progress(
+                    pct,
+                    _a_idx - 1,
+                    areas_total,
+                    msg_read,
+                    custom_read,
+                )
+
+            arr_i = read_sheet_matrix(
+                ptr_s,
+                y1_i,
+                x1_i,
+                yn_i,
+                xn_i,
+                _on_read_pct,
+                msg_read=msg_read,
+                custom_read=custom_read,
+                normalize_2d=_normalize_2d,
+            )
+            if arr_i is None or len(arr_i) != yn_i:
+                _close_scan_progress()
                 _status_bar_set(ptr_w, _msg(cfg, "ERROR_PREFIX"))
                 _perf_trm("abort_matrix_read_failed", t_flow, area_i=a_idx, areas=areas_total)
                 _trm_trace("abort_matrix_read_failed", t_flow, area_i=a_idx, areas=areas_total)
-                return
-            if not arr_i or len(arr_i) != yn_i:
-                _status_bar_set(ptr_w, _msg(cfg, "ERROR_PREFIX"))
-                _perf_trm("abort_matrix_invalid", t_flow, area_i=a_idx, areas=areas_total)
-                _trm_trace("abort_matrix_invalid", t_flow, area_i=a_idx, areas=areas_total)
                 return
             area_payloads.append({"y1": y1_i, "x1": x1_i, "yn": yn_i, "xn": xn_i, "arr": arr_i})
 
         _perf_trm("after_matrix_read", t_flow, areas=areas_total, yn=total_rows, xn=total_cols)
         _trm_trace("after_matrix_read", t_flow, areas=areas_total, yn=total_rows, xn=total_cols)
-        # 文字列セルについて文頭・文末の件数と、着色用 1×1 矩形（シート座標）を集計
+
         n_leading = 0
         n_trailing = 0
         n_any_target = 0
         hl_leading: list[list[int]] = []
         hl_trailing: list[list[int]] = []
         for ap in area_payloads:
-            y1_i = int(ap["y1"])
-            x1_i = int(ap["x1"])
-            arr_i = ap["arr"]
-            for ri, row in enumerate(arr_i):
-                for ci, cell in enumerate(row):
-                    if not isinstance(cell, str):
-                        continue
-                    r_abs = y1_i + ri
-                    c_abs = x1_i + ci
-                    if cell != cell.lstrip():
-                        n_leading += 1
-                        hl_leading.append([r_abs, c_abs, r_abs, c_abs])
-                    if cell != cell.rstrip():
-                        n_trailing += 1
-                        hl_trailing.append([r_abs, c_abs, r_abs, c_abs])
-                    if (cell != cell.lstrip()) or (cell != cell.rstrip()):
-                        n_any_target += 1
+            (
+                nl,
+                nt,
+                na,
+                hll,
+                hlt,
+                targets,
+            ) = _scan_trim_targets(ap["arr"], int(ap["y1"]), int(ap["x1"]))
+            n_leading += nl
+            n_trailing += nt
+            n_any_target += na
+            hl_leading.extend(hll)
+            hl_trailing.extend(hlt)
+            ap["targets"] = targets
+
+        _emit_scan_progress(
+            40,
+            areas_total,
+            areas_total,
+            msg_scan,
+            custom_scan,
+        )
 
         logger.info(
             "[TRM_EX] 走査 areas=%s rows=%s cols=%s 文頭=%s 文末=%s",
@@ -705,6 +931,7 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
         )
 
         if n_leading == 0 and n_trailing == 0:
+            _close_scan_progress()
             _status_bar_set(ptr_w, _msg(cfg, "NO_TARGET"))
             _submit_no_target_ui(ph, sheet_id, _msg(cfg, "NO_TARGET"), cfg)
             logger.info("[TRM_EX] 削除対象なし")
@@ -726,6 +953,7 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             "sheet_name": _sheet_name_for_highlight(ptr_s),
             "viewport_follow": True,
         }
+        _close_scan_progress()
         _submit_choice_ui(ph, sid, result_path, n_leading, n_trailing, cfg, highlight_trm)
         _perf_trm("after_choice_ui_submit", t_flow)
         _trm_trace("after_choice_ui_submit", t_flow)
@@ -733,27 +961,36 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
         res = _poll_result(result_path)
         choice = (res or {}).get("choice") if isinstance(res, dict) else None
         if choice == "cancel" or choice is None:
+            _close_scan_progress()
             _status_bar_restore(ptr_w, saved_status)
             logger.info("[TRM_EX] ユーザーキャンセル")
             _perf_trm("user_cancel", t_flow, choice=choice)
             _trm_trace("user_cancel", t_flow, choice=choice)
             return
 
+        progress_close_waited = False
         try:
             reset_progress_closed_ack(progress_closed_path)
         except Exception:
             pass
+        if choice == "leading":
+            total_target_cells = max(1, int(n_leading))
+        elif choice == "trailing":
+            total_target_cells = max(1, int(n_trailing))
+        else:
+            total_target_cells = max(1, int(n_any_target))
+
         _progress_write(
             progress_path,
             {
                 "status": "RUN",
-                "phase_i": 1,
-                "phase_total": 2,
+                "phase_i": 2,
+                "phase_total": _TRM_PHASE_TOTAL,
                 "phase": _msg(cfg, "PHASE_APPLY"),
                 "message": _msg(cfg, "PROGRESS_CUSTOM_APPLY"),
-                "pct": 5,
+                "pct": 45,
                 "done": 0,
-                "total": 1,
+                "total": total_target_cells,
                 "seq": 0,
             },
         )
@@ -761,100 +998,52 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             ph,
             sid,
             progress_path,
-            phase_total=2,
+            phase_total=_TRM_PHASE_TOTAL,
             progress_closed_path=progress_closed_path,
         )
-        # ユーザー選択に応じて lstrip / rstrip / strip を適用し、完了通知用の件数をカウント
+        time.sleep(0.25)
+
         n_leading_done = 0
         n_trailing_done = 0
-        if choice == "leading":
-            total_target_cells = max(1, int(n_leading))
-        elif choice == "trailing":
-            total_target_cells = max(1, int(n_trailing))
-        else:
-            total_target_cells = max(1, int(n_any_target))
-        apply_done_cells = 0
-        _progress_write(
-            progress_path,
-            {
-                "status": "RUN",
-                "phase_i": 1,
-                "phase_total": 2,
-                "phase": _msg(cfg, "PHASE_APPLY"),
-                "message": _msg(cfg, "PROGRESS_CUSTOM_APPLY"),
-                "pct": 5,
-                "done": 0,
-                "total": total_target_cells,
-            },
-        )
-        apply_emit_step = max(1, total_target_cells // 200)
-        apply_emit_interval_sec = 0.05
-        apply_last_emit_done = -1
-        apply_last_emit_at = time.perf_counter()
-        for a_idx, ap in enumerate(area_payloads, start=1):
-            arr_i = ap["arr"]
-            for ri, row in enumerate(arr_i):
-                for ci, cell in enumerate(row):
-                    if not isinstance(cell, str):
-                        continue
-                    lead_hit = cell != cell.lstrip()
-                    trail_hit = cell != cell.rstrip()
-                    if choice == "leading":
-                        new_val = cell.lstrip()
-                        if new_val != cell:
-                            n_leading_done += 1
-                        arr_i[ri][ci] = new_val
-                        target_hit = lead_hit
-                    elif choice == "trailing":
-                        target_hit = trail_hit
-                        new_val = cell.rstrip()
-                        if new_val != cell:
-                            n_trailing_done += 1
-                        arr_i[ri][ci] = new_val
-                    else:  # all
-                        target_hit = lead_hit or trail_hit
-                        new_val = cell.strip()
-                        if lead_hit:
-                            n_leading_done += 1
-                        if trail_hit:
-                            n_trailing_done += 1
-                        arr_i[ri][ci] = new_val
-                    if not target_hit:
-                        continue
-                    apply_done_cells += 1
-                    now = time.perf_counter()
-                    need_emit = (
-                        apply_done_cells >= total_target_cells
-                        or (apply_done_cells - apply_last_emit_done) >= apply_emit_step
-                        or (now - apply_last_emit_at) >= apply_emit_interval_sec
-                    )
-                    if need_emit:
-                        _progress_write(
-                            progress_path,
-                            {
-                                "status": "RUN",
-                                "phase_i": 1,
-                                "phase_total": 2,
-                                "phase": _msg(cfg, "PHASE_APPLY"),
-                                "message": _msg(cfg, "PROGRESS_CUSTOM_APPLY"),
-                                "pct": min(70, max(5, int(5 + (65 * apply_done_cells / total_target_cells)))),
-                                "done": apply_done_cells,
-                                "total": total_target_cells,
-                            },
-                        )
-                        apply_last_emit_done = apply_done_cells
-                        apply_last_emit_at = now
+
+        def _on_apply_progress(done_cells: int) -> None:
+            pct = min(74, max(45, int(45 + (29 * done_cells / total_target_cells))))
+            _progress_write(
+                progress_path,
+                {
+                    "status": "RUN",
+                    "phase_i": 2,
+                    "phase_total": _TRM_PHASE_TOTAL,
+                    "phase": _msg(cfg, "PHASE_APPLY"),
+                    "message": _msg(cfg, "PROGRESS_CUSTOM_APPLY"),
+                    "pct": pct,
+                    "done": done_cells,
+                    "total": total_target_cells,
+                },
+            )
+
+        for ap in area_payloads:
+            ap["orig_arr"] = [list(row) for row in ap["arr"]]
+            ld, td = _apply_trim_targets(
+                ap["arr"],
+                ap.get("targets") or [],
+                str(choice),
+                progress_cb=_on_apply_progress,
+                total_target_cells=total_target_cells,
+            )
+            n_leading_done += ld
+            n_trailing_done += td
 
         _progress_write(
             progress_path,
             {
                 "status": "RUN",
-                "phase_i": 2,
-                "phase_total": 2,
+                "phase_i": 3,
+                "phase_total": _TRM_PHASE_TOTAL,
                 "phase": _msg(cfg, "PHASE_WRITE"),
                 "message": _msg(cfg, "PROGRESS_CUSTOM_WRITE"),
                 "pct": 75,
-                "done": total_target_cells,
+                "done": 0,
                 "total": total_target_cells,
             },
         )
@@ -862,38 +1051,50 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
         _perf_trm("after_apply_choice", t_flow, choice=choice)
         _trm_trace("after_apply_choice", t_flow, choice=choice)
 
-        # 書込前に Undo 用スナップショットを保存し、Interactive 停止のうえ write_chunk で反映
+        _snap_region = snapshot_region_from_areas(_areas_to_tuples(areas))
         try:
             from svc.svc_undo import save_undo_snapshot
 
-            save_undo_snapshot(ptr_w, sheet_id=sheet_id, target_hwnd=ph, excel_hwnd=ph)
+            save_undo_snapshot(
+                ptr_w,
+                sheet_id=sheet_id,
+                target_hwnd=ph,
+                excel_hwnd=ph,
+                snapshot_region=_snap_region,
+            )
         except Exception as e:
             logger.warning("[TRM_EX] save_undo_snapshot failed (undo unavailable): %s", e)
         _perf_trm("after_undo_snapshot_attempt", t_flow)
         _trm_trace("after_undo_snapshot_attempt", t_flow)
 
         try:
-            from core import core_xlc
-
             for ap in area_payloads:
-                core_xlc.write_chunk(
+                orig = ap.get("orig_arr") or ap["arr"]
+                final = ap["arr"]
+
+                def _on_write_progress(written: int) -> None:
+                    pct = min(99, max(75, int(75 + (24 * written / max(1, total_target_cells)))))
+                    _progress_write(
+                        progress_path,
+                        {
+                            "status": "RUN",
+                            "phase_i": 3,
+                            "phase_total": _TRM_PHASE_TOTAL,
+                            "phase": _msg(cfg, "PHASE_WRITE"),
+                            "message": _msg(cfg, "PROGRESS_CUSTOM_WRITE"),
+                            "pct": pct,
+                            "done": min(written, total_target_cells),
+                            "total": total_target_cells,
+                        },
+                    )
+
+                write_changed_slices(
                     ptr_s,
                     int(ap["y1"]),
                     int(ap["x1"]),
-                    ap["arr"],
-                )
-                _progress_write(
-                    progress_path,
-                    {
-                        "status": "RUN",
-                        "phase_i": 2,
-                        "phase_total": 2,
-                        "phase": _msg(cfg, "PHASE_WRITE"),
-                        "message": _msg(cfg, "PROGRESS_CUSTOM_WRITE"),
-                        "pct": 99,
-                        "done": total_target_cells,
-                        "total": total_target_cells,
-                    },
+                    orig,
+                    final,
+                    progress_cb=_on_write_progress,
                 )
         except Exception as e:
             logger.exception("[TRM_EX] 書込失敗: %s", e)
@@ -903,8 +1104,8 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
                 {
                     "status": "DONE",
                     "pct": 100,
-                    "phase_i": 2,
-                    "phase_total": 2,
+                    "phase_i": 3,
+                    "phase_total": _TRM_PHASE_TOTAL,
                     "done": total_target_cells,
                     "total": total_target_cells,
                 },
@@ -943,8 +1144,8 @@ def trim_cells(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
             {
                 "status": "DONE",
                 "pct": 100,
-                "phase_i": 2,
-                "phase_total": 2,
+                "phase_i": 3,
+                "phase_total": _TRM_PHASE_TOTAL,
                 "done": total_target_cells,
                 "total": total_target_cells,
             },

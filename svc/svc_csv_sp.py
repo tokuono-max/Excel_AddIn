@@ -4,12 +4,13 @@ Python: 3.10+
 Module: svc/svc_csv_sp.py
 Created: 2026-03-05
 Updated: 2026-06-22
-Version: 2.5.10
+Version: 2.5.11
 Purpose:
   CSVファイル分割（選択行による範囲分割）。アクティブシートの選択行を境界に分割し、
   各範囲をヘッダ付きで UTF-8(BOM) CSV として保存。データ不足時は Excel 中央でワーニング通知。
 
 History (latest 3):
+  - 2.5.11 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（sleep 依存廃止、csv_ld 同型）。
   - 2.5.10 (2026-06-22) csv_ld._resolve_book_and_sheet の ptr_s 引数と整合（TypeError 修正）。
   - 2.5.9 (2026-06-22) 分割保存直前に Book/Sheet を再取得（UI 待ち後の COM 切れ緩和。csv_sv/csv_ld 同経路）。
   - 2.5.8 (2026-06-13) 進捗表示: 保存中→分割保存中。同名確認「分割実施」後に保存されない不具合を修正。
@@ -54,7 +55,12 @@ if _path_root not in sys.path:
     sys.path.insert(0, _path_root)
 
 from core.core_log import get_diag_logger, get_logger
-from core.core_progress_wait import wait_after_progress_done
+from core.progress_close_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
+from core.progress_pickle_write import dispatch_progress_write
 from core.excel_display_read import read_range_display_text_matrix, use_display_text_for_csv_save
 from core.core_cursor import notify_wait_form_ready, progress_dialog_wait_cursor_on
 from core.csv_tool_progress_ui import enrich_progress_req_dict
@@ -247,13 +253,13 @@ def _submit_request_dict(req_dict: dict[str, Any]) -> Path:
     return req_path
 
 
-def _progress_write_retry(path: Path, obj: dict[str, Any]) -> None:
-    """進捗 pickle 書込（アクセス拒否等で短いリトライ）。"""
+def _progress_write_retry(path: Path, obj: dict[str, Any]) -> bool:
+    """進捗 pickle 書込（アクセス拒否等で短いリトライ、verified DONE）。"""
     last_exc: BaseException | None = None
     for attempt in range(5):
         try:
-            write_pickle(path, obj)
-            return
+            if dispatch_progress_write(path, obj, log_tag="CSV_SP"):
+                return True
         except OSError as e:
             last_exc = e
             wn = getattr(e, "winerror", None)
@@ -266,6 +272,8 @@ def _progress_write_retry(path: Path, obj: dict[str, Any]) -> None:
         except Exception as e:
             last_exc = e
             break
+        if attempt < 4:
+            time.sleep(0.05 * (attempt + 1))
     logger.warning(
         "[CSV_SP] progress書込失敗 path=%s status=%s phase=%s err=%s",
         str(path),
@@ -273,6 +281,7 @@ def _progress_write_retry(path: Path, obj: dict[str, Any]) -> None:
         obj.get("phase"),
         last_exc,
     )
+    return False
 
 
 def _build_csv_sp_reopen_template(
@@ -361,6 +370,8 @@ def _submit_csv_sp_progress_modeless_ui(
     progress_path: Path,
     phase_total: int,
     reopen_template: dict[str, Any],
+    *,
+    progress_closed_path: Path | None = None,
 ) -> None:
     """重複解決後にモデルレス進捗を表示（分割画面は既に閉じている）。"""
     ensure_ui_server()
@@ -386,6 +397,10 @@ def _submit_csv_sp_progress_modeless_ui(
         done_delay_ms=400,
         no_native_window=True,
     )
+    if progress_closed_path is not None:
+        cp = str(progress_closed_path).strip()
+        if cp:
+            req_inner["progress_closed_path"] = cp
     if w32 is not None and ph:
         try:
             er = w32.get_window_rect(ph)
@@ -1098,6 +1113,8 @@ def split_csv(
         progress_dialog_wait_cursor_on(str(sheet_id or "progress"))
     except Exception:
         pass
+    progress_closed_path = progress_closed_ack_path("csv_sp", str(sheet_id or "_"))
+    reset_progress_closed_ack(progress_closed_path)
     try:
         _submit_csv_sp_progress_modeless_ui(
             parent_hwnd,
@@ -1105,6 +1122,7 @@ def split_csv(
             progress_path,
             phase_total,
             reopen_template,
+            progress_closed_path=progress_closed_path,
         )
         time.sleep(0.25)
     except Exception as _pui_exc:
@@ -1249,7 +1267,13 @@ def split_csv(
                 "total_size_bytes": total_size_bytes,
                 "output_dir": output_dir,
             })
-            wait_after_progress_done(min_sec=_DONE_DISPLAY_SEC + 0.5)
+            wait_progress_closed_with_nudge(
+                progress_closed_path,
+                progress_path=progress_path,
+                log_tag="CSV_SP",
+                parent_hwnd=int(parent_hwnd or 0),
+                sheet_id=str(sheet_id or "_"),
+            )
     finally:
         if xlc is not None:
             try:

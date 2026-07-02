@@ -3,7 +3,7 @@
 Python: 3.10+
 Module: svc/svc_undo
 Created: 2026-03-05
-Version: 1.7.10
+Version: 1.7.14
 Purpose:
   元に戻す（Undo）：Pickle キャッシュから直前状態を復元する（新方式: svc_server + book 渡し）。
   共通仕様（docs/共通仕様_機能.md）に準拠。復元中は ui_server 経由で進捗（config/ui_undo.json PROGRESS）。
@@ -16,6 +16,10 @@ Purpose:
   - まとめ: 「直前に実行した1つの機能」分だけ戻せる。戻すとスナップショットは消える。別の機能を実行するとスナップショットは新しい状態で上書きされる。
 
 History (latest 3):
+  - 1.7.14 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（96% 残留対策、csv_ld 同型）。
+  - 1.7.13 (2026-07-02) 部分スナップショット: snapshot_region 指定で矩形のみ save/restore（v2 payload、旧 full は互換維持）。
+  - 1.7.12 (2026-07-02) 復元成功で完了ダイアログ表示時は finally の bring_to_front をスキップ（Excel 選択ちらつき抑制、1.7.5 相当を復活）。
+  - 1.7.11 (2026-07-02) スナップショット保存時 ScreenUpdating 停止。余白列幅リセットを範囲一括指定に変更。
   - 1.7.10 (2026-06-06) 構造復元成功時もキャッシュ削除→_undo_progress_done を実行（進捗クローズ漏れ修正）。
   - 1.7.9 (2026-06-06) ハング緩和: DONE を ScreenUpdating 復帰前に書込。restore_on_exit=False + wait_after_progress_done。
   - 1.7.8 (2026-06-06) 進捗表示中は excel_lock=True（復元開始から Excel 操作無効）。完了時 teardown で解除。
@@ -49,11 +53,22 @@ if _path_root not in sys.path:
 
 from core.core_log import get_diag_logger, get_logger, get_perf_logger
 from core.core_progress_wait import wait_after_progress_done
+from core.progress_close_ack import (
+    progress_closed_ack_path,
+    reset_progress_closed_ack,
+    wait_progress_closed_with_nudge,
+)
+from core.progress_pickle_write import (
+    dispatch_progress_write,
+    write_progress_done_with_fallback,
+)
 
 logger = get_logger(__name__)
 _undo_diag = get_diag_logger("hc_csv_tool.diag.undo")
 _undo_perf = get_perf_logger("svc.svc_undo.perf")
-__version__ = "1.7.10"
+__version__ = "1.7.14"
+
+_UNDO_LOG_TAG = "UNDO"
 
 
 def _elapsed_ms(since: float) -> int:
@@ -137,21 +152,10 @@ def _undo_progress_file_path() -> Path:
     return base / f"progress_undo_{os.getpid()}_{int(time.time() * 1000)}.pkl"
 
 
-def _undo_progress_write(path: Path, obj: dict[str, Any]) -> None:
-    try:
-        if ipc_file is None:
-            return
-        obj = dict(obj)
-        if "seq" not in obj:
-            try:
-                prev = ipc_file.read_pickle(path)
-                nxt = int(prev.get("seq", -1)) + 1 if isinstance(prev, dict) else 0
-            except Exception:
-                nxt = 0
-            obj["seq"] = nxt
-        ipc_file.write_pickle(path, obj)
-    except Exception:
-        pass
+def _undo_progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    if ipc_file is None:
+        return False
+    return dispatch_progress_write(path, obj, log_tag=_UNDO_LOG_TAG)
 
 
 def _undo_progress_phase(
@@ -179,26 +183,43 @@ def _undo_progress_phase(
     )
 
 
-def _undo_progress_done(path: Path | None) -> None:
+def _undo_progress_done(
+    path: Path | None,
+    *,
+    progress_closed_path: Path | None = None,
+    parent_hwnd: int = 0,
+    sheet_id: str = "",
+) -> None:
     if path is None:
         return
-    try:
-        _undo_progress_write(
-            path,
-            {
-                "status": "DONE",
-                "phase": "復元処理が完了しました",
-                "msg": "復元処理が完了しました",
-                "pct": 100,
-                "done": 100,
-                "total": 100,
-                "seq": 999,
-                "done_delay_ms": 200,
-            },
+    done_body = {
+        "status": "DONE",
+        "phase": "復元処理が完了しました",
+        "msg": "復元処理が完了しました",
+        "pct": 100,
+        "done": 100,
+        "total": 100,
+        "seq": 999,
+        "done_delay_ms": 200,
+    }
+    ok = write_progress_done_with_fallback(
+        path,
+        done_body,
+        log_tag=_UNDO_LOG_TAG,
+        user_message="進捗完了の反映に失敗しました。復元は完了しています。",
+    )
+    if not ok:
+        logger.error("[UNDO] progress DONE write/verify failed path=%s", path)
+    if progress_closed_path is not None:
+        wait_progress_closed_with_nudge(
+            progress_closed_path,
+            progress_path=path,
+            log_tag=_UNDO_LOG_TAG,
+            parent_hwnd=int(parent_hwnd or 0),
+            sheet_id=str(sheet_id or ""),
         )
+    else:
         wait_after_progress_done(min_sec=1.0)
-    except Exception:
-        pass
 
 
 def _undo_msg(key: str, default: str) -> str:
@@ -217,6 +238,8 @@ def _submit_undo_progress_ui(
     sheet_id: str,
     progress_path: Path,
     phase_total: int,
+    *,
+    progress_closed_path: Path | None = None,
 ) -> None:
     if ipc_file is None or ensure_ui_server is None:
         return
@@ -242,6 +265,10 @@ def _submit_undo_progress_ui(
         }
         if er is not None:
             req_dict["excel_rect"] = list(er)
+        if progress_closed_path is not None:
+            cp = str(progress_closed_path).strip()
+            if cp:
+                req_dict["progress_closed_path"] = cp
         payload = {
             "parent_hwnd": int(parent_hwnd),
             "result_path": result_path,
@@ -411,11 +438,81 @@ def _show_undo_done_dialog(hwnd: int, sheet_id: str, sheet_name: str = "") -> No
         time.sleep(0.05)
 
 
+def _normalize_range_value_to_2d(raw: Any, yn: int, xn: int) -> List[List[Any]]:
+    """xlwings Range.value を yn×xn の 2 次元リストに正規化する。"""
+    if raw is None:
+        return []
+    if yn <= 0 or xn <= 0:
+        return []
+    if yn == 1 and xn == 1:
+        return [[raw]]
+    if yn == 1:
+        if isinstance(raw, (list, tuple)):
+            return [list(raw)]
+        return [[raw]]
+    if xn == 1:
+        if isinstance(raw, (list, tuple)):
+            return [[row] if not isinstance(row, (list, tuple)) else list(row) for row in raw]
+        return [[raw]]
+    if isinstance(raw, (list, tuple)):
+        if len(raw) > 0 and not isinstance(raw[0], (list, tuple)):
+            return [list(raw)]
+        return [list(row) if isinstance(row, (list, tuple)) else [row] for row in raw]
+    return [[raw]]
+
+
+def _read_region_chunk_row_count(yn: int) -> int:
+    if yn <= 30_000:
+        return yn
+    return max(2_000, min(10_000, yn))
+
+
+def _read_sheet_region_2d(ptr_s: Any, y1: int, x1: int, yn: int, xn: int) -> List[List[Any]]:
+    """矩形範囲をチャンク単位で COM 読込（部分スナップショット用）。"""
+    if yn <= 0 or xn <= 0:
+        return []
+    chunk_rows = _read_region_chunk_row_count(yn)
+    acc: List[List[Any]] = []
+    for r0 in range(0, yn, chunk_rows):
+        r1 = min(r0 + chunk_rows, yn)
+        raw = ptr_s.range((y1 + r0, x1), (y1 + r1 - 1, x1 + xn - 1)).value
+        part = _normalize_range_value_to_2d(raw, r1 - r0, xn)
+        if len(part) != r1 - r0:
+            raise ValueError(f"region read row mismatch expected={r1 - r0} got={len(part)}")
+        acc.extend(part)
+    return acc if len(acc) == yn else []
+
+
+def _read_used_range_2d(ptr_s: Any) -> List[List[Any]]:
+    """UsedRange 全体を (1,1) 起点で 2 次元リストに読み取る（従来 full スナップショット）。"""
+    ur = getattr(ptr_s, "used_range", None)
+    if ur is None:
+        return []
+    nr = getattr(ur, "rows", None)
+    nc = getattr(ur, "columns", None)
+    if nr is None or nc is None:
+        return []
+    last_row = int(nr.count)
+    ncols = int(nc.count)
+    if last_row < 1 or ncols < 1:
+        return []
+    raw = ptr_s.range((1, 1), (last_row, ncols)).value
+    return _normalize_range_value_to_2d(raw, last_row, ncols)
+
+
+def _undo_payload_is_region(payload: dict[str, Any]) -> bool:
+    if int(payload.get("snapshot_version") or 0) < 2:
+        return False
+    return str(payload.get("snapshot_mode") or "").strip().lower() == "region"
+
+
 def save_undo_snapshot(
     book: Any,
     sheet_id: str = "",
     target_hwnd: Optional[int] = None,
     excel_hwnd: Optional[int] = None,
+    *,
+    snapshot_region: tuple[int, int, int, int] | None = None,
     **kwargs: Any,
 ) -> bool:
     """
@@ -428,7 +525,8 @@ def save_undo_snapshot(
         sheet_id: シートの GUID（空の場合はアクティブシート）。
         target_hwnd: Excel ウィンドウの HWND（キー生成用。省略時は excel_hwnd を使用）。
         excel_hwnd: 上記の代替。どちらか一方を渡す。
-        **kwargs: 将来の拡張用（未使用）。
+        snapshot_region: (y1, x1, yn, xn) 1-based。指定時は矩形のみ保存（snapshot_version=2）。
+        **kwargs: 将来の拡張用。
 
     Returns:
         True: 保存成功。False: シート取得失敗・キャッシュ不可・使用範囲読取失敗・save 失敗など。
@@ -450,37 +548,39 @@ def save_undo_snapshot(
     sh_name = getattr(ptr_s, "name", "") or ""
     str_undo_key = _make_undo_key(hwnd, wb_name, sh_name)
 
-    # UsedRange を (1,1) 起点で 2 次元リストに読み取り。単一セル・1行・複数行いずれも正規化
+    region: tuple[int, int, int, int] | None = None
+    if snapshot_region is not None:
+        try:
+            ry1, rx1, ryn, rxn = (int(snapshot_region[0]), int(snapshot_region[1]), int(snapshot_region[2]), int(snapshot_region[3]))
+            if ryn >= 1 and rxn >= 1:
+                region = (ry1, rx1, ryn, rxn)
+        except Exception:
+            region = None
+
     list_2d: List[List[Any]] = []
+    prev_screen_updating: Any = None
+    app_api_read = getattr(getattr(book, "app", None), "api", None)
     try:
-        ur = getattr(ptr_s, "used_range", None)
-        if ur is None:
-            list_2d = []  # 使用範囲が無い場合は空を保存（復元時にクリア可能）
+        if app_api_read is not None:
+            try:
+                prev_screen_updating = app_api_read.ScreenUpdating
+                app_api_read.ScreenUpdating = False
+            except Exception:
+                prev_screen_updating = None
+        if region is not None:
+            ry1, rx1, ryn, rxn = region
+            list_2d = _read_sheet_region_2d(ptr_s, ry1, rx1, ryn, rxn)
         else:
-            nr = getattr(ur, "rows", None)
-            nc = getattr(ur, "columns", None)
-            if nr is None or nc is None:
-                list_2d = []
-            else:
-                last_row = int(nr.count)
-                ncols = int(nc.count)
-                if last_row < 1 or ncols < 1:
-                    list_2d = []
-                else:
-                    raw = ptr_s.range((1, 1), (last_row, ncols)).value
-                    if raw is None:
-                        list_2d = []
-                    elif isinstance(raw, (list, tuple)):
-                        # xlwings は 1 行のとき 1 次元で返す場合があるため行リストに正規化
-                        if len(raw) > 0 and not isinstance(raw[0], (list, tuple)):
-                            list_2d = [list(raw)]
-                        else:
-                            list_2d = [list(row) if isinstance(row, (list, tuple)) else [row] for row in raw]
-                    else:
-                        list_2d = [[raw]]
+            list_2d = _read_used_range_2d(ptr_s)
     except Exception as e:
         logger.warning("[UNDO] スナップショット保存: 使用範囲読込失敗: %s", e)
         return False
+    finally:
+        if app_api_read is not None and prev_screen_updating is not None:
+            try:
+                app_api_read.ScreenUpdating = prev_screen_updating
+            except Exception:
+                pass
 
     # 枠固定状態を取得（復元時に再現するため）
     freeze_split_row, freeze_split_col = 0, 0
@@ -494,17 +594,34 @@ def save_undo_snapshot(
     except Exception:
         pass
 
-    # 復元時に write_chunk と枠固定再設定で使う payload
-    payload = {
+    payload: dict[str, Any] = {
         "data": list_2d,
         "book_name": wb_name,
         "sheet_name": sh_name,
         "freeze_split_row": freeze_split_row,
         "freeze_split_col": freeze_split_col,
     }
+    if region is not None:
+        ry1, rx1, ryn, rxn = region
+        payload.update(
+            {
+                "snapshot_version": 2,
+                "snapshot_mode": "region",
+                "origin_row": ry1,
+                "origin_col": rx1,
+                "row_count": ryn,
+                "col_count": rxn,
+            }
+        )
     try:
         hsys.CacheManager.save(str_undo_key, payload)
-        logger.info("[UNDO] スナップショット保存 完了 key=%s 行数=%s", str_undo_key, len(list_2d))
+        mode = "region" if region is not None else "full"
+        logger.info(
+            "[UNDO] スナップショット保存 完了 key=%s mode=%s 行数=%s",
+            str_undo_key,
+            mode,
+            len(list_2d),
+        )
         return True
     except Exception as e:
         logger.warning("[UNDO] スナップショット保存: CacheManager.save 失敗: %s", e)
@@ -608,8 +725,10 @@ def exec_undo(
     is_structure_undo = "num_rows" in dict_undo_payload
 
     prog_path_undo: Path | None = None
+    progress_closed_path_undo: Path | None = None
     # 構造／データ復元で共有する進捗 seq（キャッシュ削除フェーズまで同一リストを使う）
     undo_seq: list[int] = [0]
+    undo_done_dialog_shown = False
     try:
         if is_structure_undo:
             # 共通仕様: hc_* に依存しない。構造復元は別モジュールがあれば委譲、なければエラー表示。
@@ -617,6 +736,8 @@ def exec_undo(
             _undo_trace("branch_structure", t_flow)
             if ipc_file is not None and ensure_ui_server is not None:
                 prog_path_undo = _undo_progress_file_path()
+                progress_closed_path_undo = progress_closed_ack_path("undo", sheet_id)
+                reset_progress_closed_ack(progress_closed_path_undo)
                 _undo_progress_write(
                     prog_path_undo,
                     {
@@ -629,7 +750,13 @@ def exec_undo(
                         "seq": 0,
                     },
                 )
-                _submit_undo_progress_ui(hwnd, sheet_id, prog_path_undo, 4)
+                _submit_undo_progress_ui(
+                    hwnd,
+                    sheet_id,
+                    prog_path_undo,
+                    4,
+                    progress_closed_path=progress_closed_path_undo,
+                )
             api_st = getattr(ptr_a, "api", None) or ptr_a
             try:
                 try:
@@ -670,9 +797,19 @@ def exec_undo(
                     hsys.CacheManager.delete(str_undo_key)
                     _log_undo_perf("after_cache_delete", t_flow)
                     _undo_trace("after_cache_delete", t_flow)
-                    _undo_progress_done(prog_path_undo)
+                    _undo_progress_done(
+                        prog_path_undo,
+                        progress_closed_path=progress_closed_path_undo,
+                        parent_hwnd=hwnd,
+                        sheet_id=sheet_id,
+                    )
                 except ImportError:
-                    _undo_progress_done(prog_path_undo)
+                    _undo_progress_done(
+                        prog_path_undo,
+                        progress_closed_path=progress_closed_path_undo,
+                        parent_hwnd=hwnd,
+                        sheet_id=sheet_id,
+                    )
                     msg = "ERROR: 構造復元モジュールが利用できません。"
                     logger.warning("[UNDO] 構造復元モジュールなし")
                     if core_stat:
@@ -682,7 +819,12 @@ def exec_undo(
                     _undo_trace("abort_structure_import", t_flow)
                     return
                 except Exception as e:
-                    _undo_progress_done(prog_path_undo)
+                    _undo_progress_done(
+                        prog_path_undo,
+                        progress_closed_path=progress_closed_path_undo,
+                        parent_hwnd=hwnd,
+                        sheet_id=sheet_id,
+                    )
                     msg = f"ERROR: ヘッダ復元失敗 Detail: {e}"
                     logger.exception("[UNDO] ヘッダ復元失敗: %s", e)
                     if core_stat:
@@ -714,8 +856,14 @@ def exec_undo(
                 _undo_trace("abort_bad_data_type", t_flow)
                 return
 
+            is_region_restore = _undo_payload_is_region(dict_undo_payload)
+            origin_row = int(dict_undo_payload.get("origin_row") or 1)
+            origin_col = int(dict_undo_payload.get("origin_col") or 1)
+
             if ipc_file is not None and ensure_ui_server is not None:
                 prog_path_undo = _undo_progress_file_path()
+                progress_closed_path_undo = progress_closed_ack_path("undo", sheet_id)
+                reset_progress_closed_ack(progress_closed_path_undo)
                 _undo_progress_write(
                     prog_path_undo,
                     {
@@ -728,7 +876,13 @@ def exec_undo(
                         "seq": 0,
                     },
                 )
-                _submit_undo_progress_ui(hwnd, sheet_id, prog_path_undo, 9)
+                _submit_undo_progress_ui(
+                    hwnd,
+                    sheet_id,
+                    prog_path_undo,
+                    9,
+                    progress_closed_path=progress_closed_path_undo,
+                )
             # シート更新・再描画を抑止。with 内で ClearContents → write_chunk → 整形 → 枠固定 → A1 選択
             api = getattr(ptr_a, "api", None) or ptr_a
             try:
@@ -782,28 +936,29 @@ def exec_undo(
                             _undo_msg("PHASE_UNDO_MEASURE", "使用中の範囲を確認しています..."),
                         )
 
-                    # 復元前に現状の UsedRange をクリア（ClearContents を優先して表示更新を抑える）
-                    try:
-                        ur = getattr(ptr_s, "used_range", None)
-                        if ur is not None:
-                            clear_fn = getattr(ur, "clearcontents", None) or getattr(ur, "ClearContents", None)
-                            if callable(clear_fn):
-                                clear_fn()
-                            else:
-                                try:
-                                    ur.value = None
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                    if not is_region_restore:
+                        # 復元前に現状の UsedRange をクリア（ClearContents を優先して表示更新を抑える）
+                        try:
+                            ur = getattr(ptr_s, "used_range", None)
+                            if ur is not None:
+                                clear_fn = getattr(ur, "clearcontents", None) or getattr(ur, "ClearContents", None)
+                                if callable(clear_fn):
+                                    clear_fn()
+                                else:
+                                    try:
+                                        ur.value = None
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
 
-                    if prog_path_undo is not None:
-                        _undo_progress_phase(
-                            prog_path_undo,
-                            undo_seq,
-                            35,
-                            _undo_msg("PHASE_UNDO_CLEAR", "シートをクリアしています..."),
-                        )
+                        if prog_path_undo is not None:
+                            _undo_progress_phase(
+                                prog_path_undo,
+                                undo_seq,
+                                35,
+                                _undo_msg("PHASE_UNDO_CLEAR", "シートをクリアしています..."),
+                            )
 
                     if prog_path_undo is not None:
                         _undo_progress_phase(
@@ -814,12 +969,15 @@ def exec_undo(
                         )
 
                     if xlc:
-                        xlc.write_chunk(ptr_s, 1, 1, list_data)
+                        if is_region_restore:
+                            xlc.write_chunk(ptr_s, origin_row, origin_col, list_data)
+                        else:
+                            xlc.write_chunk(ptr_s, 1, 1, list_data)
 
                     saved_rows = len(list_data)
                     saved_cols = len(list_data[0]) if list_data else 0
                     # 空スナップショット（直前に使用範囲が無かった／空シート）: 行挿入後の UsedRange を丸ごと戻す
-                    if saved_rows == 0 and xlc:
+                    if saved_rows == 0 and xlc and not is_region_restore:
                         try:
                             xlc.clear_sheet_used_range(ptr_s)
                         except Exception:
@@ -833,14 +991,19 @@ def exec_undo(
                             _undo_msg("PHASE_UNDO_TRIM", "表示範囲を調整しています..."),
                         )
 
-                    # 有効データ領域の拡大を防ぐ: clear_used_range_overflow で整形＋列幅リセット
-                    if xlc and saved_rows > 0 and saved_cols > 0:
+                    # 有効データ領域の拡大を防ぐ: clear_used_range_overflow で整形＋列幅リセット（full のみ）
+                    if xlc and saved_rows > 0 and saved_cols > 0 and not is_region_restore:
                         try:
                             xlc.clear_used_range_overflow(ptr_s, saved_rows, saved_cols)
                         except Exception:
                             pass
-                    # 保存時より大きかった範囲の余白クリアと列幅を標準に戻す
-                    if (old_rows > saved_rows or old_cols > saved_cols) and saved_rows > 0 and saved_cols > 0:
+                    # 保存時より大きかった範囲の余白クリアと列幅を標準に戻す（full のみ）
+                    if (
+                        not is_region_restore
+                        and (old_rows > saved_rows or old_cols > saved_cols)
+                        and saved_rows > 0
+                        and saved_cols > 0
+                    ):
                         try:
                             if old_cols > saved_cols:
                                 rng_right = ptr_s.range((1, saved_cols + 1), (max(old_rows, saved_rows), old_cols))
@@ -849,12 +1012,14 @@ def exec_undo(
                                     sheet_api = getattr(ptr_s, "api", None)
                                     if sheet_api is not None:
                                         std_width = float(getattr(sheet_api, "StandardWidth", 8.43) or 8.43)
-                                        for col in range(saved_cols + 1, old_cols + 1):
-                                            try:
-                                                col_rng = sheet_api.Columns(col)
-                                                col_rng.ColumnWidth = std_width
-                                            except Exception:
-                                                pass
+                                        try:
+                                            rng_right.api.ColumnWidth = std_width
+                                        except Exception:
+                                            for col in range(saved_cols + 1, old_cols + 1):
+                                                try:
+                                                    sheet_api.Columns(col).ColumnWidth = std_width
+                                                except Exception:
+                                                    pass
                                 except Exception:
                                     pass
                             if old_rows > saved_rows:
@@ -963,18 +1128,29 @@ def exec_undo(
                 hsys.CacheManager.delete(str_undo_key)
                 _log_undo_perf("after_cache_delete", t_flow)
                 _undo_trace("after_cache_delete", t_flow)
-                _undo_progress_done(prog_path_undo)
+                _undo_progress_done(
+                    prog_path_undo,
+                    progress_closed_path=progress_closed_path_undo,
+                    parent_hwnd=hwnd,
+                    sheet_id=sheet_id,
+                )
 
             if xlc:
                 xlc.restore_screen_updating(ptr_s)
 
         logger.info("[UNDO] 復元 完了 シート=%s", sh_name)
         _show_undo_done_dialog(hwnd, sheet_id, sh_name)
+        undo_done_dialog_shown = True
         _log_undo_perf("after_done_ui", t_flow)
         _undo_trace("after_done_ui", t_flow)
 
     except Exception as ex_undo:
-        _undo_progress_done(prog_path_undo)
+        _undo_progress_done(
+            prog_path_undo,
+            progress_closed_path=progress_closed_path_undo,
+            parent_hwnd=hwnd,
+            sheet_id=sheet_id,
+        )
         err_msg = f"ERROR: 元に戻す処理中に例外。 Detail: {ex_undo}"
         if core_stat:
             try:
@@ -989,14 +1165,14 @@ def exec_undo(
 
     finally:
         # 例外・正常どちらでも Excel の Interactive / ScreenUpdating を復帰し、ステータスバーを復元。
-        # bring_to_front は常に実行（svc_dt_ymd 等と同様）。1.7.5 の成功時スキップは TOPMOST 進捗との相互作用の切り分けのため撤去（1.7.7）。
+        # 完了ダイアログ表示済みの成功経路では bring_to_front をスキップ（Excel 選択ちらつき抑制）。
         try:
             api = getattr(ptr_a, "api", None) or ptr_a
             api.Interactive = True
             api.ScreenUpdating = True
         except Exception:
             pass
-        if w32:
+        if w32 and not undo_done_dialog_shown:
             try:
                 w32.bring_to_front(hwnd)
             except Exception:

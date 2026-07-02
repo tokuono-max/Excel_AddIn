@@ -97,26 +97,37 @@ def write_progress_monotonic(
     return False
 
 
-def write_progress_done_verified(
+def adopt_progress_seq(path: Path, seq: int) -> None:
+    """明示 seq 書込後に monotonic カウンタを整合させる。"""
+    key = progress_key(path)
+    _PROGRESS_SEQ[key] = max(int(_PROGRESS_SEQ.get(key, -1)), int(seq))
+
+
+def write_progress_terminal_verified(
     path: Path,
     obj: dict[str, Any],
     *,
+    expected_status: str,
     log_tag: str = "PROGRESS",
     verify_attempts: int = 5,
 ) -> bool:
-    """DONE を書き、ディスク上の status を検証する。"""
+    """終端状態（DONE/ERROR/CANCEL 等）を書き、ディスク上の status を検証する。"""
+    expected = str(expected_status or "").strip().upper()
     tag = str(log_tag or "PROGRESS").strip() or "PROGRESS"
     attempts = max(1, int(verify_attempts))
+    merged = dict(obj)
+    merged["status"] = expected
     for attempt in range(attempts):
-        if not write_progress_monotonic(path, obj, log_tag=tag):
+        if not write_progress_monotonic(path, merged, log_tag=tag):
             time.sleep(0.04)
             continue
         time.sleep(0.02)
-        if read_progress_status(path).upper() == "DONE":
+        if read_progress_status(path).upper() == expected:
             return True
         logger.warning(
-            "[%s] progress DONE verify mismatch path=%s attempt=%s status=%s",
+            "[%s] progress %s verify mismatch path=%s attempt=%s status=%s",
             tag,
+            expected,
             path,
             attempt + 1,
             read_progress_status(path) or "(empty)",
@@ -125,6 +136,89 @@ def write_progress_done_verified(
     return False
 
 
+def write_progress_done_verified(
+    path: Path,
+    obj: dict[str, Any],
+    *,
+    log_tag: str = "PROGRESS",
+    verify_attempts: int = 5,
+) -> bool:
+    """DONE を書き、ディスク上の status を検証する。"""
+    body = dict(obj)
+    body["status"] = "DONE"
+    return write_progress_terminal_verified(
+        path,
+        body,
+        expected_status="DONE",
+        log_tag=log_tag,
+        verify_attempts=verify_attempts,
+    )
+
+
+def write_progress_error_fallback(
+    path: Path,
+    *,
+    log_tag: str = "PROGRESS",
+    user_message: str = "進捗完了の反映に失敗しました。処理は完了しています。",
+    phase: str = "進捗通知エラー",
+) -> bool:
+    """DONE 検証失敗時など、UI が閉じられる ERROR 終端を書く。"""
+    return write_progress_terminal_verified(
+        path,
+        {
+            "status": "ERROR",
+            "phase": phase,
+            "detail": user_message,
+            "pct": 0,
+        },
+        expected_status="ERROR",
+        log_tag=log_tag,
+    )
+
+
 def reset_progress_seq(path: Path) -> None:
     """テスト用: パスに紐づく seq カウンタを消す。"""
     _PROGRESS_SEQ.pop(progress_key(path), None)
+
+
+def dispatch_progress_write(
+    path: Path,
+    obj: dict[str, Any],
+    *,
+    log_tag: str = "PROGRESS",
+) -> bool:
+    """進捗 pickle 書込（RUN/DONE/ERROR/CANCEL を status に応じて分岐）。"""
+    body = dict(obj)
+    status = str(body.get("status", "RUN") or "RUN").strip().upper()
+    if status == "DONE":
+        return write_progress_done_verified(path, body, log_tag=log_tag)
+    if status in ("ERROR", "CANCEL"):
+        return write_progress_terminal_verified(
+            path,
+            body,
+            expected_status=status,
+            log_tag=log_tag,
+        )
+    if "seq" in body:
+        adopt_progress_seq(path, int(body["seq"]))
+        return write_progress_pickle(path, body, log_tag=log_tag)
+    return write_progress_monotonic(path, body, log_tag=log_tag)
+
+
+def write_progress_done_with_fallback(
+    path: Path,
+    done_body: dict[str, Any],
+    *,
+    log_tag: str = "PROGRESS",
+    user_message: str = "進捗完了の反映に失敗しました。処理は完了しています。",
+) -> bool:
+    """DONE を検証付きで書き、失敗時は ERROR 終端で UI を閉じられるようにする。"""
+    if write_progress_done_verified(path, done_body, log_tag=log_tag):
+        return True
+    logger.error("[%s] progress DONE write/verify failed path=%s", log_tag, path)
+    write_progress_error_fallback(
+        path,
+        log_tag=log_tag,
+        user_message=user_message,
+    )
+    return False

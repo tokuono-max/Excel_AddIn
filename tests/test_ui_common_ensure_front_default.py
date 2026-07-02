@@ -82,3 +82,24 @@ def test_prepare_dialog_honors_bring_excel_first_property() -> None:
         prepare_dialog_excel_center_before_show(w, 123)
 
     assert calls == [True]
+
+
+def test_want_bring_excel_first_explicit_config() -> None:
+    from ui_qt.ui_common import want_bring_excel_first_while_modal
+
+    assert want_bring_excel_first_while_modal({"BRING_EXCEL_FIRST": True}) is True
+    assert want_bring_excel_first_while_modal({"BRING_EXCEL_FIRST": False}) is False
+
+
+def test_want_bring_excel_first_topmost_defaults_false() -> None:
+    from ui_qt.ui_common import want_bring_excel_first_while_modal
+
+    assert want_bring_excel_first_while_modal({"TOPMOST": True}) is False
+    assert want_bring_excel_first_while_modal({"ALWAYS_IN_FRONT_OF_EXCEL": True}) is False
+
+
+def test_want_bring_excel_first_follows_excel_lock_when_not_topmost() -> None:
+    from ui_qt.ui_common import want_bring_excel_first_while_modal
+
+    assert want_bring_excel_first_while_modal({"EXCEL_LOCK": True}) is True
+    assert want_bring_excel_first_while_modal({"EXCEL_LOCK": False}) is False

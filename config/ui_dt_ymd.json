@@ -49,7 +49,8 @@
         "DEFAULT_HEIGHT": 120,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
-        "TOPMOST": true
+        "TOPMOST": true,
+        "BRING_EXCEL_FIRST": false
       }
     },
     "WARNING": {
@@ -66,7 +67,8 @@
         "DEFAULT_HEIGHT": 120,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
-        "TOPMOST": true
+        "TOPMOST": true,
+        "BRING_EXCEL_FIRST": false
       }
     }
   }

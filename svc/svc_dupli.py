@@ -4,10 +4,11 @@ Python: 3.12
 Module: svc/svc_dupli.py
 Created: 2026-03-06
 Updated: 2026-05-05
-Version: 1.5.2
+Version: 1.5.3
 Purpose:
   重複チェック（Excel 選択範囲）。処理は本モジュール、画面は ui_qt.ui_dupli + config/ui_dupli.json。
 History (latest 3):
+  - 1.5.3 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.5.2 (2026-05-05) 進捗→結果の順序保証: progress_closed_ack を追加。進捗画面クローズACKを待ってから done/report を投入し、重なり・ちらつきを抑制。
   - 1.5.1 (2026-04-10) PHASE_ANALYZE 中の進捗: モード A/B の長いループで間引き _upd（45〜92%）。pickle 負荷は時間＋ストライドで抑制。
   - 1.5.0 (2026-04-12) 重複着色: svc 一括 Interior は廃止。hl_rects を sidecar pickle に書き、レポート表示中は UI が VisibleRange±余白で追従着色。重複開始時に古い dupli_hl_rects_*.pkl を掃除。
@@ -58,11 +59,12 @@ from core.progress_close_ack import (  # noqa: E402
     reset_progress_closed_ack,
     wait_progress_closed_with_nudge,
 )
+from core.progress_pickle_write import dispatch_progress_write  # noqa: E402
 
 logger = get_logger(__name__)
 _dupli_diag = get_diag_logger("hc_csv_tool.diag.dupli")
 _perf = get_perf_logger("svc.svc_dupli.perf")
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 
 class _DupliCancelled(Exception):
@@ -320,25 +322,9 @@ def _make_time_gated_cancel_check(cancel_path: Path) -> Callable[..., None]:
     return _chk
 
 
-def _progress_write(path: Path, obj: dict[str, Any]) -> None:
-    """
-    進捗情報を Pickle で path に書き出す。
-    seq が未指定の場合は既存ファイルの seq をインクリメントして順序を保証する。
-    """
-    try:
-        from ui_qt.ipc_file import read_pickle
-
-        obj = dict(obj)
-        if "seq" not in obj:
-            try:
-                prev = read_pickle(path)
-                seq = int(prev.get("seq", -1)) + 1 if isinstance(prev, dict) else 0
-            except Exception:
-                seq = 0
-            obj["seq"] = seq
-        write_pickle(path, obj)
-    except Exception:
-        pass
+def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
+    """進捗情報を Pickle で path に書き出す（verified / monotonic seq）。"""
+    return dispatch_progress_write(path, obj, log_tag="DUPLI")
 
 
 def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
