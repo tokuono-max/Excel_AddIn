@@ -59,13 +59,14 @@ def skip_extract_truncation_peek(
     *,
     repeat_max: Optional[int],
     repeat_until_empty: bool,
+    repeat_until_last: bool = False,
 ) -> bool:
     """
-    明示 repeat_max=1（空白まででない）のとき peek / 打ち切り記録を省略する。
+    明示 repeat_max=1（空白まで／終端でない）のとき peek / 打ち切り記録を省略する。
 
     ODN-375 品名_ユニット / MAC RMT 等: 1 ファイル 1 行が意図。2 行目非空は正常。
     """
-    if repeat_until_empty:
+    if repeat_until_empty or repeat_until_last:
         return False
     if repeat_max is None:
         return False
@@ -77,11 +78,12 @@ def resolve_extract_repeat_limit(
     repeat_max: Optional[int],
     repeat_until_empty: bool,
     max_primary_rows: Optional[int] = None,
+    repeat_until_last: bool = False,
 ) -> int:
     abs_max = core_env.data_agg_extract_absolute_max()
     if repeat_max is not None and int(repeat_max) > 0:
         limit = min(int(repeat_max), abs_max)
-    elif repeat_until_empty:
+    elif repeat_until_empty or repeat_until_last:
         limit = abs_max
     else:
         limit = core_env.data_agg_extract_default_max()
@@ -177,3 +179,14 @@ def enforce_extract_truncation_policy(
     if policy == "warn":
         return
     raise DataAggExtractTruncated(records)
+
+
+def is_extract_truncated_batch_notify(payload: dict[str, Any] | None) -> bool:
+    """一括完了通知が読取上限打ち切り（継続選択対象）かどうか。"""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok", True):
+        return False
+    err = str(payload.get("error") or "").strip().lower()
+    phase = str(payload.get("abort_phase") or "").strip().lower()
+    return err == "extract_truncated" or phase == "extract_truncated"

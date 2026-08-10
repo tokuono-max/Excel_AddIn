@@ -227,10 +227,14 @@ def _append_cell_source_rows(
     r0[10] = str(int(src.get("col_offset") or 0))
     end_items = detail_cell.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
-        end_items = ["N件", "空白まで"]
+        end_items = ["N件", "空白まで", "終端"]
     blank_lbl = str(end_items[1])
     n_lbl = str(end_items[0])
-    if src.get("repeat_until_empty"):
+    last_lbl = str(end_items[2]) if len(end_items) > 2 else "終端"
+    if src.get("repeat_until_last") and not src.get("repeat_until_empty"):
+        r0[11] = last_lbl
+        r0[12] = ""
+    elif src.get("repeat_until_empty"):
         r0[11] = blank_lbl
         r0[12] = ""
     else:

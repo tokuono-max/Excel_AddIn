@@ -110,6 +110,22 @@ def _shape_mid(t: str, start_1: int, length: int) -> str:
     return t[i0 : i0 + length]
 
 
+def _shape_left(t: str, n: int) -> str:
+    """先頭 n 文字（VBA Left 相当）。n < 0 は noop。"""
+    if n < 0:
+        return t
+    return t[:n]
+
+
+def _shape_right(t: str, n: int) -> str:
+    """末尾 n 文字（VBA Right 相当）。n < 0 は noop。"""
+    if n < 0:
+        return t
+    if n == 0:
+        return ""
+    return t[-n:] if n < len(t) else t
+
+
 def _shape_cut(t: str, start_1: int, length: int) -> str:
     if start_1 < 1 or length < 0:
         return t
@@ -315,6 +331,20 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
         if ln is None:
             return t
         return _shape_split(t, ln)
+    if c == "left":
+        if len(args) < 1:
+            return t
+        n = _parse_int(args[0])
+        if n is None:
+            return t
+        return _shape_left(t, n)
+    if c == "right":
+        if len(args) < 1:
+            return t
+        n = _parse_int(args[0])
+        if n is None:
+            return t
+        return _shape_right(t, n)
     if c == "rep":
         if len(args) < 2:
             return t
@@ -385,6 +415,12 @@ def parse_and_apply_commands(text: str, tokens: list[str]) -> str:
             t = _apply_one_command(t, cmd, [])
             continue
         if c0 == "split":
+            if i < n:
+                args = [tokens[i]]
+                i += 1
+            t = _apply_one_command(t, cmd, args)
+            continue
+        if c0 in ("left", "right"):
             if i < n:
                 args = [tokens[i]]
                 i += 1
@@ -469,6 +505,8 @@ def compile_shape_script(script: str | None) -> tuple[bool, str]:
         {
             "trim",
             "split",
+            "left",
+            "right",
             "rep",
             "mid",
             "cut",
@@ -502,6 +540,10 @@ def compile_shape_script(script: str | None) -> tuple[bool, str]:
         elif cmd == "split":
             if i + 1 > n_tok:
                 return (False, "split の引数が不足しています")
+            i += 1
+        elif cmd in ("left", "right"):
+            if i + 1 > n_tok:
+                return (False, "%s の引数が不足しています" % cmd)
             i += 1
         elif cmd in ("mid", "cut", "padr", "padl", "pad_r", "pad_l", "padright", "padleft"):
             if i + 2 > n_tok:

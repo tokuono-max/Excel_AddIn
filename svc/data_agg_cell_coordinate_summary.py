@@ -79,15 +79,28 @@ def cell_coordinate_setting_lines(
 
     end_items = dc.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
-        end_items = ["N件", "空白まで"]
+        end_items = ["N件", "空白まで", "終端"]
     blank_lbl = str(end_items[1])
     n_lbl = str(end_items[0])
-    if src.get("repeat_until_empty"):
+    last_lbl = str(end_items[2]) if len(end_items) > 2 else "終端"
+    if src.get("repeat_until_last") and not src.get("repeat_until_empty"):
+        end_disp = last_lbl
+    elif src.get("repeat_until_empty"):
         end_disp = blank_lbl
     else:
         rm = src.get("repeat_max")
         end_disp = "%s: %s" % (n_lbl, rm if rm is not None else "—")
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_END_MODE", "終結モード"), end_disp))
+    if src.get("skip_empty_primary"):
+        sm = str(src.get("skip_primary_match") or "").strip()
+        lines.append(
+            "%s%s: %s"
+            % (
+                pfx,
+                _lbl(dc, "LABEL_SKIP_EMPTY_PRIMARY", "主キーをスキップ"),
+                sm if sm else "（空欄）",
+            )
+        )
 
     nchk = pb.get("cell_checks") if isinstance(pb.get("cell_checks"), list) else []
     proc = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
@@ -222,10 +235,13 @@ def cell_coordinate_full_detail_lines(
     co = int(src.get("col_offset") or 0)
     end_items = dc.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
-        end_items = ["N件", "空白まで"]
+        end_items = ["N件", "空白まで", "終端"]
     blank_lbl = str(end_items[1])
     n_lbl = str(end_items[0])
-    if src.get("repeat_until_empty"):
+    last_lbl = str(end_items[2]) if len(end_items) > 2 else "終端"
+    if src.get("repeat_until_last") and not src.get("repeat_until_empty"):
+        end_disp = last_lbl
+    elif src.get("repeat_until_empty"):
         end_disp = blank_lbl
     else:
         rm = src.get("repeat_max")
@@ -239,8 +255,21 @@ def cell_coordinate_full_detail_lines(
         "3.2 %s: %s" % (_lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro),
         "3.3 %s: %s" % (_lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co),
         "3.4 %s: %s" % (_lbl(dc, "LABEL_END_MODE", "終結モード"), end_disp),
-        "3.5 %s: %s" % (_lbl(dc, "LABEL_CHECKS", "加工"), proc),
     ]
+    if src.get("skip_empty_primary"):
+        sm = str(src.get("skip_primary_match") or "").strip()
+        sec3.append(
+            "3.4b %s: %s"
+            % (
+                _lbl(dc, "LABEL_SKIP_EMPTY_PRIMARY", "主キーをスキップ"),
+                sm if sm else "（空欄）",
+            )
+        )
+    sec3.extend(
+        [
+            "3.5 %s: %s" % (_lbl(dc, "LABEL_CHECKS", "加工"), proc),
+        ]
+    )
     if vss:
         if full_value_shape:
             vss_disp = vss

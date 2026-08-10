@@ -3188,6 +3188,8 @@ def _batch_done_notify(
     ok: bool,
     use_parent_dialog: bool,
     run_id: str = "",
+    error: str = "",
+    abort_phase: str = "",
 ) -> None:
     """一括実行の完了表示。親 Qt がポーリングするファイル通知を優先し、失敗時は従来の完了 IPC にフォールバックする。"""
     wrote = False
@@ -3195,7 +3197,15 @@ def _batch_done_notify(
         try:
             from ui_qt.ipc_file import write_batch_done_notify  # noqa: WPS433
 
-            write_batch_done_notify(sheet_id, title, message, ok=ok, run_id=run_id)
+            write_batch_done_notify(
+                sheet_id,
+                title,
+                message,
+                ok=ok,
+                run_id=run_id,
+                error=error,
+                abort_phase=abort_phase,
+            )
             wrote = True
         except Exception as exc:
             logger.warning("[DATA_AGG] batch done notify ファイル書込失敗: %s", exc)
@@ -6380,6 +6390,8 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
         title: str = "データ集約",
         elapsed_ms: int | None = None,
         spill_path: Path | None = None,
+        error: str = "",
+        abort_phase: str = "",
     ) -> None:
         if elapsed_ms is not None:
             try:
@@ -6409,6 +6421,8 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             ok=ok,
             use_parent_dialog=notify_parent,
             run_id=batch_run_id,
+            error=error,
+            abort_phase=abort_phase,
         )
 
     if not spill_dir_s:
@@ -6566,6 +6580,8 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
                 str(meta.get("user_msg") or "一括実行を中止しました。"),
                 ok=False,
                 spill_path=spill_dir,
+                error=str(meta.get("error") or ""),
+                abort_phase=str(meta.get("abort_phase") or ""),
             )
             return
         _app, _book, sheet, _hwnd = ctx
@@ -6590,6 +6606,8 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             ok=False,
             elapsed_ms=_tms,
             spill_path=spill_dir,
+            error=str(meta.get("error") or ""),
+            abort_phase=str(meta.get("abort_phase") or ""),
         )
         return
 

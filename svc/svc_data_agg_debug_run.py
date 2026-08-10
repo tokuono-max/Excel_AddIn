@@ -17,7 +17,12 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from svc.data_agg_source_ui import source_ui_block
+from svc.data_agg_sheet_resolve import (
+    SHEET_MISS_LABEL,
+    classify_sheet_rule,
+    resolve_all_sheet_names_by_rule,
+)
+from svc.data_agg_source_ui import ensure_source_ui_block, source_ui_block
 
 # 名前取得デバッグ・フェーズ2 の既定文言（MAIN.DEBUG.NAME_EXTRACT_DEBUG で上書き可）
 _NE_DBG_DEFAULTS: dict[str, str] = {
@@ -196,7 +201,7 @@ def fill_bundles_for_scenario_phase(
     本番一括用の全件一括抽出は extract_item_bundle(debug_step_scope=None) を別途使う。
     progress_hook: 処理ファイル進捗 (done, total)。done は 1 始まり。省略時は呼ばない。
     """
-    from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+    from svc.svc_data_agg_extract import xlsx_workbook_scope
 
     allowed_paths = _allowed_paths_after_file_filter(item, paths)
 
@@ -220,43 +225,14 @@ def fill_bundles_for_scenario_phase(
     for idx, fp in enumerate(process_paths, start=1):
         with xlsx_workbook_scope():
             try:
-                if phase_slot_index == 2:
-                    cache[fp] = extract_item_bundle(
-                        fp,
-                        item,
-                        item_id=item_id,
-                        cell_positions={},
-                        join_path_header=jp_hdr or None,
-                        debug_step_scope="primary",
-                    )
-                elif phase_slot_index == 3:
-                    base = cache.get(fp)
-                    if base is None:
-                        cache[fp] = _empty_bundle_shell()
-                    else:
-                        cache[fp] = extract_item_bundle(
-                            fp,
-                            item,
-                            item_id=item_id,
-                            cell_positions={},
-                            join_path_header=jp_hdr or None,
-                            debug_step_scope="link",
-                            existing_bundle=base,
-                        )
-                else:
-                    base = cache.get(fp)
-                    if base is None:
-                        cache[fp] = _empty_bundle_shell()
-                    else:
-                        cache[fp] = extract_item_bundle(
-                            fp,
-                            item,
-                            item_id=item_id,
-                            cell_positions={},
-                            join_path_header=jp_hdr or None,
-                            debug_step_scope="join",
-                            existing_bundle=base,
-                        )
+                cache[fp] = _extract_bundles_for_matched_sheets(
+                    item,
+                    fp,
+                    item_id=item_id,
+                    jp_hdr=jp_hdr,
+                    phase_slot_index=phase_slot_index,
+                    existing=cache.get(fp),
+                )
             except Exception:
                 cache[fp] = _bundle_error_stub()
 
@@ -708,58 +684,389 @@ def scenario_debug_phase_result(
     return summary, colvals, events, [None] * len(colvals)
 
 
+def _patch_item_sheet_exact(item: dict[str, Any], sheet_name: str) -> dict[str, Any]:
+    import copy
+
+    out = copy.deepcopy(item)
+    out_s0 = (out.get("sources") or [None])[0]
+    if isinstance(out_s0, dict):
+        out_s0["sheet_name"] = sheet_name
+        ensure_source_ui_block(out_s0)["sheet_rule"] = "完全一致"
+    return out
+
+
+def _merge_primary_sheet_bundles(
+    parts: list[tuple[str, dict[str, Any]]],
+    file_path: str,
+) -> dict[str, Any]:
+    """複数シートの primary バンドルを左→右順に連結する。"""
+    from svc.svc_data_agg_extract import _merge_primary_sheet_bundles as _merge_ex
+
+    return _merge_ex(parts, file_path)
+
+
+def _append_rule_maps_with_offset(
+    dest: dict[str, Any],
+    src_bundle: dict[str, Any],
+    *,
+    values_key: str,
+    contexts_key: str,
+    g_off: int,
+    file_path: str,
+) -> None:
+    svm = src_bundle.get(values_key) or {}
+    scm = src_bundle.get(contexts_key) or {}
+    if not isinstance(svm, dict):
+        return
+    for target, vals in svm.items():
+        if not isinstance(vals, list):
+            continue
+        dest.setdefault(values_key, {}).setdefault(target, []).extend(vals)
+        ctxs = scm.get(target) if isinstance(scm, dict) else None
+        out_ctx = dest.setdefault(contexts_key, {}).setdefault(target, [])
+        for i, _v in enumerate(vals):
+            if isinstance(ctxs, list) and i < len(ctxs) and isinstance(ctxs[i], dict):
+                c = dict(ctxs[i])
+            else:
+                c = {"file_path": str(file_path), "base_cell": None}
+            c["file_path"] = str(c.get("file_path") or file_path)
+            c["iter_index"] = int(g_off + i)
+            out_ctx.append(c)
+
+
+def _extract_link_join_across_sheets(
+    file_path: str,
+    item: dict[str, Any],
+    base: dict[str, Any],
+    *,
+    item_id: str,
+    jp_hdr: str,
+    scope: str,
+) -> dict[str, Any]:
+    """既存 primary の _sheet_parts に沿って link/join をシート順に再計算する。"""
+    from svc.svc_data_agg_extract import (
+        _mini_iter_contexts_for_sheet_part,
+        extract_item_bundle,
+    )
+
+    parts = base.get("_sheet_parts")
+    out = base.copy()
+    if scope == "link":
+        out["link_values"] = {}
+        out["link_contexts"] = {}
+        values_key, contexts_key = "link_values", "link_contexts"
+    else:
+        out["join_values"] = {}
+        out["join_contexts"] = {}
+        values_key, contexts_key = "join_values", "join_contexts"
+
+    if not isinstance(parts, list) or not parts:
+        item_one = _item_with_resolved_sheet_for_debug(item, file_path)
+        if item_one is None:
+            return out
+        return extract_item_bundle(
+            file_path,
+            item_one,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            debug_step_scope=scope,
+            existing_bundle=base,
+        )
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        sh = str(part.get("sheet_name") or "")
+        g_off = int(part.get("g_off") or 0)
+        n_src = int(part.get("n_src") or 0)
+        if not sh or n_src < 1:
+            continue
+        local_spans = part.get("_cell_source_spans")
+        if not isinstance(local_spans, dict) or not local_spans:
+            local_spans = {0: (0, n_src)}
+        mini_spans = {
+            int(si): (0, int(sp[1]))
+            for si, sp in local_spans.items()
+            if isinstance(sp, (tuple, list)) and len(sp) == 2 and int(sp[1]) > 0
+        }
+        if not mini_spans:
+            mini_spans = {0: (0, n_src)}
+        mini_prim = list(part.get("primary_values") or [])[:n_src]
+        mini = {
+            "primary_values": mini_prim,
+            "iteration_contexts": _mini_iter_contexts_for_sheet_part(
+                file_path=str(file_path),
+                sheet_name=sh,
+                g_off=g_off,
+                n_src=n_src,
+                mini_prim=mini_prim,
+                base=base,
+                part=part,
+            ),
+            "link_values": {},
+            "link_contexts": {},
+            "join_values": {},
+            "join_contexts": {},
+            "path_item_values": {},
+            "path_item_contexts": {},
+            "_cell_source_spans": mini_spans,
+        }
+        partial = extract_item_bundle(
+            file_path,
+            _patch_item_sheet_exact(item, sh),
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            debug_step_scope=scope,
+            existing_bundle=mini,
+        )
+        _append_rule_maps_with_offset(
+            out,
+            partial,
+            values_key=values_key,
+            contexts_key=contexts_key,
+            g_off=g_off,
+            file_path=file_path,
+        )
+    return out
+
+
+def _extract_bundles_for_matched_sheets(
+    item: dict[str, Any],
+    file_path: str,
+    *,
+    item_id: str,
+    jp_hdr: str,
+    phase_slot_index: int,
+    existing: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """一致シートを左→右の順に読み、primary は連結、link/join はシート単位で再計算する。"""
+    from svc.svc_data_agg_extract import extract_item_bundle
+
+    sources = item.get("sources") or []
+    s0 = sources[0] if sources and isinstance(sources[0], dict) else None
+    if not isinstance(s0, dict) or _is_name_extract_source(s0):
+        if phase_slot_index == 2:
+            return extract_item_bundle(
+                file_path,
+                item,
+                item_id=item_id,
+                cell_positions={},
+                join_path_header=jp_hdr or None,
+                debug_step_scope="primary",
+            )
+        base = existing if isinstance(existing, dict) else _empty_bundle_shell()
+        if phase_slot_index == 3:
+            return extract_item_bundle(
+                file_path,
+                item,
+                item_id=item_id,
+                cell_positions={},
+                join_path_header=jp_hdr or None,
+                debug_step_scope="link",
+                existing_bundle=base,
+            )
+        return extract_item_bundle(
+            file_path,
+            item,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            debug_step_scope="join",
+            existing_bundle=base,
+        )
+
+    sheets = _list_matching_sheet_names(file_path, s0)
+    if sheets is None:
+        item_one = _item_with_resolved_sheet_for_debug(item, file_path)
+        if item_one is None:
+            return _empty_bundle_shell()
+        if phase_slot_index == 2:
+            return extract_item_bundle(
+                file_path,
+                item_one,
+                item_id=item_id,
+                cell_positions={},
+                join_path_header=jp_hdr or None,
+                debug_step_scope="primary",
+            )
+        base = existing if isinstance(existing, dict) else _empty_bundle_shell()
+        return extract_item_bundle(
+            file_path,
+            item_one,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            debug_step_scope="link" if phase_slot_index == 3 else "join",
+            existing_bundle=base,
+        )
+    if not sheets:
+        return _empty_bundle_shell()
+
+    if phase_slot_index == 2:
+        parts: list[tuple[str, dict[str, Any]]] = []
+        for sh in sheets:
+            b = extract_item_bundle(
+                file_path,
+                _patch_item_sheet_exact(item, sh),
+                item_id=item_id,
+                cell_positions={},
+                join_path_header=jp_hdr or None,
+                debug_step_scope="primary",
+            )
+            parts.append((sh, b))
+        return _merge_primary_sheet_bundles(parts, file_path)
+
+    base = existing if isinstance(existing, dict) else _empty_bundle_shell()
+    scope = "link" if phase_slot_index == 3 else "join"
+    return _extract_link_join_across_sheets(
+        file_path,
+        item,
+        base,
+        item_id=item_id,
+        jp_hdr=jp_hdr,
+        scope=scope,
+    )
+
+
+def _list_matching_sheet_names(
+    file_path: str,
+    s0: dict[str, Any],
+) -> list[str] | None:
+    """一致シート名一覧（左→右）。CSV などシート解決不要時は None。該当なしは []。"""
+    sn = str(s0.get("sheet_name") or "").strip()
+    p0 = source_ui_block(s0) or {}
+    rule = str(p0.get("sheet_rule") or "")
+    p = Path(file_path)
+    suffix = p.suffix.lower()
+    if suffix == ".csv":
+        return None
+    if suffix == ".xls":
+        from svc.data_agg_xls_io import list_xls_sheet_names, xls_reader_unavailable_message
+
+        if xls_reader_unavailable_message():
+            return []
+        names = list_xls_sheet_names(file_path)
+        if not names:
+            return []
+        return resolve_all_sheet_names_by_rule(names, rule, sn)
+    try:
+        import openpyxl  # noqa: E402
+    except Exception:
+        return [sn] if sn else []
+    try:
+        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        names = list(wb.sheetnames or [])
+        wb.close()
+        return resolve_all_sheet_names_by_rule(names, rule, sn)
+    except Exception:
+        return [sn] if sn else []
+
+
+def _item_with_resolved_sheet_for_debug(
+    item: dict[str, Any],
+    file_path: str,
+) -> dict[str, Any] | None:
+    """先頭の一致シート名へ差し替えた item（単一シート互換）。"""
+    sources = item.get("sources") or []
+    s0 = sources[0] if sources and isinstance(sources[0], dict) else None
+    if not isinstance(s0, dict) or _is_name_extract_source(s0):
+        return item
+    sheets = _list_matching_sheet_names(file_path, s0)
+    if sheets is None:
+        return item
+    if not sheets:
+        return None
+    return _patch_item_sheet_exact(item, sheets[0])
+
+
 def _sheet_column_preview(
     s0: dict[str, Any],
     file_paths: list[str],
     max_rows: int,
 ) -> list[str]:
-    sn = str(s0.get("sheet_name") or "").strip()
-    p0 = source_ui_block(s0) or {}
-    rule = str(p0.get("sheet_rule") or "")
+    """ファイルごとに一致シートを左→右で列挙（複数は ', ' 結合）。"""
     out: list[str] = []
     for fp in file_paths:
         if len(out) >= max_rows:
             break
-        out.append(_resolve_actual_sheet_name(fp, rule, sn))
+        suffix = Path(fp).suffix.lower()
+        if suffix == ".xls":
+            from svc.data_agg_xls_io import (
+                list_xls_sheet_names,
+                xls_reader_unavailable_message,
+            )
+
+            unavailable = xls_reader_unavailable_message()
+            if unavailable:
+                out.append(unavailable)
+                continue
+            sn = str(s0.get("sheet_name") or "").strip()
+            p0 = source_ui_block(s0) or {}
+            rule = str(p0.get("sheet_rule") or "")
+            names = list_xls_sheet_names(fp)
+            if not names:
+                out.append("（.xls読取失敗）")
+                continue
+            matched = resolve_all_sheet_names_by_rule(names, rule, sn)
+            out.append(", ".join(matched) if matched else SHEET_MISS_LABEL)
+            continue
+        sheets = _list_matching_sheet_names(fp, s0)
+        if sheets is None:
+            sn = str(s0.get("sheet_name") or "").strip()
+            p0 = source_ui_block(s0) or {}
+            rule = str(p0.get("sheet_rule") or "")
+            one = _resolve_actual_sheet_name(fp, rule, sn)
+            out.append(one if one else SHEET_MISS_LABEL)
+            continue
+        if not sheets:
+            out.append(SHEET_MISS_LABEL)
+        else:
+            out.append(", ".join(sheets))
     return _cap_list_capped(out, max_rows) if out else ["（シート条件のみ）"]
 
 
-def _resolve_actual_sheet_name(file_path: str, rule: str, sn: str) -> str:
+def _resolve_actual_sheet_name(file_path: str, rule: str, sn: str) -> str | None:
+    """先頭一致のシート名。該当なしは None。"""
+    matched = _resolve_all_actual_sheet_names(file_path, rule, sn)
+    if matched is None:
+        if Path(file_path).suffix.lower() == ".csv":
+            return "CSV"
+        return sn or None
+    return matched[0] if matched else None
+
+
+def _resolve_all_actual_sheet_names(
+    file_path: str, rule: str, sn: str
+) -> list[str] | None:
+    """一致シート全件。CSV は None。"""
     p = Path(file_path)
     if p.suffix.lower() == ".csv":
-        return "CSV"
+        return None
     if p.suffix.lower() == ".xls":
-        return sn or "（.xls）"
+        from svc.data_agg_xls_io import (
+            list_xls_sheet_names,
+            xls_reader_unavailable_message,
+        )
+
+        if xls_reader_unavailable_message():
+            return []
+        names = list_xls_sheet_names(file_path)
+        if not names:
+            return []
+        return resolve_all_sheet_names_by_rule(names, rule, sn)
     try:
         import openpyxl  # noqa: E402
     except Exception:
-        return sn or "（既定シート）"
+        return [sn] if sn else []
     try:
         wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
         names = list(wb.sheetnames or [])
         wb.close()
-        if not names:
-            return sn or "（既定シート）"
-        if "左端" in rule or "left" in rule.lower():
-            return names[0]
-        if sn:
-            if "完全一致" in rule:
-                for x in names:
-                    if x == sn:
-                        return x
-            elif "含む" in rule:
-                for x in names:
-                    if sn in x:
-                        return x
-            elif "含まない" in rule:
-                for x in names:
-                    if sn not in x:
-                        return x
-            else:
-                return sn
-        return names[0]
+        return resolve_all_sheet_names_by_rule(names, rule, sn)
     except Exception:
-        return sn or "（既定シート）"
+        return [sn] if sn else []
 
 
 def _flatten_map_values(

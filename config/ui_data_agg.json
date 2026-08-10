@@ -248,6 +248,9 @@
     "PHASE_EXCEL_SPREAD": "Excelへ展開",
     "STATUS_DONE": "一括実行が完了しました。\n処理項目数: {count}\n追加行: {append}\n更新行: {update}\n結合イベント（ログ追記件数）: {join_errors}",
     "STATUS_CANCEL": "一括実行を中止しました。",
+    "MSG_EXTRACT_TRUNCATED_CONTINUE_PROMPT": "読めた件数のまま処理を続けますか？\n（継続すると未読分は取り込まれません）",
+    "BTN_EXTRACT_TRUNCATED_CONTINUE": "継続",
+    "BTN_EXTRACT_TRUNCATED_ABORT": "中止",
     "MSG_MASTER_RUN_CANCEL": "（実行を中止しました）",
     "MSG_MASTER_RUN_CANCEL_NOTICE": "実行を中止しました。",
     "MSG_MASTER_RUN_CANCEL_CONTINUOUS_NOTICE": "連続実行を中止しました。",
@@ -736,10 +739,17 @@
         "LABEL_END_MODE": "終結モード",
         "END_MODE_ITEMS": [
           "N件",
-          "空白まで"
+          "空白まで",
+          "終端"
         ],
         "LABEL_N_COUNT": "取得件数",
         "DEFAULT_N_COUNT": 1,
+        "LABEL_SKIP_EMPTY_PRIMARY": "主キーをスキップ",
+        "TIP_SKIP_EMPTY_PRIMARY": "チェック時、右側の一致文字に該当する主キー反復を連携・結合も含めて取得しません。未入力は空欄。カンマ区切りで複数指定可（先頭の,や,,は空欄、末尾の,は無視）。終結「空白まで」では空欄は停止優先のためスキップしません。",
+        "DEFAULT_SKIP_EMPTY_PRIMARY": false,
+        "PLACEHOLDER_SKIP_PRIMARY_MATCH": "空欄 / 複数はカンマ区切り",
+        "TIP_SKIP_PRIMARY_MATCH": "例: 空欄のみ＝未入力 / 空欄と文字= ,A,- / 文字のみ= A,-",
+        "DEFAULT_SKIP_PRIMARY_MATCH": "",
         "LABEL_NORMALIZE": "正規化",
         "LABEL_REPLACE": "置換",
         "LABEL_CHECKS": "加工",
@@ -759,7 +769,7 @@
         "VALUE_SHAPE_HINT_PADDING_TOP": 0,
         "VALUE_SHAPE_HINT_PADDING_BOTTOM": 2,
         "VALUE_SHAPE_HINT_PADDING_H": 0,
-        "VALUE_SHAPE_HINT_HTML": "<table style=\"border-collapse:collapse;\"><tr><td colspan=\"3\">※コマンド</td></tr><tr><td align=\"left\">前後空白削除</td><td>：</td><td>trim</td></tr><tr><td align=\"left\">分離</td><td>：</td><td>split,ブロック</td></tr><tr><td align=\"left\">置換</td><td>：</td><td>rep,\"検索\",\"置換\"</td></tr><tr><td align=\"left\">大/小文字変換</td><td>：</td><td>case,upper/lower</td></tr><tr><td align=\"left\">半角変換</td><td>：</td><td>wide</td></tr><tr><td align=\"left\">切取り</td><td>：</td><td>mid,位置,長さ</td></tr><tr><td align=\"left\">削除</td><td>：</td><td>cut,位置,長さ</td></tr><tr><td align=\"left\">挿入</td><td>：</td><td>ins,位置,\"挿入文字\"</td></tr><tr><td align=\"left\">右埋め</td><td>：</td><td>padr,数,\"文字\"</td></tr><tr><td align=\"left\">左埋め</td><td>：</td><td>padl,数,\"文字\"</td></tr><tr><td align=\"left\">yyyy/mm/dd</td><td>：</td><td>date</td></tr></table>",
+        "VALUE_SHAPE_HINT_HTML": "<table style=\"border-collapse:collapse;\"><tr><td colspan=\"3\">※コマンド</td></tr><tr><td align=\"left\">前後空白削除</td><td>：</td><td>trim</td></tr><tr><td align=\"left\">分離</td><td>：</td><td>split,ブロック</td></tr><tr><td align=\"left\">置換</td><td>：</td><td>rep,\"検索\",\"置換\"</td></tr><tr><td align=\"left\">大/小文字変換</td><td>：</td><td>case,upper/lower</td></tr><tr><td align=\"left\">半角変換</td><td>：</td><td>wide</td></tr><tr><td align=\"left\">左n文字</td><td>：</td><td>left,数</td></tr><tr><td align=\"left\">右n文字</td><td>：</td><td>right,数</td></tr><tr><td align=\"left\">切取り</td><td>：</td><td>mid,位置,長さ</td></tr><tr><td align=\"left\">削除</td><td>：</td><td>cut,位置,長さ</td></tr><tr><td align=\"left\">挿入</td><td>：</td><td>ins,位置,\"挿入文字\"</td></tr><tr><td align=\"left\">右埋め</td><td>：</td><td>padr,数,\"文字\"</td></tr><tr><td align=\"left\">左埋め</td><td>：</td><td>padl,数,\"文字\"</td></tr><tr><td align=\"left\">yyyy/mm/dd</td><td>：</td><td>date</td></tr></table>",
         "LABEL_WRITE_MODE_DETAIL": "書込みモード",
         "WRITE_MODE_ITEMS": [
           "空き上書き (fill_in)",
@@ -889,7 +899,7 @@
         "LABEL_VALUE_SHAPE": "整形（DSL）",
         "VALUE_SHAPE_PLACEHOLDER": "例: trim,rep,\"旧\",\"新\",case,upper",
         "VALUE_SHAPE_HINT_SHORT_HTML": "<i>※ チェックの後に適用。\n詳細は入力欄のツールチップ参照。</i>",
-        "VALUE_SHAPE_HINT_HTML": "<table style=\"border-collapse:collapse;\"><tr><td colspan=\"3\">※コマンド</td></tr><tr><td align=\"left\">前後空白削除</td><td>：</td><td>trim</td></tr><tr><td align=\"left\">分離</td><td>：</td><td>split,ブロック</td></tr><tr><td align=\"left\">置換</td><td>：</td><td>rep,\"検索\",\"置換\"</td></tr><tr><td align=\"left\">大/小文字変換</td><td>：</td><td>case,upper/lower</td></tr><tr><td align=\"left\">半角変換</td><td>：</td><td>wide</td></tr><tr><td align=\"left\">切取り</td><td>：</td><td>mid,位置,長さ</td></tr><tr><td align=\"left\">削除</td><td>：</td><td>cut,位置,長さ</td></tr><tr><td align=\"left\">挿入</td><td>：</td><td>ins,位置,\"挿入文字\"</td></tr><tr><td align=\"left\">右埋め</td><td>：</td><td>padr,数,\"文字\"</td></tr><tr><td align=\"left\">左埋め</td><td>：</td><td>padl,数,\"文字\"</td></tr><tr><td align=\"left\">yyyy/mm/dd</td><td>：</td><td>date</td></tr></table>",
+        "VALUE_SHAPE_HINT_HTML": "<table style=\"border-collapse:collapse;\"><tr><td colspan=\"3\">※コマンド</td></tr><tr><td align=\"left\">前後空白削除</td><td>：</td><td>trim</td></tr><tr><td align=\"left\">分離</td><td>：</td><td>split,ブロック</td></tr><tr><td align=\"left\">置換</td><td>：</td><td>rep,\"検索\",\"置換\"</td></tr><tr><td align=\"left\">大/小文字変換</td><td>：</td><td>case,upper/lower</td></tr><tr><td align=\"left\">半角変換</td><td>：</td><td>wide</td></tr><tr><td align=\"left\">左n文字</td><td>：</td><td>left,数</td></tr><tr><td align=\"left\">右n文字</td><td>：</td><td>right,数</td></tr><tr><td align=\"left\">切取り</td><td>：</td><td>mid,位置,長さ</td></tr><tr><td align=\"left\">削除</td><td>：</td><td>cut,位置,長さ</td></tr><tr><td align=\"left\">挿入</td><td>：</td><td>ins,位置,\"挿入文字\"</td></tr><tr><td align=\"left\">右埋め</td><td>：</td><td>padr,数,\"文字\"</td></tr><tr><td align=\"left\">左埋め</td><td>：</td><td>padl,数,\"文字\"</td></tr><tr><td align=\"left\">yyyy/mm/dd</td><td>：</td><td>date</td></tr></table>",
         "LABEL_WRITE_MODE_DETAIL": "書込みモード",
         "WRITE_MODE_ITEMS": [
           "強制上書き (overwrite)",

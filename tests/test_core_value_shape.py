@@ -90,3 +90,31 @@ def test_split_result_has_no_newlines() -> None:
 def test_compile_split() -> None:
     ok, msg = compile_shape_script("split,1")
     assert ok and msg == ""
+
+
+def test_left_basic() -> None:
+    assert apply_value_shape("abcdef", "left,3") == "abc"
+    assert apply_value_shape("abcdef", "Left,3") == "abc"
+
+
+def test_right_basic() -> None:
+    assert apply_value_shape("abcdef", "right,3") == "def"
+    assert apply_value_shape("abcdef", "Right,2") == "ef"
+
+
+def test_left_right_edges() -> None:
+    assert apply_value_shape("ab", "left,0") == ""
+    assert apply_value_shape("ab", "right,0") == ""
+    assert apply_value_shape("ab", "left,9") == "ab"
+    assert apply_value_shape("ab", "right,9") == "ab"
+    assert apply_value_shape("", "left,3") == ""
+    assert apply_value_shape("ab", "left,-1") == "ab"
+    assert apply_value_shape("ab", "right,abc") == "ab"
+
+
+def test_compile_left_right() -> None:
+    ok, msg = compile_shape_script("left,3,right,2")
+    assert ok and msg == ""
+    ok2, msg2 = compile_shape_script("left")
+    assert not ok2
+    assert "不足" in msg2

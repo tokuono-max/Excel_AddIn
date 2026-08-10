@@ -239,7 +239,14 @@ def batch_done_notify_path(sheet_id: str) -> Path:
 
 
 def write_batch_done_notify(
-    sheet_id: str, title: str, message: str, *, ok: bool, run_id: str = ""
+    sheet_id: str,
+    title: str,
+    message: str,
+    *,
+    ok: bool,
+    run_id: str = "",
+    error: str = "",
+    abort_phase: str = "",
 ) -> None:
     """別プロセス一括実行の完了を、メイン UI と同一 IPC ルートへ書き出す。"""
     write_pickle(
@@ -249,6 +256,8 @@ def write_batch_done_notify(
             "message": str(message or ""),
             "ok": bool(ok),
             "run_id": str(run_id or ""),
+            "error": str(error or ""),
+            "abort_phase": str(abort_phase or ""),
             "ts": time.time(),
         },
     )

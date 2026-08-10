@@ -374,11 +374,16 @@ def validate_scenario(data: dict[str, Any]) -> list[str]:
                             ro = int(src.get("row_offset") or 0)
                             co = int(src.get("col_offset") or 0)
                             ru = bool(src.get("repeat_until_empty", True))
+                            rlast = bool(src.get("repeat_until_last", False))
                             rm = src.get("repeat_max")
-                            if ru and (rm is None or int(rm or 0) <= 0) and ro == 0 and co == 0:
+                            if (
+                                ((ru and (rm is None or int(rm or 0) <= 0)) or rlast)
+                                and ro == 0
+                                and co == 0
+                            ):
                                 errors.append(
                                     "items[%s].sources[%s]: 行・列移動オフセットがともに 0 のときは"
-                                    "終結「空白まで」（repeat_until_empty）は指定できません。N件を指定してください。"
+                                    "終結「空白まで／終端」は指定できません。N件を指定してください。"
                                     % (i, j)
                                 )
                         elif st == SOURCE_TYPE_NAME_EXTRACT:

@@ -3,12 +3,13 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-07-02
-Version: 0.4.50
+Updated: 2026-08-10
+Version: 0.4.51
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.51 (2026-08-10) 一括完了: 読取上限打ち切り時に継続／中止を選択。継続なら HC_DATA_AGG_EXTRACT_TRUNC_POLICY=warn で再実行。
   - 0.4.50 (2026-07-02) 起動: prepare は ensure_front スキップ＋show 前 opacity 0→reveal。pulse 初回 700ms・再試行は Win32 のみ（COM 4 連打抑制）。上下黒塗り緩和。
   - 0.4.49 (2026-06-30) 起動 pulse: 初回を 350ms 遅延（描画後 COM）、get_excel_context は sheet_id なし（guid_scan 回避で UI フリーズ・黒塗り緩和）。
   - 0.4.48 (2026-06-22) showEvent: 同期 _pulse を廃止し _schedule_excel_unlock_pulse_chain に統合（QTimer(0)+90/200/450ms・二重 guid_scan 防止）。create_dialog の重複 deferred pulse を削除。
@@ -3672,11 +3673,16 @@ class _DataAggMainWindow(QDialog):
         sr = str(pb.get("sheet_rule") or "") or "—"
         cref = str(s.get("cell_ref") or "").strip()
         cref_d = cref if cref else "（空＝既定）"
-        labels = ["N件", "空白まで"]
-        if s.get("repeat_until_empty"):
-            end_s = labels[1] if len(labels) > 1 else "空白まで"
+        labels = ["N件", "空白まで", "終端"]
+        if s.get("repeat_until_last") and not s.get("repeat_until_empty"):
+            end_s = labels[2]
+        elif s.get("repeat_until_empty"):
+            end_s = labels[1]
         else:
             end_s = "%s=%s" % (labels[0], s.get("repeat_max") if s.get("repeat_max") is not None else "—")
+        if s.get("skip_empty_primary"):
+            sm = str(s.get("skip_primary_match") or "").strip()
+            end_s = "%s/スキップ%s" % (end_s, ("=%s" % sm) if sm else "(空欄)")
         nl = len(pb.get("link_defs") or []) if isinstance(pb.get("link_defs"), list) else 0
         nj = len(pb.get("join_defs") or []) if isinstance(pb.get("join_defs"), list) else 0
         lead = ("%s セル座標から取得" % sn_user) if sn_user else "セル座標から取得"
@@ -3855,8 +3861,45 @@ class _DataAggMainWindow(QDialog):
         msg = _normalize_message_newlines(str(d.get("message") or ""))
         if d.get("ok", True):
             show_done_notice(self, title, msg)
-        else:
-            show_warning_notice(self, title, msg)
+            return
+        from svc.data_agg_extract_limit import is_extract_truncated_batch_notify
+
+        if is_extract_truncated_batch_notify(d):
+            if self._ask_continue_after_extract_truncated(title, msg):
+                self._run_execution("batch_run", extract_trunc_policy="warn")
+            return
+        show_warning_notice(self, title, msg)
+
+    def _ask_continue_after_extract_truncated(self, title: str, msg: str) -> bool:
+        """読取上限打ち切り時に継続／中止を尋ねる。継続なら True。"""
+        prompt = str(
+            (self._messages or {}).get("MSG_EXTRACT_TRUNCATED_CONTINUE_PROMPT")
+            or "読めた件数のまま処理を続けますか？\n（継続すると未読分は取り込まれません）"
+        ).strip()
+        btn_continue = str(
+            (self._messages or {}).get("BTN_EXTRACT_TRUNCATED_CONTINUE") or "継続"
+        ).strip()
+        btn_abort = str(
+            (self._messages or {}).get("BTN_EXTRACT_TRUNCATED_ABORT") or "中止"
+        ).strip()
+        body = msg
+        if prompt:
+            body = "%s\n\n%s" % (msg, _normalize_message_newlines(prompt)) if msg else prompt
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title or "データ集約")
+        box.setText(body)
+        continue_btn = box.addButton(btn_continue, QMessageBox.ButtonRole.AcceptRole)
+        abort_btn = box.addButton(btn_abort, QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(abort_btn)
+        try:
+            from ui_qt.ui_notification_sound import play_notification_sound
+
+            play_notification_sound("info")
+        except Exception:
+            pass
+        box.exec()
+        return box.clickedButton() is continue_btn
 
     def _on_batch_run(self) -> None:
         """一括実行を開始する。"""
@@ -3882,7 +3925,7 @@ class _DataAggMainWindow(QDialog):
             pass
         return hwnd, sheet_id
 
-    def _run_execution(self, action: str) -> None:
+    def _run_execution(self, action: str, *, extract_trunc_policy: str | None = None) -> None:
         """一括実行を IPC で svc に依頼する（メイン本番は一括のみ）。"""
         data = self._build_scenario_from_ui()
         items = data.get("items") or []
@@ -4030,6 +4073,11 @@ class _DataAggMainWindow(QDialog):
             env["PYTHONPATH"] = str(proj_root) + (os.pathsep + env.get("PYTHONPATH", ""))
             if use_short_runner and install_root is not None:
                 env = runtime_layout.env_with_packaged_dll_search_path(env, install_root)
+            policy = str(extract_trunc_policy or "").strip().lower()
+            if policy in ("warn", "continue", "log", "abort", "stop", "cancel"):
+                env["HC_DATA_AGG_EXTRACT_TRUNC_POLICY"] = (
+                    "warn" if policy in ("warn", "continue", "log") else "abort"
+                )
             if notify_parent_dialog:
                 self._start_batch_done_poll_for_sheet(
                     run_sheet_id,
@@ -4924,6 +4972,12 @@ class _ScenarioEditDialog(QDialog):
         try:
             from ui_qt.ui_data_agg_debug import create_data_agg_debug_dialog
 
+            # フォーム上のシート名条件（含む等）をデバッグへ渡す（未再登録の編集も反映）
+            if self._current_source_index >= 0:
+                self._apply_form_to_source(
+                    self._current_source_index, include_scenario_name=True
+                )
+
             dbg = (_get_cfg().get("SCREENS") or {}).get("DEBUG") or {}
             live_items: list[dict[str, Any]] = []
             for i, src in enumerate(self._sources_data):
@@ -4931,12 +4985,8 @@ class _ScenarioEditDialog(QDialog):
                     continue
                 if not src.get("registered"):
                     continue
-                snap = (
-                    self._registered_display_snapshots[i]
-                    if i < len(self._registered_display_snapshots)
-                    else None
-                )
-                base = copy.deepcopy(snap) if snap is not None else copy.deepcopy(src)
+                # 登録済みソースは現在の編集内容を優先（スナップショットは一覧表示用）
+                base = copy.deepcopy(src)
                 if not str(base.get("scenario_name") or "").strip():
                     base["scenario_name"] = self._default_scenario_name(i)
                 live_items.append(
@@ -5079,6 +5129,12 @@ class _ScenarioEditDialog(QDialog):
         cr["col_offset"].valueChanged.connect(self._on_form_changed)
         cr["end_mode"].currentIndexChanged.connect(self._on_form_changed)
         cr["n_count"].valueChanged.connect(self._on_form_changed)
+        sep = cr.get("skip_empty_primary")
+        if sep is not None:
+            sep.stateChanged.connect(self._on_form_changed)
+        spm = cr.get("skip_primary_match")
+        if spm is not None:
+            spm.textChanged.connect(self._on_form_changed)
         for cbx in cr["cell_checks"]:
             cbx.stateChanged.connect(self._on_form_changed)
         vsc = cr.get("value_shape_script")
@@ -5731,6 +5787,8 @@ class _ScenarioEditDialog(QDialog):
             cr["col_offset"],
             cr["end_mode"],
             cr["n_count"],
+            cr.get("skip_empty_primary"),
+            cr.get("skip_primary_match"),
             cr["write_mode_cell"],
             cr.get("value_shape_script"),
         ):
@@ -5841,12 +5899,17 @@ class _ScenarioEditDialog(QDialog):
                 r["row_offset"].setValue(int(src.get("row_offset") or 0))
                 r["col_offset"].setValue(int(src.get("col_offset") or 0))
                 ru = bool(src.get("repeat_until_empty", True))
+                rlast = bool(src.get("repeat_until_last", False))
                 rm = src.get("repeat_max")
-                labels = r.get("end_mode_labels") or ["N件", "空白まで"]
+                labels = r.get("end_mode_labels") or ["N件", "空白まで", "終端"]
                 blank_lbl = labels[1] if len(labels) > 1 else "空白まで"
+                last_lbl = labels[2] if len(labels) > 2 else "終端"
                 n_lbl = labels[0] if labels else "N件"
                 em = r["end_mode"]
-                if ru and (rm is None or int(rm or 0) <= 0):
+                if rlast and not ru:
+                    ix = em.findText(last_lbl)
+                    em.setCurrentIndex(ix if ix >= 0 else min(2, em.count() - 1))
+                elif ru and (rm is None or int(rm or 0) <= 0):
                     ix = em.findText(blank_lbl)
                     em.setCurrentIndex(ix if ix >= 0 else min(1, em.count() - 1))
                 else:
@@ -5860,6 +5923,15 @@ class _ScenarioEditDialog(QDialog):
                         except (TypeError, ValueError):
                             def_n = 1
                     r["n_count"].setValue(int(rm or def_n))
+                sep = r.get("skip_empty_primary")
+                if sep is not None:
+                    sep.setChecked(bool(src.get("skip_empty_primary", False)))
+                spm = r.get("skip_primary_match")
+                if spm is not None:
+                    spm.setText(str(src.get("skip_primary_match") or ""))
+                sync_skip = r.get("sync_skip_match_enabled")
+                if callable(sync_skip):
+                    sync_skip()
                 sync_guard = r.get("sync_offset_blank_guard")
                 if callable(sync_guard):
                     sync_guard()
@@ -6131,14 +6203,28 @@ class _ScenarioEditDialog(QDialog):
             src["cell_ref"] = r["cell_ref"].text().strip()
             src["row_offset"] = int(r["row_offset"].value())
             src["col_offset"] = int(r["col_offset"].value())
-            elabels = r.get("end_mode_labels") or ["N件", "空白まで"]
+            elabels = r.get("end_mode_labels") or ["N件", "空白まで", "終端"]
             blank_lbl = elabels[1] if len(elabels) > 1 else "空白まで"
-            if r["end_mode"].currentText() == blank_lbl:
+            last_lbl = elabels[2] if len(elabels) > 2 else "終端"
+            cur_end = r["end_mode"].currentText()
+            sep = r.get("skip_empty_primary")
+            spm = r.get("skip_primary_match")
+            skip_on = bool(sep.isChecked()) if sep is not None else False
+            skip_match = spm.text() if spm is not None else ""
+            if cur_end == blank_lbl:
                 src["repeat_until_empty"] = True
+                src["repeat_until_last"] = False
+                src["repeat_max"] = None
+            elif cur_end == last_lbl:
+                src["repeat_until_empty"] = False
+                src["repeat_until_last"] = True
                 src["repeat_max"] = None
             else:
                 src["repeat_until_empty"] = False
+                src["repeat_until_last"] = False
                 src["repeat_max"] = int(r["n_count"].value())
+            src["skip_empty_primary"] = skip_on
+            src["skip_primary_match"] = str(skip_match)
             src["repeat_direction"] = "vertical"
             p = self._source_ui_bucket(src)
             src["anchor"] = p.get("legacy_anchor")

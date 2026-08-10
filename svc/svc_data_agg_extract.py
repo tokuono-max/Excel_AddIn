@@ -49,7 +49,23 @@ from svc.data_agg_extract_limit import (  # noqa: E402
     skip_extract_truncation_peek,
     resolve_extract_repeat_limit,
 )
+from svc.data_agg_primary_end import (  # noqa: E402
+    END_MODE_N_COUNT,
+    END_MODE_UNTIL_EMPTY,
+    END_MODE_UNTIL_LAST,
+    apply_until_last_trim,
+    effective_skip_primary_tokens,
+    is_blank_primary_value,
+    primary_value_matches_skip_tokens,
+    source_end_mode,
+    source_keep_empty_primary_slots,
+    source_wants_skip_primary,
+)
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
+from svc.data_agg_sheet_resolve import (  # noqa: E402
+    matching_sheets_for_cell_source,
+    patch_item_sheet_exact,
+)
 from svc.data_agg_value_post import (  # noqa: E402
     postprocess_cell_primary,
     postprocess_cell_primary_batch,
@@ -140,6 +156,8 @@ def xlsx_workbook_scope() -> Iterator[None]:
         "sheet_hits": {},
         "csv_mats": {},
         "csv_dfs": {},
+        "xls_books": {},
+        "xls_sheet_mats": {},
     }
     stack.append(frame)
     try:
@@ -151,6 +169,23 @@ def xlsx_workbook_scope() -> Iterator[None]:
                 wb.close()
             except Exception:
                 pass
+        try:
+            from svc.data_agg_xls_io import close_xls_workbook
+        except Exception:
+            close_xls_workbook = None  # type: ignore[assignment]
+        for book in (frame.get("xls_books") or {}).values():
+            if close_xls_workbook is not None:
+                try:
+                    close_xls_workbook(book)
+                except Exception:
+                    pass
+            else:
+                try:
+                    release = getattr(book, "release_resources", None)
+                    if callable(release):
+                        release()
+                except Exception:
+                    pass
 
 
 def _xlsx_workbook_cache_top() -> Optional[dict[str, Any]]:
@@ -645,7 +680,7 @@ def extract_cells_repeat(
                 if r < 0 or c < 0:
                     break
                 v = _matrix_cell_value(mat, c, r)
-                if repeat_until_empty and (v is None or v == ""):
+                if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                     break
                 out_mat.append(v)
                 c += dc
@@ -667,7 +702,7 @@ def extract_cells_repeat(
                     if row >= df.height or col >= df.width or row < 0 or col < 0:
                         break
                     v = df.row(row)[col]
-                    if repeat_until_empty and (v is None or v == ""):
+                    if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                         break
                     out.append(v)
                     col += dc
@@ -687,7 +722,7 @@ def extract_cells_repeat(
         _poll_cancel_check(cancel_check)
         cr = _col_row_to_cell_ref(col, row)
         v = extract_cell(p, sheet_name, cr)
-        if repeat_until_empty and (v is None or v == ""):
+        if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
             break
         results.append(v)
         col += delta_col
@@ -895,7 +930,7 @@ def _read_repeated_series_from_df(
     vals: list[Any] = []
     if row_step == 0 and col_step == 0:
         v0 = _df_cell_value(df, base_col, base_row)
-        if repeat_until_empty and (v0 is None or v0 == ""):
+        if _stop_repeat_on_empty(v0, repeat_until_empty=repeat_until_empty):
             return []
         return [v0] * limit
     n = 0
@@ -908,7 +943,7 @@ def _read_repeated_series_from_df(
             v = _df_cell_value(df, base_col + col_step * n, base_row)
         else:
             break
-        if repeat_until_empty and (v is None or v == ""):
+        if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
             break
         vals.append(v)
         n += 1
@@ -1013,6 +1048,8 @@ def _finish_repeated_cell_vals(
     skip_trunc_peek: bool = False,
 ) -> None:
     """縦/横反復の主値抽出後処理（xlsx / CSV 共通）。"""
+    if source_end_mode(src) == END_MODE_UNTIL_LAST:
+        vals = apply_until_last_trim(vals, until_last=True)
     if vals:
         n_last = len(vals) - 1
         cell_ref_last = _resolve_cell_with_offset(cell_ref, row_off * n_last, col_off * n_last)
@@ -1152,10 +1189,14 @@ def _get_excel_cell(
     sheet_name: Optional[str],
     cell_ref: str,
 ) -> Any:
-    """Excel ファイル（.xlsx/.xlsm）からセル値を取得する。.xls は未対応の場合は None。"""
+    """Excel ファイルからセル値を取得。.xlsx/.xlsm は OpenPyXL、.xls は xlrd。"""
     if path.suffix.lower() == ".xls":
-        logger.debug("[DATA_AGG_EXTRACT] .xls は未対応: %s", path)
-        return None
+        try:
+            from svc.data_agg_xls_io import read_xls_cell
+        except Exception:
+            logger.debug("[DATA_AGG_EXTRACT] .xls 読取モジュール不可: %s", path)
+            return None
+        return read_xls_cell(path, sheet_name, cell_ref)
     try:
         import openpyxl  # noqa: E402
     except ImportError:
@@ -1272,13 +1313,13 @@ def _collect_xlsx_sheets_for_precache(items: list[dict[str, Any]]) -> set[Option
             if rd not in ("vertical", "horizontal"):
                 continue
             try:
-                repeat_max = int(src.get("repeat_max")) if src.get("repeat_max") is not None else None
-            except (TypeError, ValueError):
-                repeat_max = None
-            repeat_until_empty = bool(src.get("repeat_until_empty", True))
+                until_empty, until_last, repeat_max = _resolve_cell_source_repeat(src)
+            except Exception:
+                until_empty, until_last, repeat_max = True, False, None
             limit = resolve_extract_repeat_limit(
                 repeat_max=repeat_max,
-                repeat_until_empty=repeat_until_empty,
+                repeat_until_empty=until_empty,
+                repeat_until_last=until_last,
             )
             if limit >= _SHEET_PRECACHE_REPEAT_MIN:
                 sheets.add(sheet_key)
@@ -1323,7 +1364,7 @@ def _read_repeated_series_from_matrix(
     vals: list[Any] = []
     if row_step == 0 and col_step == 0:
         v0 = _matrix_cell_value(mat, base_col, base_row)
-        if repeat_until_empty and (v0 is None or v0 == ""):
+        if _stop_repeat_on_empty(v0, repeat_until_empty=repeat_until_empty):
             return []
         return [v0] * limit
     n = 0
@@ -1336,7 +1377,7 @@ def _read_repeated_series_from_matrix(
             v = _matrix_cell_value(mat, base_col + col_step * n, base_row)
         else:
             break
-        if repeat_until_empty and (v is None or v == ""):
+        if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
             break
         vals.append(v)
         n += 1
@@ -1499,7 +1540,7 @@ def _xlsx_read_repeated_series_open_workbook(
             v0 = _xlsx_cell_value_open_workbook(wb, sheet_name, c_ref, path=path)
         except Exception:
             return None
-        if repeat_until_empty and (v0 is None or v0 == ""):
+        if _stop_repeat_on_empty(v0, repeat_until_empty=repeat_until_empty):
             return []
         return [v0] * limit
 
@@ -1533,7 +1574,7 @@ def _xlsx_read_repeated_series_open_workbook(
                 if step > 1 and (i % step) != 0:
                     continue
                 v = tup[0] if tup else None
-                if repeat_until_empty and (v is None or v == ""):
+                if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                     break
                 vals.append(v)
                 picked += 1
@@ -1560,7 +1601,7 @@ def _xlsx_read_repeated_series_open_workbook(
                         _poll_cancel_check(cancel_check)
                     if step > 1 and (j % step) != 0:
                         continue
-                    if repeat_until_empty and (v is None or v == ""):
+                    if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                         return vals
                     vals.append(v)
                     picked += 1
@@ -1613,9 +1654,13 @@ def _append_postprocessed_cell_vals(
 ) -> None:
     """反復セル読取結果をフィルタし、主値後処理して results に追記する。"""
     allow_empty = bool(src.get("allow_empty"))
+    # 終端／N件+スキップ: 空スロットを残し、後段でスキップフィルタする。
+    keep_empty_slots = source_keep_empty_primary_slots(src)
     raw: list[Any] = []
     for v in vals:
-        if v is not None and (v != "" or allow_empty):
+        if keep_empty_slots:
+            raw.append(v)
+        elif v is not None and (v != "" or allow_empty):
             raw.append(v)
         if (
             max_primary_rows is not None
@@ -1634,6 +1679,174 @@ def _append_postprocessed_cell_vals(
         results.append(postprocess_cell_primary(raw[0], ui_block))
         return
     results.extend(postprocess_cell_primary_batch(raw, ui_block))
+
+
+def _is_blank_primary_value(v: Any) -> bool:
+    """主キーが空欄／空（空白のみ含む）か。"""
+    return is_blank_primary_value(v)
+
+
+def _source_wants_skip_empty_primary(src: dict[str, Any]) -> bool:
+    """スキップ有効かつ実効トークンがあるとき True（空白までは空欄トークンを除外）。"""
+    return source_wants_skip_primary(src)
+
+
+def _iter_contexts_rule_indices_contiguous(iter_contexts: list[dict[str, Any]]) -> bool:
+    """rule_iter_index が 0..n-1 連番なら高速系列読取が使える。"""
+    for i, ic in enumerate(iter_contexts):
+        try:
+            ri = int(ic.get("rule_iter_index", i))
+        except (TypeError, ValueError):
+            return False
+        if ri != i:
+            return False
+    return True
+
+
+def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any]) -> None:
+    """
+    skip_empty_primary 対象ソースの空主キー反復を、連携・結合・path_item も含めて落とす。
+    rule_iter_index（シート上の元オフセット）は残す。
+    """
+    prim = list(bundle.get("primary_values") or [])
+    if not prim:
+        return
+    span_map_raw = bundle.get("_cell_source_spans")
+    span_map: dict[Any, Any] = span_map_raw if isinstance(span_map_raw, dict) else {}
+    drop = [False] * len(prim)
+    any_skip = False
+    for si, src in enumerate(sources):
+        if not isinstance(src, dict):
+            continue
+        if (src.get("type") or "cell").strip().lower() != "cell":
+            continue
+        tokens = effective_skip_primary_tokens(src)
+        if not tokens:
+            continue
+        any_skip = True
+        sp = span_map.get(si)
+        if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
+            g_off, n_src = 0, len(prim)
+        else:
+            try:
+                g_off = int(sp[0])
+                n_src = int(sp[1])
+            except (TypeError, ValueError):
+                continue
+        for local_i in range(max(0, n_src)):
+            gi = g_off + local_i
+            if 0 <= gi < len(prim) and primary_value_matches_skip_tokens(prim[gi], tokens):
+                drop[gi] = True
+    if not any_skip or not any(drop):
+        return
+    keep_idx = [i for i, d in enumerate(drop) if not d]
+
+    def _take(lst: Any) -> list[Any]:
+        if not isinstance(lst, list):
+            return []
+        return [lst[i] for i in keep_idx if i < len(lst)]
+
+    bundle["primary_values"] = _take(prim)
+    old_ictx = bundle.get("iteration_contexts") or []
+    new_ictx: list[Any] = []
+    new_prim = bundle["primary_values"]
+    for new_i, old_i in enumerate(keep_idx):
+        if old_i < len(old_ictx) and isinstance(old_ictx[old_i], dict):
+            ctx = dict(old_ictx[old_i])
+        else:
+            ctx = {}
+        ctx["iter_index"] = int(new_i)
+        if "rule_iter_index" not in ctx:
+            # スパン内ローカル位置を推定
+            ri = old_i
+            for si, src in enumerate(sources):
+                if not isinstance(src, dict):
+                    continue
+                sp = span_map.get(si)
+                if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
+                    continue
+                try:
+                    g0 = int(sp[0])
+                    n0 = int(sp[1])
+                except (TypeError, ValueError):
+                    continue
+                if g0 <= old_i < g0 + n0:
+                    ri = old_i - g0
+                    break
+            ctx["rule_iter_index"] = int(ri)
+        ctx["primary_value"] = new_prim[new_i] if new_i < len(new_prim) else None
+        new_ictx.append(ctx)
+    bundle["iteration_contexts"] = new_ictx
+
+    for key in (
+        "link_values",
+        "link_contexts",
+        "join_values",
+        "join_contexts",
+        "path_item_values",
+        "path_item_contexts",
+    ):
+        d = bundle.get(key)
+        if not isinstance(d, dict):
+            continue
+        for t in list(d.keys()):
+            taken = _take(d[t])
+            # コンテキストの iter_index を圧縮後の主値行番号に合わせる
+            # （_assign_series_to_rows_by_context が file_path+iter_index で紐づけるため）
+            if key.endswith("_contexts"):
+                remapped: list[Any] = []
+                for new_i, ctx in enumerate(taken):
+                    if isinstance(ctx, dict):
+                        c = dict(ctx)
+                        c["iter_index"] = int(new_i)
+                        remapped.append(c)
+                    else:
+                        remapped.append(ctx)
+                d[t] = remapped
+            else:
+                d[t] = taken
+
+    # スパンを圧縮後の長さに更新
+    new_spans: dict[int, tuple[int, int]] = {}
+    cursor = 0
+    for si, src in enumerate(sources):
+        if not isinstance(src, dict):
+            continue
+        if (src.get("type") or "cell").strip().lower() != "cell":
+            continue
+        sp = span_map.get(si)
+        if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
+            continue
+        try:
+            g_off = int(sp[0])
+            n_src = int(sp[1])
+        except (TypeError, ValueError):
+            continue
+        kept = sum(1 for i in range(g_off, g_off + n_src) if i < len(drop) and not drop[i])
+        if kept > 0:
+            new_spans[si] = (cursor, kept)
+            cursor += kept
+        else:
+            new_spans[si] = (cursor, 0)
+    bundle["_cell_source_spans"] = new_spans
+
+
+def _resolve_cell_source_repeat(src: dict[str, Any]) -> tuple[bool, bool, Optional[int]]:
+    """(repeat_until_empty, repeat_until_last, repeat_max_for_n_count)。"""
+    mode = source_end_mode(src)
+    until_empty = mode == END_MODE_UNTIL_EMPTY
+    until_last = mode == END_MODE_UNTIL_LAST
+    repeat_max: Optional[int] = None
+    if mode == END_MODE_N_COUNT:
+        try:
+            repeat_max = int(src["repeat_max"]) if src.get("repeat_max") is not None else None
+        except (TypeError, ValueError):
+            repeat_max = None
+    return until_empty, until_last, repeat_max
+
+
+def _stop_repeat_on_empty(v: Any, *, repeat_until_empty: bool) -> bool:
+    return bool(repeat_until_empty) and is_blank_primary_value(v)
 
 
 def extract_item_values(
@@ -1781,16 +1994,17 @@ def extract_item_values(
             _blk = ui_blk if isinstance(ui_blk, dict) else None
             repeat_dir = (src.get("repeat_direction") or "").strip().lower()
             if repeat_dir in ("vertical", "horizontal"):
-                repeat_until_empty = bool(src.get("repeat_until_empty", True))
-                repeat_max = int(x) if (x := src.get("repeat_max")) is not None else None
+                repeat_until_empty, repeat_until_last, repeat_max = _resolve_cell_source_repeat(src)
                 limit = resolve_extract_repeat_limit(
                     repeat_max=repeat_max,
                     repeat_until_empty=repeat_until_empty,
+                    repeat_until_last=repeat_until_last,
                     max_primary_rows=max_primary_rows,
                 )
                 skip_trunc_peek = skip_extract_truncation_peek(
                     repeat_max=repeat_max,
                     repeat_until_empty=repeat_until_empty,
+                    repeat_until_last=repeat_until_last,
                 )
                 vals: list[Any] = []
                 base_col, base_row = _parse_cell_ref(cell_ref)
@@ -1907,6 +2121,48 @@ def extract_item_values(
                                 wb_owned = True
                             except Exception:
                                 wb_ctx = None
+                    elif p_abs.suffix.lower() == ".xls":
+                        from svc.data_agg_xls_io import read_xls_cell, read_xls_repeated_series
+
+                        vals_xls = read_xls_repeated_series(
+                            p_abs,
+                            sheet_name,
+                            base_col=base_col,
+                            base_row=base_row,
+                            row_step=rd_row_step,
+                            col_step=rd_col_step,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                        )
+                        peek_v = None
+                        if not skip_trunc_peek:
+                            peek_ref = _col_row_to_cell_ref(
+                                base_col + (col_off * len(vals_xls)),
+                                base_row + (row_off * len(vals_xls)),
+                            )
+                            peek_v = read_xls_cell(p_abs, sheet_name, peek_ref)
+                        _finish_repeated_cell_vals(
+                            vals=vals_xls,
+                            results=results,
+                            cell_start=cell_start,
+                            cell_source_spans_out=cell_source_spans_out,
+                            si=si,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            file_path=file_path,
+                            item_label=item_label,
+                            item_id=item_id,
+                            positions=positions,
+                            cell_ref=cell_ref,
+                            row_off=row_off,
+                            col_off=col_off,
+                            ui_blk=_blk,
+                            src=src,
+                            max_primary_rows=max_primary_rows,
+                            peek_v=peek_v,
+                            skip_trunc_peek=skip_trunc_peek,
+                        )
+                        continue
                     if wb_ctx is not None:
                         vals_fast = _xlsx_read_repeated_series_open_workbook(
                             wb_ctx,
@@ -1981,10 +2237,12 @@ def extract_item_values(
                                 sheet_name=sheet_name,
                                 cell_ref=cell_ref_n,
                             )
-                        if repeat_until_empty and (v is None or v == ""):
+                        if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                             break
                         vals.append(v)
                     if vals:
+                        if repeat_until_last:
+                            vals = apply_until_last_trim(vals, until_last=True)
                         if not skip_trunc_peek:
                             peek_v = _read_cell_at_repeat_index(
                                 wb_ctx=wb_ctx,
@@ -2160,7 +2418,8 @@ def _extract_cell_rule_series_fast(
         return [postprocess_link_rule_value(rule.get("cell"), rule)] * n_src
     p_abs = Path(file_path).resolve()
     is_csv = p_abs.suffix.lower() == ".csv"
-    if not is_csv and not is_openxml_excel_suffix(p_abs.suffix):
+    is_xls = p_abs.suffix.lower() == ".xls"
+    if not is_csv and not is_openxml_excel_suffix(p_abs.suffix) and not is_xls:
         return None
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
     c0, r0 = _parse_cell_ref(base_cell)
@@ -2174,6 +2433,23 @@ def _extract_cell_rule_series_fast(
         col_step = int(rule.get("col") or 0)
     except (TypeError, ValueError):
         col_step = 0
+    if is_xls:
+        from svc.data_agg_xls_io import read_xls_repeated_series
+
+        raw = read_xls_repeated_series(
+            p_abs,
+            src.get("sheet_name"),
+            base_col=c0,
+            base_row=r0,
+            row_step=row_step,
+            col_step=col_step,
+            limit=n_src,
+            repeat_until_empty=False,
+        )
+        out = postprocess_link_rule_value_batch(raw, rule)
+        if len(out) < n_src:
+            out.extend([None] * (n_src - len(out)))
+        return out[:n_src]
     if is_csv:
         df = _get_csv_df(p_abs, create=True)
         if df is not None:
@@ -2403,7 +2679,487 @@ def _extract_cell_rules_series_fast_map(
                 pass
 
 
+
+def _empty_item_bundle() -> dict[str, Any]:
+    return {
+        "primary_values": [],
+        "iteration_contexts": [],
+        "link_values": {},
+        "link_contexts": {},
+        "join_values": {},
+        "join_contexts": {},
+        "path_item_values": {},
+        "path_item_contexts": {},
+    }
+
+
+def _rule_iter_indices_for_sheet_slice(
+    base: dict[str, Any],
+    *,
+    g_off: int,
+    n_src: int,
+    part: dict[str, Any] | None = None,
+) -> list[int]:
+    """
+    シート部分の各行について、シート上の元オフセット (rule_iter_index) を返す。
+    空スキップ後は連番でないことがある。
+    """
+    if isinstance(part, dict):
+        raw = part.get("rule_iter_indices")
+        if isinstance(raw, list) and len(raw) >= n_src:
+            out: list[int] = []
+            for i in range(n_src):
+                try:
+                    out.append(int(raw[i]))
+                except (TypeError, ValueError):
+                    out.append(i)
+            return out
+    base_ictx = base.get("iteration_contexts") or []
+    out2: list[int] = []
+    for i in range(n_src):
+        ri = i
+        gi = g_off + i
+        if gi < len(base_ictx) and isinstance(base_ictx[gi], dict):
+            raw_ri = base_ictx[gi].get("rule_iter_index")
+            if raw_ri is not None:
+                try:
+                    ri = int(raw_ri)
+                except (TypeError, ValueError):
+                    ri = i
+        out2.append(ri)
+    return out2
+
+
+def _mini_iter_contexts_for_sheet_part(
+    *,
+    file_path: str,
+    sheet_name: str,
+    g_off: int,
+    n_src: int,
+    mini_prim: list[Any],
+    base: dict[str, Any],
+    part: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """link/join 再計算用のミニ iteration_contexts（rule_iter_index 維持）。"""
+    ris = _rule_iter_indices_for_sheet_slice(base, g_off=g_off, n_src=n_src, part=part)
+    out: list[dict[str, Any]] = []
+    for i in range(n_src):
+        out.append(
+            {
+                "file_path": str(file_path),
+                "iter_index": int(i),
+                "rule_iter_index": int(ris[i] if i < len(ris) else i),
+                "sheet_name": sheet_name,
+                "base_cell": None,
+                "primary_value": mini_prim[i] if i < len(mini_prim) else None,
+            }
+        )
+    return out
+
+
+def _merge_primary_sheet_bundles(
+    parts: list[tuple[str, dict[str, Any]]],
+    file_path: str,
+) -> dict[str, Any]:
+    merged = _empty_item_bundle()
+    sheet_parts: list[dict[str, Any]] = []
+    g_off = 0
+    prim_all: list[Any] = []
+    ictx_all: list[dict[str, Any]] = []
+    for sh, b in parts:
+        if not isinstance(b, dict):
+            continue
+        prim = list(b.get("primary_values") or [])
+        n = len(prim)
+        local_spans = b.get("_cell_source_spans")
+        if not isinstance(local_spans, dict):
+            local_spans = {0: (0, n)} if n else {}
+        rule_iter_indices: list[int] = []
+        for i, v in enumerate(prim):
+            prim_all.append(v)
+            b_ictx = b.get("iteration_contexts") or []
+            if i < len(b_ictx) and isinstance(b_ictx[i], dict):
+                src_ctx = dict(b_ictx[i])
+            else:
+                src_ctx = {
+                    "file_path": str(file_path),
+                    "base_cell": None,
+                    "base_row": None,
+                    "base_col": None,
+                    "filter_snapshot": {"file_path": str(file_path), "passed": True},
+                    "primary_value": v,
+                }
+            src_ctx["file_path"] = str(file_path)
+            src_ctx["iter_index"] = int(g_off + i)
+            src_ctx["sheet_name"] = sh
+            src_ctx["primary_value"] = v
+            if src_ctx.get("rule_iter_index") is None:
+                src_ctx["rule_iter_index"] = int(i)
+            try:
+                rule_iter_indices.append(int(src_ctx.get("rule_iter_index", i)))
+            except (TypeError, ValueError):
+                rule_iter_indices.append(i)
+            ictx_all.append(src_ctx)
+        # 連携/結合もシート連結オフセットを付与（シートごとに 0.. だと後段で上書き・欠落する）
+        for key in (
+            "link_values",
+            "link_contexts",
+            "join_values",
+            "join_contexts",
+            "path_item_values",
+            "path_item_contexts",
+        ):
+            mp = b.get(key)
+            if not isinstance(mp, dict):
+                continue
+            dest = merged.setdefault(key, {})
+            for tgt, vals in mp.items():
+                if not isinstance(vals, list):
+                    continue
+                if key.endswith("_contexts"):
+                    out_list = dest.setdefault(tgt, [])
+                    for i, ctx in enumerate(vals):
+                        c = dict(ctx) if isinstance(ctx, dict) else {}
+                        c["file_path"] = str(c.get("file_path") or file_path)
+                        c["iter_index"] = int(g_off + i)
+                        c["sheet_name"] = sh
+                        out_list.append(c)
+                else:
+                    dest.setdefault(tgt, []).extend(vals)
+        sheet_parts.append(
+            {
+                "sheet_name": sh,
+                "g_off": g_off,
+                "n_src": n,
+                "primary_values": prim,
+                "rule_iter_indices": rule_iter_indices,
+                "_cell_source_spans": dict(local_spans),
+            }
+        )
+        g_off += n
+    merged["primary_values"] = prim_all
+    merged["iteration_contexts"] = ictx_all
+    merged["_sheet_parts"] = sheet_parts
+    merged["_cell_source_spans"] = {0: (0, len(prim_all))} if prim_all else {}
+    return merged
+
+
+def _append_rule_maps_with_offset(
+    dest: dict[str, Any],
+    src_bundle: dict[str, Any],
+    *,
+    values_key: str,
+    contexts_key: str,
+    g_off: int,
+    file_path: str,
+) -> None:
+    svm = src_bundle.get(values_key) or {}
+    scm = src_bundle.get(contexts_key) or {}
+    if not isinstance(svm, dict):
+        return
+    for target, vals in svm.items():
+        if not isinstance(vals, list):
+            continue
+        dest.setdefault(values_key, {}).setdefault(target, []).extend(vals)
+        ctxs = scm.get(target) if isinstance(scm, dict) else None
+        out_ctx = dest.setdefault(contexts_key, {}).setdefault(target, [])
+        for i, _v in enumerate(vals):
+            if isinstance(ctxs, list) and i < len(ctxs) and isinstance(ctxs[i], dict):
+                c = dict(ctxs[i])
+            else:
+                c = {"file_path": str(file_path), "base_cell": None}
+            c["file_path"] = str(c.get("file_path") or file_path)
+            c["iter_index"] = int(g_off + i)
+            out_ctx.append(c)
+
+
+def _extract_link_join_across_sheet_parts(
+    file_path: str | Path,
+    item_config: dict[str, Any],
+    base: dict[str, Any],
+    *,
+    item_id: Optional[str],
+    join_path_header: Optional[str],
+    scope: str,
+    max_primary_rows: Optional[int],
+    cancel_check: Optional[Callable[..., None]],
+) -> dict[str, Any]:
+    parts = base.get("_sheet_parts")
+    out = base.copy()
+    if scope == "link":
+        out["link_values"] = {}
+        out["link_contexts"] = {}
+        values_key, contexts_key = "link_values", "link_contexts"
+    else:
+        out["join_values"] = {}
+        out["join_contexts"] = {}
+        values_key, contexts_key = "join_values", "join_contexts"
+    if not isinstance(parts, list) or not parts:
+        return _extract_item_bundle_impl(
+            file_path,
+            item_config,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=join_path_header,
+            debug_step_scope=scope,
+            existing_bundle=base,
+            max_primary_rows=max_primary_rows,
+            cancel_check=cancel_check,
+        )
+    fp = str(file_path)
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        sh = str(part.get("sheet_name") or "")
+        g_off = int(part.get("g_off") or 0)
+        n_src = int(part.get("n_src") or 0)
+        if not sh or n_src < 1:
+            continue
+        local_spans = part.get("_cell_source_spans")
+        if not isinstance(local_spans, dict) or not local_spans:
+            local_spans = {0: (0, n_src)}
+        mini_spans = {
+            int(si): (0, int(sp[1]))
+            for si, sp in local_spans.items()
+            if isinstance(sp, (tuple, list)) and len(sp) == 2 and int(sp[1]) > 0
+        }
+        if not mini_spans:
+            mini_spans = {0: (0, n_src)}
+        mini_prim = list(part.get("primary_values") or [])[:n_src]
+        mini = {
+            "primary_values": mini_prim,
+            "iteration_contexts": _mini_iter_contexts_for_sheet_part(
+                file_path=fp,
+                sheet_name=sh,
+                g_off=g_off,
+                n_src=n_src,
+                mini_prim=mini_prim,
+                base=base,
+                part=part,
+            ),
+            "link_values": {},
+            "link_contexts": {},
+            "join_values": {},
+            "join_contexts": {},
+            "path_item_values": {},
+            "path_item_contexts": {},
+            "_cell_source_spans": mini_spans,
+        }
+        partial = _extract_item_bundle_impl(
+            file_path,
+            patch_item_sheet_exact(item_config, sh),
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=join_path_header,
+            debug_step_scope=scope,
+            existing_bundle=mini,
+            max_primary_rows=max_primary_rows,
+            cancel_check=cancel_check,
+        )
+        _append_rule_maps_with_offset(
+            out,
+            partial,
+            values_key=values_key,
+            contexts_key=contexts_key,
+            g_off=g_off,
+            file_path=fp,
+        )
+    return out
+
+
 def extract_item_bundle(
+    file_path: str | Path,
+    item_config: dict[str, Any],
+    item_id: Optional[str] = None,
+    cell_positions: Optional[dict[str, tuple[int, int]]] = None,
+    join_path_header: Optional[str] = None,
+    *,
+    debug_step_scope: Optional[str] = None,
+    existing_bundle: Optional[dict[str, Any]] = None,
+    max_primary_rows: Optional[int] = None,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> dict[str, Any]:
+    """
+    1 項目分の抽出結果を主値・連携値・結合キー値に分けて返す。
+
+    シート名条件（左端／完全一致／含む／含まない）を解決し、
+    複数一致時はブック左端から右へ順に読み取って連結する。
+    マスタデバッグ／シナリオデバッグ／本番一括で共通。
+    """
+    sources = item_config.get("sources") or []
+    s0 = sources[0] if sources and isinstance(sources[0], dict) else None
+
+    if debug_step_scope in ("link", "join"):
+        if (
+            isinstance(existing_bundle, dict)
+            and isinstance(existing_bundle.get("_sheet_parts"), list)
+            and existing_bundle.get("_sheet_parts")
+        ):
+            return _extract_link_join_across_sheet_parts(
+                file_path,
+                item_config,
+                existing_bundle,
+                item_id=item_id,
+                join_path_header=join_path_header,
+                scope=str(debug_step_scope),
+                max_primary_rows=max_primary_rows,
+                cancel_check=cancel_check,
+            )
+        return _extract_item_bundle_impl(
+            file_path,
+            item_config,
+            item_id=item_id,
+            cell_positions=cell_positions,
+            join_path_header=join_path_header,
+            debug_step_scope=debug_step_scope,
+            existing_bundle=existing_bundle,
+            max_primary_rows=max_primary_rows,
+            cancel_check=cancel_check,
+        )
+
+    sheets = matching_sheets_for_cell_source(file_path, s0)
+    if sheets is None:
+        return _extract_item_bundle_impl(
+            file_path,
+            item_config,
+            item_id=item_id,
+            cell_positions=cell_positions,
+            join_path_header=join_path_header,
+            debug_step_scope=debug_step_scope,
+            existing_bundle=existing_bundle,
+            max_primary_rows=max_primary_rows,
+            cancel_check=cancel_check,
+        )
+    if not sheets:
+        return _empty_item_bundle()
+    if len(sheets) == 1:
+        return _extract_item_bundle_impl(
+            file_path,
+            patch_item_sheet_exact(item_config, sheets[0]),
+            item_id=item_id,
+            cell_positions=cell_positions,
+            join_path_header=join_path_header,
+            debug_step_scope=debug_step_scope,
+            existing_bundle=existing_bundle,
+            max_primary_rows=max_primary_rows,
+            cancel_check=cancel_check,
+        )
+    parts: list[tuple[str, dict[str, Any]]] = []
+    remain = max_primary_rows
+    for sh in sheets:
+        if remain is not None and remain <= 0:
+            break
+        b = _extract_item_bundle_impl(
+            file_path,
+            patch_item_sheet_exact(item_config, sh),
+            item_id=item_id,
+            cell_positions=cell_positions,
+            join_path_header=join_path_header,
+            debug_step_scope=debug_step_scope,
+            existing_bundle=None,
+            max_primary_rows=remain,
+            cancel_check=cancel_check,
+        )
+        parts.append((sh, b))
+        if remain is not None:
+            remain = max(0, int(remain) - len(b.get("primary_values") or []))
+    return _merge_primary_sheet_bundles(parts, str(file_path))
+
+
+def _build_source_iter_contexts(
+    *,
+    file_path: str | Path,
+    src_base: str,
+    row_step: int,
+    col_step: int,
+    g_off: int,
+    n_src: int,
+    bundle: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    セルソースの反復コンテキストを組む。
+    既存 iteration_contexts に rule_iter_index があれば（空スキップ後）それを優先する。
+    """
+    iter_contexts: list[dict[str, Any]] = []
+    b_ictx = bundle.get("iteration_contexts") or []
+    for local_i in range(n_src):
+        gi = g_off + local_i
+        ri = local_i
+        if gi < len(b_ictx) and isinstance(b_ictx[gi], dict):
+            raw_ri = b_ictx[gi].get("rule_iter_index")
+            if raw_ri is not None:
+                try:
+                    ri = int(raw_ri)
+                except (TypeError, ValueError):
+                    ri = local_i
+        base_cell_i = _resolve_cell_with_offset(
+            src_base,
+            row_step * ri,
+            col_step * ri,
+        )
+        iter_contexts.append(
+            {
+                "file_path": str(file_path),
+                "iter_index": int(g_off + local_i),
+                "rule_iter_index": int(ri),
+                "base_cell": base_cell_i,
+            }
+        )
+    for local_i, ic in enumerate(iter_contexts):
+        gi = g_off + local_i
+        if gi < len(b_ictx) and isinstance(b_ictx[gi], dict):
+            b_ictx[gi]["base_cell"] = ic.get("base_cell")
+            b_ictx[gi]["rule_iter_index"] = ic.get("rule_iter_index")
+    return iter_contexts
+
+
+def _append_rule_series_to_bundle(
+    *,
+    bundle: dict[str, Any],
+    values_key: str,
+    contexts_key: str,
+    target: str,
+    file_path: str | Path,
+    src: dict[str, Any],
+    rule: dict[str, Any],
+    iter_contexts: list[dict[str, Any]],
+    n_src: int,
+    cancel_check: Optional[Callable[..., None]] = None,
+) -> None:
+    """link/join の系列値を bundle に追記（非連番 rule_iter はコンテキスト経路）。"""
+    use_fast = _iter_contexts_rule_indices_contiguous(iter_contexts)
+    vals_fast = (
+        _extract_cell_rule_series_fast(
+            file_path, src, rule, n_src=n_src, cancel_check=cancel_check
+        )
+        if use_fast
+        else None
+    )
+    if isinstance(vals_fast, list):
+        for local_i, iter_ctx in enumerate(iter_contexts):
+            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+            bundle[values_key].setdefault(target, []).append(v)
+            bundle[contexts_key].setdefault(target, []).append(
+                {
+                    "file_path": str(iter_ctx.get("file_path") or file_path),
+                    "iter_index": int(iter_ctx.get("iter_index", 0)),
+                    "base_cell": iter_ctx.get("base_cell"),
+                }
+            )
+        return
+    for iter_ctx in iter_contexts:
+        v = _extract_from_cell_rule_with_context(file_path, src, rule, iter_ctx)
+        bundle[values_key].setdefault(target, []).append(v)
+        bundle[contexts_key].setdefault(target, []).append(
+            {
+                "file_path": str(iter_ctx.get("file_path") or file_path),
+                "iter_index": int(iter_ctx.get("iter_index", 0)),
+                "base_cell": iter_ctx.get("base_cell"),
+            }
+        )
+
+
+def _extract_item_bundle_impl(
     file_path: str | Path,
     item_config: dict[str, Any],
     item_id: Optional[str] = None,
@@ -2495,26 +3251,15 @@ def extract_item_bundle(
                 col_step = int(src.get("col_offset") or 0)
             except (TypeError, ValueError):
                 col_step = 0
-            iter_contexts: list[dict[str, Any]] = []
-            for local_i in range(n_src):
-                base_cell_i = _resolve_cell_with_offset(
-                    src_base,
-                    row_step * local_i,
-                    col_step * local_i,
-                )
-                iter_contexts.append(
-                    {
-                        "file_path": str(file_path),
-                        "iter_index": int(g_off + local_i),
-                        "rule_iter_index": int(local_i),
-                        "base_cell": base_cell_i,
-                    }
-                )
-            b_ictx = bundle.get("iteration_contexts") or []
-            for local_i, ic in enumerate(iter_contexts):
-                gi = g_off + local_i
-                if gi < len(b_ictx) and isinstance(b_ictx[gi], dict):
-                    b_ictx[gi]["base_cell"] = ic.get("base_cell")
+            iter_contexts = _build_source_iter_contexts(
+                file_path=file_path,
+                src_base=src_base,
+                row_step=row_step,
+                col_step=col_step,
+                g_off=g_off,
+                n_src=n_src,
+                bundle=bundle,
+            )
             if debug_step_scope == "link":
                 for ld in ui_blk.get("link_defs") or []:
                     if not isinstance(ld, dict):
@@ -2522,31 +3267,18 @@ def extract_item_bundle(
                     target = str(ld.get("item") or "").strip()
                     if not target:
                         continue
-                    vals_fast = _extract_cell_rule_series_fast(
-                        file_path, src, ld, n_src=n_src, cancel_check=cancel_check
+                    _append_rule_series_to_bundle(
+                        bundle=bundle,
+                        values_key="link_values",
+                        contexts_key="link_contexts",
+                        target=target,
+                        file_path=file_path,
+                        src=src,
+                        rule=ld,
+                        iter_contexts=iter_contexts,
+                        n_src=n_src,
+                        cancel_check=cancel_check,
                     )
-                    if isinstance(vals_fast, list):
-                        for local_i, iter_ctx in enumerate(iter_contexts):
-                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
-                            bundle["link_values"].setdefault(target, []).append(v)
-                            bundle["link_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
-                    else:
-                        for iter_ctx in iter_contexts:
-                            v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
-                            bundle["link_values"].setdefault(target, []).append(v)
-                            bundle["link_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
             else:
                 for jd in ui_blk.get("join_defs") or []:
                     if not isinstance(jd, dict):
@@ -2554,31 +3286,18 @@ def extract_item_bundle(
                     target = str(jd.get("item") or "").strip()
                     if not target:
                         continue
-                    vals_fast = _extract_cell_rule_series_fast(
-                        file_path, src, jd, n_src=n_src, cancel_check=cancel_check
+                    _append_rule_series_to_bundle(
+                        bundle=bundle,
+                        values_key="join_values",
+                        contexts_key="join_contexts",
+                        target=target,
+                        file_path=file_path,
+                        src=src,
+                        rule=jd,
+                        iter_contexts=iter_contexts,
+                        n_src=n_src,
+                        cancel_check=cancel_check,
                     )
-                    if isinstance(vals_fast, list):
-                        for local_i, iter_ctx in enumerate(iter_contexts):
-                            v = vals_fast[local_i] if local_i < len(vals_fast) else None
-                            bundle["join_values"].setdefault(target, []).append(v)
-                            bundle["join_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
-                    else:
-                        for iter_ctx in iter_contexts:
-                            v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
-                            bundle["join_values"].setdefault(target, []).append(v)
-                            bundle["join_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
         return bundle
 
     cell_spans: dict[int, tuple[int, int]] = {}
@@ -2647,30 +3366,24 @@ def extract_item_bundle(
                 col_step = int(src.get("col_offset") or 0)
             except (TypeError, ValueError):
                 col_step = 0
-            iter_contexts = []
-            for local_i in range(n_src):
-                base_cell_i = _resolve_cell_with_offset(
-                    src_base,
-                    row_step * local_i,
-                    col_step * local_i,
-                )
-                iter_contexts.append(
-                    {
-                        "file_path": str(file_path),
-                        "iter_index": int(g_off + local_i),
-                        "rule_iter_index": int(local_i),
-                        "base_cell": base_cell_i,
-                    }
-                )
-            b_ictx = bundle.get("iteration_contexts") or []
-            for local_i, ic in enumerate(iter_contexts):
-                gi = g_off + local_i
-                if gi < len(b_ictx) and isinstance(b_ictx[gi], dict):
-                    b_ictx[gi]["base_cell"] = ic.get("base_cell")
+            iter_contexts = _build_source_iter_contexts(
+                file_path=file_path,
+                src_base=src_base,
+                row_step=row_step,
+                col_step=col_step,
+                g_off=g_off,
+                n_src=n_src,
+                bundle=bundle,
+            )
             if run_link_join:
+                contiguous = _iter_contexts_rule_indices_contiguous(iter_contexts)
                 link_defs = [x for x in (ui_blk.get("link_defs") or []) if isinstance(x, dict)]
-                link_fast = _extract_cell_rules_series_fast_map(
-                    file_path, src, link_defs, n_src=n_src, cancel_check=cancel_check
+                link_fast = (
+                    _extract_cell_rules_series_fast_map(
+                        file_path, src, link_defs, n_src=n_src, cancel_check=cancel_check
+                    )
+                    if contiguous
+                    else None
                 )
                 for ldi, ld in enumerate(link_defs):
                     if not isinstance(ld, dict):
@@ -2678,13 +3391,7 @@ def extract_item_bundle(
                     target = str(ld.get("item") or "").strip()
                     if not target:
                         continue
-                    vals_fast = (
-                        link_fast.get(ldi)
-                        if isinstance(link_fast, dict)
-                        else _extract_cell_rule_series_fast(
-                            file_path, src, ld, n_src=n_src, cancel_check=cancel_check
-                        )
-                    )
+                    vals_fast = link_fast.get(ldi) if isinstance(link_fast, dict) else None
                     if isinstance(vals_fast, list):
                         for local_i, iter_ctx in enumerate(iter_contexts):
                             v = vals_fast[local_i] if local_i < len(vals_fast) else None
@@ -2697,19 +3404,25 @@ def extract_item_bundle(
                                 }
                             )
                     else:
-                        for iter_ctx in iter_contexts:
-                            v = _extract_from_cell_rule_with_context(file_path, src, ld, iter_ctx)
-                            bundle["link_values"].setdefault(target, []).append(v)
-                            bundle["link_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
+                        _append_rule_series_to_bundle(
+                            bundle=bundle,
+                            values_key="link_values",
+                            contexts_key="link_contexts",
+                            target=target,
+                            file_path=file_path,
+                            src=src,
+                            rule=ld,
+                            iter_contexts=iter_contexts,
+                            n_src=n_src,
+                            cancel_check=cancel_check,
+                        )
                 join_defs = [x for x in (ui_blk.get("join_defs") or []) if isinstance(x, dict)]
-                join_fast = _extract_cell_rules_series_fast_map(
-                    file_path, src, join_defs, n_src=n_src, cancel_check=cancel_check
+                join_fast = (
+                    _extract_cell_rules_series_fast_map(
+                        file_path, src, join_defs, n_src=n_src, cancel_check=cancel_check
+                    )
+                    if contiguous
+                    else None
                 )
                 for jdi, jd in enumerate(join_defs):
                     if not isinstance(jd, dict):
@@ -2717,13 +3430,7 @@ def extract_item_bundle(
                     target = str(jd.get("item") or "").strip()
                     if not target:
                         continue
-                    vals_fast = (
-                        join_fast.get(jdi)
-                        if isinstance(join_fast, dict)
-                        else _extract_cell_rule_series_fast(
-                            file_path, src, jd, n_src=n_src, cancel_check=cancel_check
-                        )
-                    )
+                    vals_fast = join_fast.get(jdi) if isinstance(join_fast, dict) else None
                     if isinstance(vals_fast, list):
                         for local_i, iter_ctx in enumerate(iter_contexts):
                             v = vals_fast[local_i] if local_i < len(vals_fast) else None
@@ -2736,16 +3443,18 @@ def extract_item_bundle(
                                 }
                             )
                     else:
-                        for iter_ctx in iter_contexts:
-                            v = _extract_from_cell_rule_with_context(file_path, src, jd, iter_ctx)
-                            bundle["join_values"].setdefault(target, []).append(v)
-                            bundle["join_contexts"].setdefault(target, []).append(
-                                {
-                                    "file_path": str(iter_ctx.get("file_path") or file_path),
-                                    "iter_index": int(iter_ctx.get("iter_index", 0)),
-                                    "base_cell": iter_ctx.get("base_cell"),
-                                }
-                            )
+                        _append_rule_series_to_bundle(
+                            bundle=bundle,
+                            values_key="join_values",
+                            contexts_key="join_contexts",
+                            target=target,
+                            file_path=file_path,
+                            src=src,
+                            rule=jd,
+                            iter_contexts=iter_contexts,
+                            n_src=n_src,
+                            cancel_check=cancel_check,
+                        )
         elif stype == "name_extract":
             if not name_extract_search_matches(file_path, src):
                 continue
@@ -2774,4 +3483,5 @@ def extract_item_bundle(
         bundle["path_item_contexts"][jh] = [
             {"file_path": str(file_path), "iter_index": int(i)} for i in range(n)
         ]
+    _apply_skip_empty_primary_filter(bundle, sources if isinstance(sources, list) else [])
     return bundle

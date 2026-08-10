@@ -539,6 +539,18 @@ def apply_scenario_detail_cell_tooltips(
         "TIP_N_COUNT",
         "取得する値の最大件数です。",
     )
+    _apply_cfg_tip_force(
+        refs.get("skip_empty_primary"),
+        cfg,
+        "TIP_SKIP_EMPTY_PRIMARY",
+        "チェック時、右側の一致文字に該当する主キー反復を取得しません。",
+    )
+    _apply_cfg_tip_force(
+        refs.get("skip_primary_match"),
+        cfg,
+        "TIP_SKIP_PRIMARY_MATCH",
+        "例: 空欄のみ＝未入力 / 空欄と文字= ,A,- / 文字のみ= A,-",
+    )
     for cbx in refs.get("cell_checks") or []:
         if not (cbx.toolTip() or "").strip():
             _apply_cfg_tip_force(
@@ -881,9 +893,9 @@ def build_scenario_detail_cell_scroll(
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_COL_OFFSET", "列移動オフセット")), sp_col)
     refs["col_offset"] = sp_col
 
-    end_items = _dc(cfg, "END_MODE_ITEMS", ["N件", "空白まで"])
+    end_items = _dc(cfg, "END_MODE_ITEMS", ["N件", "空白まで", "終端"])
     if not isinstance(end_items, list) or len(end_items) < 2:
-        end_items = ["N件", "空白まで"]
+        end_items = ["N件", "空白まで", "終端"]
     end_items = [_normalize_message_newlines(str(x).strip()) for x in end_items]
     cb_end = QComboBox()
     cb_end.addItems(end_items)
@@ -899,23 +911,65 @@ def build_scenario_detail_cell_scroll(
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_N_COUNT", "取得件数")), sp_n)
     refs["n_count"] = sp_n
 
+    cb_skip_empty = QCheckBox("")
+    cb_skip_empty.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_EMPTY_PRIMARY", False)))
+    ed_skip_match = QLineEdit()
+    ed_skip_match.setPlaceholderText(
+        str(_dc(cfg, "PLACEHOLDER_SKIP_PRIMARY_MATCH", "空欄 / 複数はカンマ区切り") or "")
+    )
+    ed_skip_match.setText(str(_dc(cfg, "DEFAULT_SKIP_PRIMARY_MATCH", "") or ""))
+    ed_skip_match.setMinimumWidth(160)
+    skip_row = QWidget()
+    skip_lay = QHBoxLayout(skip_row)
+    skip_lay.setContentsMargins(0, 0, 0, 0)
+    skip_lay.setSpacing(6)
+    skip_lay.addWidget(cb_skip_empty, 0)
+    skip_lay.addWidget(ed_skip_match, 1)
+    f3v.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_SKIP_EMPTY_PRIMARY", "主キーをスキップ")),
+        skip_row,
+    )
+    refs["skip_empty_primary"] = cb_skip_empty
+    refs["skip_primary_match"] = ed_skip_match
+
+    def _end_mode_label(kind: str) -> str:
+        # kind: n | blank | last
+        if kind == "blank":
+            return end_items[1] if len(end_items) > 1 else "空白まで"
+        if kind == "last":
+            return end_items[2] if len(end_items) > 2 else "終端"
+        return end_items[0] if end_items else "N件"
+
+    def _sync_skip_match_enabled(_: int = 0) -> None:
+        on = bool(cb_skip_empty.isChecked())
+        ed_skip_match.setEnabled(on)
+
     def _sync_n_count_for_end(_: int = 0) -> None:
-        blank_lbl = end_items[1] if len(end_items) > 1 else "空白まで"
-        sp_n.setEnabled(cb_end.currentText() != blank_lbl)
+        blank_lbl = _end_mode_label("blank")
+        last_lbl = _end_mode_label("last")
+        cur = cb_end.currentText()
+        is_n_mode = cur not in (blank_lbl, last_lbl)
+        sp_n.setEnabled(is_n_mode)
+        _sync_skip_match_enabled()
 
     def _sync_offset_blank_guard(_: int = 0) -> None:
-        """行・列オフセットがともに 0 のとき「空白まで」は無効（同一セル無限反復の防止）。"""
+        """行・列オフセットがともに 0 のとき「空白まで／終端」は無効（同一セル無限反復の防止）。"""
         ro = sp_row.value()
         co = sp_col.value()
         both_zero = ro == 0 and co == 0
-        blank_lbl = end_items[1] if len(end_items) > 1 else "空白まで"
-        n_lbl = end_items[0] if end_items else "N件"
+        blank_lbl = _end_mode_label("blank")
+        last_lbl = _end_mode_label("last")
+        n_lbl = _end_mode_label("n")
         mod = cb_end.model()
         if isinstance(mod, QStandardItemModel):
-            it_blank = mod.item(1)
-            if it_blank is not None:
-                it_blank.setEnabled(not both_zero)
-        if both_zero and cb_end.currentText() == blank_lbl:
+            for ix in range(cb_end.count()):
+                it = mod.item(ix)
+                if it is None:
+                    continue
+                lab = cb_end.itemText(ix)
+                if lab in (blank_lbl, last_lbl):
+                    it.setEnabled(not both_zero)
+        if both_zero and cb_end.currentText() in (blank_lbl, last_lbl):
             ix_n = next((ii for ii, t in enumerate(end_items) if t == n_lbl), 0)
             cb_end.blockSignals(True)
             try:
@@ -926,10 +980,13 @@ def build_scenario_detail_cell_scroll(
 
     refs["sync_n_count_for_end"] = _sync_n_count_for_end
     refs["sync_offset_blank_guard"] = _sync_offset_blank_guard
+    refs["sync_skip_match_enabled"] = _sync_skip_match_enabled
     cb_end.currentIndexChanged.connect(_sync_n_count_for_end)
+    cb_skip_empty.toggled.connect(_sync_skip_match_enabled)
     sp_row.valueChanged.connect(_sync_offset_blank_guard)
     sp_col.valueChanged.connect(_sync_offset_blank_guard)
     _sync_offset_blank_guard()
+    _sync_skip_match_enabled()
 
     chk_labels = _dc(cfg, "CHECK_LABELS", ["トリム", "全角→半角", "年月日変換"])
     if not isinstance(chk_labels, list):
