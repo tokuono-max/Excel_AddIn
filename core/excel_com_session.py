@@ -8,6 +8,8 @@ svc_server の Excel COM セッション方針（B+）。
   3. COM セッション汚染と判定した失敗時のみ svc_server を終了（com_recycle）する。
   4. リクエスト前の事前再起動は行わない（ensure が死んでいれば spawn のみ）。
   5. Book 取得は get_excel_context_from_hwnd（xlc 経路）を優先する。
+  6. UI 待ち後は find_sheet_by_guid 等の前に resolve_fresh_book_after_ui_wait で
+     HWND から Book を再取得する（古い xlwings 参照を使わない）。
 
 update_check は Excel COM に触れないため recycle 対象外。
 新しい svc action を追加するときは本モジュールの action 集合を更新すること。
@@ -63,8 +65,7 @@ def action_touches_excel_com(action: str) -> bool:
     return str(action or "").strip() in SVC_COM_TOUCHING_ACTIONS
 
 
-def is_com_session_error(exc: BaseException) -> bool:
-    """COM セッション汚染とみなし svc_server recycle を促す例外か。"""
+def _is_direct_com_error(exc: BaseException) -> bool:
     try:
         import pywintypes
 
@@ -72,10 +73,37 @@ def is_com_session_error(exc: BaseException) -> bool:
             return True
     except Exception:
         pass
-    if type(exc).__name__ in ("com_error", "COMError"):
-        return True
-    msg = str(exc)
-    return any(marker in msg for marker in _COM_STALE_MARKERS)
+    return type(exc).__name__ in ("com_error", "COMError")
+
+
+def is_com_session_error(exc: BaseException | None) -> bool:
+    """COM セッション汚染とみなし svc_server recycle を促す例外か。
+
+    pywin32 の com_error が except で握りつぶされたあと logger が SystemError
+    になる経路では、__cause__ / __context__ も辿る。
+    """
+    if exc is None:
+        return False
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _is_direct_com_error(cur):
+            return True
+        msg = str(cur)
+        if any(marker in msg for marker in _COM_STALE_MARKERS):
+            return True
+        nxt = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return False
+
+
+def action_attach_book_fresh_resolve(action: str) -> bool:
+    """_attach_book で Book キャッシュを使わず HWND から再取得すべき action か。
+
+    UI 待ち・長処理をまたぐ attach_book action は操作境界ごとに fresh resolve する。
+    """
+    return action_uses_attach_book(action)
 
 
 def should_schedule_com_recycle_after_handler(

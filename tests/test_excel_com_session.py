@@ -36,6 +36,24 @@ def test_is_com_session_error_detects_stale_and_rpc() -> None:
         RuntimeError("リモート プロシージャ コール (RPC) で内部エラー")
     ) is True
     assert ecs.is_com_session_error(RuntimeError("file not found")) is False
+    assert ecs.is_com_session_error(None) is False
+
+
+def test_is_com_session_error_detects_system_error_with_com_cause() -> None:
+    class com_error(Exception):
+        pass
+
+    root = com_error(-2147220995, "オブジェクトをサーバーに接続できません", None, None)
+    wrapped = SystemError(
+        "<class 'logging.LogRecord'> returned a result with an exception set"
+    )
+    wrapped.__cause__ = root
+    assert ecs.is_com_session_error(wrapped) is True
+
+
+def test_action_attach_book_fresh_resolve() -> None:
+    assert ecs.action_attach_book_fresh_resolve("csv_ld") is True
+    assert ecs.action_attach_book_fresh_resolve("data_agg") is False
 
 
 def test_should_not_schedule_recycle_on_success_for_com_action() -> None:
@@ -65,6 +83,21 @@ def test_should_schedule_recycle_on_com_error() -> None:
             exc=RuntimeError("config missing"),
         )
         is False
+    )
+
+
+def test_should_schedule_recycle_on_system_error_wrapping_com() -> None:
+    class com_error(Exception):
+        pass
+
+    root = com_error(-2147220995, "server", None, None)
+    wrapped = SystemError("LogRecord returned a result with an exception set")
+    wrapped.__cause__ = root
+    assert (
+        ecs.should_schedule_com_recycle_after_handler(
+            "csv_ld", handler_ok=False, exc=wrapped
+        )
+        is True
     )
 
 

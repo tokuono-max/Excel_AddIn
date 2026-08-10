@@ -37,21 +37,27 @@ def test_sp_refresh_sheet_dims_reads_header(monkeypatch) -> None:
 
 
 def test_resolve_book_and_sheet_accepts_ptr_s_kwarg(monkeypatch) -> None:
-  """csv_sp が ptr_s= を渡しても TypeError にならない（csv_ld 経由）。"""
-  from svc import svc_csv_ld as ld_mod
+    """csv_sp が ptr_s= を渡しても TypeError にならない（csv_ld 経由）。"""
+    import svc.svc_server as svc_server
+    from svc import svc_csv_ld as ld_mod
 
-  book = object()
-  sheet = object()
-  monkeypatch.setattr(ld_mod.xlc, "find_sheet_by_guid", lambda _b, _sid: sheet)
-  out_book, out_sh = ld_mod._resolve_book_and_sheet(
-      book,
-      "g1",
-      100,
-      attach_keys=(100, "", ""),
-      ptr_s=object(),
-  )
-  assert out_book is book
-  assert out_sh is sheet
+    book = object()
+    sheet = object()
+    monkeypatch.setattr(
+        svc_server,
+        "resolve_fresh_book_after_ui_wait",
+        lambda b, **_k: b,
+    )
+    monkeypatch.setattr(ld_mod.xlc, "find_sheet_by_guid", lambda _b, _sid: sheet)
+    out_book, out_sh = ld_mod._resolve_book_and_sheet(
+        book,
+        "g1",
+        100,
+        attach_keys=(100, "", ""),
+        ptr_s=object(),
+    )
+    assert out_book is book
+    assert out_sh is sheet
 
 
 def test_sp_refresh_sheet_dims_none_when_no_used_range() -> None:

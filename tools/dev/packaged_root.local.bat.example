@@ -1,0 +1,4 @@
+@echo off
+REM Copy this file to packaged_root.local.bat (gitignored) and set your install root.
+REM Example for CSV_Tool_Setup default (per-user install):
+set "CSV_TOOL_PACKAGED_ROOT=C:\Users\kazu\AppData\Local\Programs\CSV_Tool"

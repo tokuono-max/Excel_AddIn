@@ -1,8 +1,7 @@
 @echo off
 REM Packaged: set HC_INSTALL_ROOT + HC_PACKAGED_DEPLOYMENT=1 in THIS cmd session.
 REM Does NOT start Excel - start Excel yourself from the Start menu or a shortcut.
-REM Default install root (no arg): C:\Program Files\Excel_Addin\CSV_Tool
-REM Local staging: set CSV_TOOL_PACKAGED_ROOT=dist\CSV_Tool before calling, or pass path as arg1.
+REM Root resolution: arg1 > CSV_TOOL_PACKAGED_ROOT > packaged_root.local.bat > HKCU > default PF
 REM Usage:
 REM   call tools\dev\start_excel_packaged_test.bat
 REM   call tools\dev\start_excel_packaged_test.bat "C:\path\to\CSV_Tool"
@@ -10,19 +9,13 @@ REM See tools\dev\README.md and docs\hc_main EXE doc (section 2.6, 5).
 
 cd /d "%~dp0..\.."
 
-if "%~1"=="" (
-  if defined CSV_TOOL_PACKAGED_ROOT (
-    for %%I in ("%CSV_TOOL_PACKAGED_ROOT%") do set "HC_INSTALL_ROOT=%%~fI"
-  ) else (
-    for %%I in ("C:\Program Files\Excel_Addin\CSV_Tool") do set "HC_INSTALL_ROOT=%%~fI"
-  )
-) else (
-  set "HC_INSTALL_ROOT=%~f1"
-)
+call "%~dp0resolve_packaged_install_root.bat" "%~1"
+set "HC_INSTALL_ROOT=%PACKAGED_INSTALL_ROOT%"
 
 if not exist "%HC_INSTALL_ROOT%\" (
   echo [ERROR] Directory not found: "%HC_INSTALL_ROOT%"
   echo Current dir for relative paths: %CD%
+  echo Tip: copy tools\dev\packaged_root.local.bat.example to packaged_root.local.bat
   exit /b 1
 )
 

@@ -335,6 +335,96 @@ def test_attach_book_prefers_xlc_context(monkeypatch) -> None:
     assert svc_server._last_attached_hwnd == 856336
 
 
+def test_attach_book_skip_cache_bypasses_cached_book(monkeypatch) -> None:
+    class _StaleBook:
+        name = "Stale"
+
+    stale = _StaleBook()
+    with svc_server._book_cache_lock:
+        svc_server._book_cache_by_hwnd[856336] = stale
+
+    class _FreshBook:
+        name = "Fresh"
+
+    import core.core_xlc as core_xlc
+
+    monkeypatch.setattr(
+        core_xlc,
+        "get_excel_context_from_hwnd",
+        lambda _h, _s: (object(), _FreshBook(), object(), 856336),
+        raising=False,
+    )
+    monkeypatch.setattr(svc_server, "_purge_dead_excel_app_shells", lambda: None)
+    monkeypatch.setattr(svc_server, "_excel_hwnd_is_live", lambda _h: True)
+    monkeypatch.setattr(svc_server, "_release_other_excel_com_bindings", lambda _h: None)
+    monkeypatch.setattr(
+        "svc.svc_host.write_last_svc_com_hwnd",
+        lambda _h: None,
+    )
+
+    book = svc_server._attach_book(856336, "Book1", "Book1", skip_cache=True)
+    assert book.name == "Fresh"
+    with svc_server._book_cache_lock:
+        assert svc_server._book_cache_by_hwnd[856336] is book
+
+
+def test_invalidate_attached_book_cache(monkeypatch) -> None:
+    monkeypatch.setattr(svc_server, "_reset_app_binding_for_hwnd", lambda _h: None)
+    with svc_server._book_cache_lock:
+        svc_server._book_cache_by_hwnd[111] = object()
+    svc_server.invalidate_attached_book_cache(111)
+    with svc_server._book_cache_lock:
+        assert 111 not in svc_server._book_cache_by_hwnd
+
+
+def test_resolve_fresh_book_after_ui_wait_uses_skip_cache(monkeypatch) -> None:
+    class _StaleBook:
+        name = "Stale"
+
+        class app:
+            hwnd = 856336
+
+    class _FreshBook:
+        name = "Fresh"
+
+    calls: list[dict] = []
+
+    def _fake_attach(**kwargs):
+        calls.append(kwargs)
+        return _FreshBook()
+
+    monkeypatch.setattr(svc_server, "_attach_book", _fake_attach)
+
+    out = svc_server.resolve_fresh_book_after_ui_wait(
+        _StaleBook(),
+        excel_hwnd=856336,
+        book_fullname="Book1",
+        book_name="Book1",
+        log_prefix="TEST",
+    )
+    assert out.name == "Fresh"
+    assert len(calls) == 1
+    assert calls[0]["skip_cache"] is True
+    assert calls[0]["excel_hwnd"] == 856336
+
+
+def test_resolve_fresh_book_after_ui_wait_returns_original_on_failure(monkeypatch) -> None:
+    class _Book:
+        name = "Only"
+
+    def _fail_attach(**_kwargs):
+        raise RuntimeError("com dead")
+
+    monkeypatch.setattr(svc_server, "_attach_book", _fail_attach)
+    book = _Book()
+    assert (
+        svc_server.resolve_fresh_book_after_ui_wait(
+            book, excel_hwnd=1, log_prefix="TEST"
+        )
+        is book
+    )
+
+
 def test_find_or_create_app_for_hwnd_force_fresh_skips_scan(monkeypatch) -> None:
     hit_impl = _FakeImpl(hwnd=555)
     hit_app = _FakeApp(hit_impl)

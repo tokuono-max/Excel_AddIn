@@ -3,14 +3,15 @@
 Python: 3.12+
 Module: svc/svc_csv_ld.py
 Created: 2026-03-05
-Updated: 2026-07-02
-Version: 1.3.37
+Updated: 2026-07-03
+Version: 1.3.38
 Purpose:
   CSV読込（Qt UIサーバ方式 / 2プロセス分離）。
   期待フロー: CSVファイル選択 → 進捗画面表示（準備中→ファイル解析中…）→ CSV読込 → Excelシート出力 → セルオートフィット → 進捗画面閉じる → 完了通知。
   進捗は 0=準備中 1=ファイル解析 2=Excel書き込み 3=列幅調整 4=完了 の5段階で表示。無表示1秒未満のため ui_server がファイル選択OK直後に進捗を即表示する経路では progress_ui_already_shown で二重依頼を避ける。
 
 History (latest 3):
+  - 1.3.38 (2026-07-03) UI 待ち後は resolve_fresh_book_after_ui_wait で Book を先に再取得（COM_NG 根本対策）。book_reattached 経路を整理。
   - 1.3.37 (2026-07-02) 進捗 pickle を core.progress_pickle_write に統一。DONE 検証・失敗ログ・ERROR fallback。
   - 1.3.36 (2026-06-30) （未コミット系の版上げを含む）
   - 1.3.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
@@ -573,7 +574,7 @@ def _resolve_book_and_sheet(
     attach_keys: tuple[int, str, str] | None = None,
     ptr_s: Any | None = None,
 ) -> tuple[Any | None, Any | None]:
-    """対象シートを解決する。ファイルダイアログ待ち後の COM 切れ時は book を再取得する。
+    """対象シートを解決する。UI 待ち後は HWND から Book を取り直してから GUID 解決する。
 
     ptr_s は csv_sp 等が渡す後方互換用（GUID 解決失敗時のフォールバック参照）。csv_ld 本体は未使用。
     """
@@ -581,44 +582,37 @@ def _resolve_book_and_sheet(
     if xlc is None or not sheet_id:
         return book, None
 
-    sh = xlc.find_sheet_by_guid(book, sheet_id)
-    if sh is not None:
-        return book, sh
-
     excel_hwnd, book_fullname, book_name = attach_keys or (0, "", "")
     if not excel_hwnd and not book_fullname and not book_name:
         excel_hwnd, book_fullname, book_name = _capture_book_attach_keys(book)
     hwnd_for_attach = int(excel_hwnd or parent_hwnd or 0)
 
-    try:
-        from svc.svc_server import _attach_book
+    from svc.svc_server import resolve_fresh_book_after_ui_wait
 
-        book2 = _attach_book(
-            excel_hwnd=hwnd_for_attach,
-            book_fullname=book_fullname,
-            book_name=book_name,
-        )
-        sh2 = xlc.find_sheet_by_guid(book2, sheet_id)
-        if sh2 is not None:
-            logger.info(
-                "[CSV_LD] phase=book_reattached sheet_id=%s hwnd=%s",
-                sheet_id,
-                hwnd_for_attach,
-            )
-            return book2, sh2
-    except Exception as ex:
-        logger.warning(
-            "[CSV_LD] book reattach failed sheet_id=%s hwnd=%s ex=%r",
-            sheet_id,
-            hwnd_for_attach,
-            ex,
-        )
+    book = resolve_fresh_book_after_ui_wait(
+        book,
+        excel_hwnd=hwnd_for_attach,
+        book_fullname=book_fullname,
+        book_name=book_name,
+        parent_hwnd=parent_hwnd,
+        log_prefix="CSV_LD",
+    )
+
+    sh = xlc.find_sheet_by_guid(book, sheet_id)
+    if sh is not None:
+        return book, sh
 
     if parent_hwnd:
         ctx = xlc.get_excel_context_from_hwnd(int(parent_hwnd), sheet_id)
         if ctx is not None:
             _app, book3, sh3, _hwnd = ctx
             if sh3 is not None:
+                try:
+                    from svc.svc_server import _store_attached_book
+
+                    _store_attached_book(int(parent_hwnd), book3)
+                except Exception:
+                    pass
                 logger.info(
                     "[CSV_LD] phase=book_resolved_via_hwnd sheet_id=%s hwnd=%s",
                     sheet_id,
@@ -626,6 +620,11 @@ def _resolve_book_and_sheet(
                 )
                 return book3, sh3
 
+    logger.warning(
+        "[CSV_LD] sheet resolve failed sheet_id=%s hwnd=%s",
+        sheet_id,
+        hwnd_for_attach,
+    )
     return book, None
 
 

@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.core_log import get_logger
+
+logger = get_logger(__name__)
+
 CSV_LD_FEATURE_KEY = "csv_ld"
 CSV_MG_FEATURE_KEY = "csv_mg"
 
@@ -72,6 +76,51 @@ def apply_csv_autofit_sheet(
         pass
 
 
+def _sheet_name_best_effort(sheet: Any) -> str:
+    try:
+        return str(getattr(sheet, "name", "") or "") or "-"
+    except Exception:
+        return "-"
+
+
+def _log_csv_post_write_freeze(
+    sheet: Any,
+    *,
+    rows: int,
+    cols: int,
+    ok_fr: bool,
+    reason: str = "",
+) -> None:
+    """freeze 結果をログ出力（COM 例外残留で logger が落ちないよう PyErr_Clear）。"""
+    from svc.svc_data_agg_write import _clear_native_exception_state  # noqa: WPS433
+
+    _clear_native_exception_state()
+    sheet_name = _sheet_name_best_effort(sheet)
+    if ok_fr:
+        logger.info(
+            "[CSV_POST_WRITE] ヘッダ行固定 sheet=%s rows=%s cols=%s",
+            sheet_name,
+            rows,
+            cols,
+        )
+    elif reason:
+        logger.warning(
+            "[CSV_POST_WRITE] ヘッダ行固定未適用 sheet=%s rows=%s cols=%s reason=%s",
+            sheet_name,
+            rows,
+            cols,
+            reason,
+        )
+    else:
+        logger.warning(
+            "[CSV_POST_WRITE] ヘッダ行固定未適用 sheet=%s rows=%s cols=%s",
+            sheet_name,
+            rows,
+            cols,
+        )
+    _clear_native_exception_state()
+
+
 def apply_csv_autofilter_ld(
     sheet: Any,
     *,
@@ -85,10 +134,12 @@ def apply_csv_autofilter_ld(
         return False
     try:
         from svc.svc_data_agg_write import (  # noqa: WPS433
+            _clear_native_exception_state,
             apply_autofilter_to_block,
             freeze_sheet_below_header_row,
         )
 
+        _clear_native_exception_state()
         ok = apply_autofilter_to_block(
             sheet,
             top_row=1,
@@ -96,13 +147,38 @@ def apply_csv_autofilter_ld(
             n_rows=rows,
             n_cols=cols,
         )
+        _clear_native_exception_state()
         if ok:
+            ok_fr = False
+            freeze_reason = ""
             try:
-                freeze_sheet_below_header_row(sheet, 1, left_col=1)
-            except Exception:
-                pass
+                ok_fr = bool(
+                    freeze_sheet_below_header_row(sheet, 1, left_col=1)
+                )
+            except BaseException as ex:
+                _clear_native_exception_state()
+                ok_fr = False
+                freeze_reason = repr(ex)
+            _log_csv_post_write_freeze(
+                sheet,
+                rows=rows,
+                cols=cols,
+                ok_fr=ok_fr,
+                reason=freeze_reason,
+            )
         return ok
-    except Exception:
+    except Exception as ex:
+        from svc.svc_data_agg_write import _clear_native_exception_state  # noqa: WPS433
+
+        _clear_native_exception_state()
+        logger.warning(
+            "[CSV_POST_WRITE] autofilter/freeze 例外 sheet=%s rows=%s cols=%s: %s",
+            _sheet_name_best_effort(sheet),
+            rows,
+            cols,
+            ex,
+        )
+        _clear_native_exception_state()
         return False
 
 

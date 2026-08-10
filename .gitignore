@@ -51,3 +51,6 @@ nuitka-crash-report.xml
 # OS
 Thumbs.db
 .DS_Store
+
+# Dev: local packaged install root (tools/dev/packaged_root.local.bat.example is committed)
+tools/dev/packaged_root.local.bat

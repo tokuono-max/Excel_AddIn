@@ -50,17 +50,70 @@ def test_should_apply_csv_mg_autofilter_conditions() -> None:
 
 def test_apply_csv_autofilter_ld_delegates_and_freezes() -> None:
     sheet = MagicMock()
+    sheet.name = "S1"
     with patch(
         "svc.svc_data_agg_write.apply_autofilter_to_block", return_value=True
     ) as m_af, patch(
-        "svc.svc_data_agg_write.freeze_sheet_below_header_row"
-    ) as m_fr:
+        "svc.svc_data_agg_write.freeze_sheet_below_header_row", return_value=True
+    ) as m_fr, patch.object(epw.logger, "info") as m_log:
         ok = epw.apply_csv_autofilter_ld(sheet, last_row=10, max_col=3)
     assert ok is True
     m_af.assert_called_once_with(
         sheet, top_row=1, left_col=1, n_rows=10, n_cols=3
     )
     m_fr.assert_called_once_with(sheet, 1, left_col=1)
+    assert any(
+        "CSV_POST_WRITE" in str(c.args[0]) and "ヘッダ行固定" in str(c.args[0])
+        for c in m_log.call_args_list
+    )
+
+
+def test_apply_csv_autofilter_ld_logs_unapplied_when_freeze_fails() -> None:
+    sheet = MagicMock()
+    sheet.name = "S1"
+    with patch(
+        "svc.svc_data_agg_write.apply_autofilter_to_block", return_value=True
+    ), patch(
+        "svc.svc_data_agg_write.freeze_sheet_below_header_row", return_value=False
+    ), patch.object(epw.logger, "warning") as m_log:
+        ok = epw.apply_csv_autofilter_ld(sheet, last_row=10, max_col=3)
+    assert ok is True
+    assert any(
+        "CSV_POST_WRITE" in str(c.args[0]) and "未適用" in str(c.args[0])
+        for c in m_log.call_args_list
+    )
+
+
+def test_apply_csv_autofilter_ld_logs_freeze_exception() -> None:
+    sheet = MagicMock()
+    sheet.name = "S1"
+    with patch(
+        "svc.svc_data_agg_write.apply_autofilter_to_block", return_value=True
+    ), patch(
+        "svc.svc_data_agg_write.freeze_sheet_below_header_row",
+        side_effect=SystemError("com pending"),
+    ), patch.object(epw.logger, "warning") as m_log:
+        ok = epw.apply_csv_autofilter_ld(sheet, last_row=10, max_col=3)
+    assert ok is True
+    assert any(
+        "CSV_POST_WRITE" in str(c.args[0]) and "未適用" in str(c.args[0])
+        for c in m_log.call_args_list
+    )
+
+
+def test_apply_csv_autofilter_ld_logs_outer_exception() -> None:
+    sheet = MagicMock()
+    sheet.name = "S1"
+    with patch(
+        "svc.svc_data_agg_write.apply_autofilter_to_block",
+        side_effect=RuntimeError("af boom"),
+    ), patch.object(epw.logger, "warning") as m_log:
+        ok = epw.apply_csv_autofilter_ld(sheet, last_row=10, max_col=3)
+    assert ok is False
+    assert any(
+        "CSV_POST_WRITE" in str(c.args[0]) and "例外" in str(c.args[0])
+        for c in m_log.call_args_list
+    )
 
 
 def test_apply_csv_autofilter_ld_skips_freeze_on_failure() -> None:

@@ -16,6 +16,12 @@
 
 旧 A+（操作ごとの com_recycle・同一 HWND でも事前 kill）は **廃止**。
 
+### UI 待ち後の Book 再取得（2026-07-03）
+
+- attach_book action（`csv_ld`, `csv_sv` 等）の **操作入口**では `_book_cache_by_hwnd` を使わず HWND から再取得する。
+- ファイル選択など **UI 待ちのあと**、`find_sheet_by_guid` の前に `resolve_fresh_book_after_ui_wait` で Book を取り直す（`[COM_NG]` 根本対策）。
+- 操作 **終了時**もキャッシュを invalidate する。万一の COM 失敗は `get_excel_context_from_hwnd` と `com_recycle` で救済。
+
 ## 起動と warmup
 
 1. 初回リボン（または `ensure_python_hosts_ready`）で `svc_server` spawn（1 回）

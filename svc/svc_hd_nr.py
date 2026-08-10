@@ -147,41 +147,13 @@ def _autofit_output_range(ptr_s: Any, last_row: int, max_col: int, sheet_name: s
         pass
 
 
-def _freeze_first_row(ptr_s: Any, freeze_after_row: int = 1) -> None:
-    """指定行の直後でウィンドウ枠を固定する。freeze_after_row=1 で1行目固定、=5 で5行目まで固定。xlwings の freeze_panes を優先、不可時は COM。"""
+def _freeze_first_row(ptr_s: Any, freeze_after_row: int = 1) -> bool:
+    """指定行の直後でウィンドウ枠を固定する。freeze_after_row=1 で1行目固定。"""
     if freeze_after_row < 1:
-        return
-    try:
-        fp = getattr(ptr_s, "freeze_panes", None)
-        if fp is not None:
-            unfreeze = getattr(fp, "unfreeze", None)
-            freeze_at = getattr(fp, "freeze_at", None)
-            if callable(unfreeze):
-                unfreeze()
-            if callable(freeze_at):
-                freeze_at(f"{freeze_after_row + 1}:{freeze_after_row + 1}")
-                return
-    except Exception:
-        pass
-    try:
-        api = getattr(ptr_s, "api", None)
-        if api is None:
-            return
-        book = getattr(ptr_s, "book", None)
-        xl_app = getattr(book, "app", None) if book else None
-        if xl_app is None:
-            return
-        app_api = getattr(xl_app, "api", None)
-        if app_api is None:
-            return
-        aw = getattr(app_api, "ActiveWindow", None)
-        if aw is None:
-            return
-        aw.FreezePanes = False
-        api.Range(f"A{freeze_after_row + 1}").Select()
-        aw.FreezePanes = True
-    except Exception:
-        pass
+        return False
+    from svc.svc_data_agg_write import freeze_sheet_below_header_row  # noqa: WPS433
+
+    return freeze_sheet_below_header_row(ptr_s, freeze_after_row, left_col=1)
 
 
 def _get_sheet(book: Any, sheet_id: str) -> Any:

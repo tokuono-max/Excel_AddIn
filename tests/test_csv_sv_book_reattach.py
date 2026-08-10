@@ -37,15 +37,15 @@ def test_resolve_book_and_sheet_uses_cached_sheet_when_still_valid(monkeypatch) 
     monkeypatch.setattr(sv_mod.xlc, "find_sheet_by_guid", lambda b, sid: book._sheet if sid == "g1" else None)
     calls: list[str] = []
 
-    def _no_reattach(*_a, **_k):
+    def _reattach_returns_same(*_a, **_k):
         calls.append("reattach")
         return book
 
-    monkeypatch.setattr(sv_mod, "_reattach_book", _no_reattach)
+    monkeypatch.setattr(sv_mod, "_reattach_book", _reattach_returns_same)
     out_book, out_sh = sv_mod._resolve_book_and_sheet(book, "g1", 100)
     assert out_book is book
     assert out_sh is book._sheet
-    assert calls == []
+    assert calls == ["reattach"]
 
 
 def test_resolve_book_and_sheet_reattaches_when_guid_missing(monkeypatch) -> None:

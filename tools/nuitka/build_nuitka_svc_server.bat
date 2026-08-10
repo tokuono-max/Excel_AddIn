@@ -46,6 +46,7 @@ echo [Nuitka] Log file: %LOGFILE%
   --enable-plugin=multiprocessing ^
   --include-package=svc ^
   --include-package=core ^
+  --include-package=xlrd ^
   --include-module=ui_qt.ipc_file ^
   --noinclude-dlls=*.pdb ^
   --show-progress ^

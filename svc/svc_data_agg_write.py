@@ -3,14 +3,16 @@
 Python: 3.12+
 Module: svc/svc_data_agg_write.py
 Created: 2026-03-18
-Updated: 2026-04-14
-Version: 0.1.5
+Updated: 2026-07-05
+Version: 0.1.7
 Purpose:
   データ集約用のマスター書き込み。行追加（append）・強制上書き（overwrite）・空き上書き（fill_in）と、
   照合キーによる行マッチを提供する。一括実行時は内部メモリで組み立てた表を終了時に一括出力、
   ステップ実行時は 1 項目分を都度反映する想定。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.7 (2026-07-05) freeze: SplitRow を全 Window で試行・xlwings は後回し・BaseException/PyErr_Clear で Nuitka COM 例外を抑止。
+  - 0.1.6 (2026-07-05) freeze_sheet_below_header_row: SplitRow 優先・Window/FreezePanes 検証・Select 廃止・bool 戻り値。
   - 0.1.5 (2026-06-03) read_master: .xlsm を OpenXML Excel として .xlsx と同経路で読込。
   - 0.1.4 (2026-06-06) suspend_sheet_updates を restore_on_exit=False に（DONE 前の ScreenUpdating 復帰を呼び出し側に委譲）。
   - 0.1.3 (2026-04-14) write_scenario_export_table: 列幅・行の AutoFit をやめ、データ・ヘッダは折り返しなし（シナリオ定義の多列エクスポート向け）。
@@ -37,7 +39,7 @@ from core.core_log import get_logger  # noqa: E402
 from svc.svc_data_agg_extract import is_openxml_excel_suffix  # noqa: E402
 
 logger = get_logger(__name__)
-__version__ = "0.1.5"
+__version__ = "0.1.7"
 
 # data_agg は出力行数が大きくなりやすく、全行を対象にした AutoFit が重い。
 # 見た目（列幅）よりも「処理完了→Excel操作復帰」を優先し、一定行数超過時はヘッダ行のみ AutoFit に縮退する。
@@ -1209,47 +1211,226 @@ def _a1_cell_1based(row: int, col: int) -> str:
     return "%s%d" % (_col_1based_to_letters(col), max(1, int(row)))
 
 
+def _clear_native_exception_state() -> None:
+    """pywin32 com_error 捕捉後に C レベルで残る例外状態をクリアする（Nuitka 等）。"""
+    try:
+        import ctypes
+
+        ctypes.pythonapi.PyErr_Clear()
+    except Exception:
+        pass
+
+
+def _activate_sheet_best_effort(sheet: Any) -> None:
+    try:
+        sheet.activate()
+    except Exception:
+        _clear_native_exception_state()
+
+
+def _sheet_api_name(sheet_api: Any) -> str:
+    try:
+        return str(getattr(sheet_api, "Name", "") or "")
+    except Exception:
+        _clear_native_exception_state()
+    return ""
+
+
+def _window_displays_sheet(aw: Any, sheet_api: Any) -> bool:
+    """Window が対象 Worksheet を表示しているか。"""
+    target = _sheet_api_name(sheet_api)
+    if not target:
+        return False
+    try:
+        active = getattr(aw, "ActiveSheet", None)
+        if active is None:
+            return False
+        return str(getattr(active, "Name", "") or "") == target
+    except Exception:
+        _clear_native_exception_state()
+    return False
+
+
+def _workbook_app_api(sheet: Any) -> Any | None:
+    try:
+        book = getattr(sheet, "book", None)
+        app = getattr(book, "app", None) if book is not None else None
+        return getattr(app, "api", None) if app is not None else None
+    except Exception:
+        _clear_native_exception_state()
+    return None
+
+
+def _iter_workbook_windows(sheet_api: Any):
+    """ブックに属する Window を列挙する（best-effort）。"""
+    try:
+        wins = sheet_api.Parent.Windows
+        count = int(getattr(wins, "Count", 0) or 0)
+        for idx in range(1, count + 1):
+            yield wins(idx)
+    except Exception:
+        _clear_native_exception_state()
+
+
+def _get_window_for_sheet(sheet: Any) -> Any | None:
+    """対象シートを表示している Window を取得する（誤 Window への固定を避ける）。"""
+    api = getattr(sheet, "api", None)
+    if api is None:
+        return None
+
+    _activate_sheet_best_effort(sheet)
+
+    app_api = _workbook_app_api(sheet)
+    if app_api is not None:
+        try:
+            aw = getattr(app_api, "ActiveWindow", None)
+            if aw is not None and _window_displays_sheet(aw, api):
+                return aw
+        except Exception:
+            _clear_native_exception_state()
+
+    try:
+        wins = api.Parent.Windows
+        count = int(getattr(wins, "Count", 0) or 0)
+        for idx in range(1, count + 1):
+            win = wins(idx)
+            if _window_displays_sheet(win, api):
+                return win
+    except Exception:
+        _clear_native_exception_state()
+
+    _activate_sheet_best_effort(sheet)
+    if app_api is not None:
+        try:
+            aw = getattr(app_api, "ActiveWindow", None)
+            if aw is not None:
+                return aw
+        except Exception:
+            _clear_native_exception_state()
+    return None
+
+
+def _verify_freeze_applied(aw: Any, *, header_row: int, left_col: int) -> bool:
+    """FreezePanes と Split 位置が期待どおりか。"""
+    hr = max(1, int(header_row))
+    lc = max(1, int(left_col))
+    try:
+        if not bool(getattr(aw, "FreezePanes", False)):
+            return False
+        split_row = int(getattr(aw, "SplitRow", 0) or 0)
+        split_col = int(getattr(aw, "SplitColumn", 0) or 0)
+        return split_row == hr and split_col == max(0, lc - 1)
+    except Exception:
+        _clear_native_exception_state()
+    return False
+
+
+def _prepare_window_view_for_freeze(aw: Any, *, header_row: int, left_col: int) -> None:
+    """Select を使わず表示位置だけ整える（固定直後の見え方を安定させる）。"""
+    hr = max(1, int(header_row))
+    lc = max(1, int(left_col))
+    try:
+        aw.ScrollRow = max(1, hr)
+        aw.ScrollColumn = max(1, lc)
+    except Exception:
+        _clear_native_exception_state()
+
+
+def _freeze_window_via_split(
+    aw: Any,
+    *,
+    header_row: int,
+    left_col: int,
+) -> bool:
+    """Select を使わず SplitRow/SplitColumn でウィンドウ枠を固定する。"""
+    hr = max(1, int(header_row))
+    lc = max(1, int(left_col))
+    try:
+        aw.FreezePanes = False
+        aw.SplitRow = hr
+        aw.SplitColumn = max(0, lc - 1)
+        aw.FreezePanes = True
+        if _verify_freeze_applied(aw, header_row=hr, left_col=lc):
+            _prepare_window_view_for_freeze(aw, header_row=hr, left_col=lc)
+            return True
+    except Exception:
+        _clear_native_exception_state()
+    return False
+
+
+def _try_freeze_via_xlwings(
+    sheet: Any,
+    freeze_cell: str,
+    *,
+    header_row: int,
+    left_col: int,
+) -> bool:
+    """xlwings freeze_at を試し、FreezePanes を検証してから True を返す。"""
+    hr = max(1, int(header_row))
+    lc = max(1, int(left_col))
+    try:
+        fp = getattr(sheet, "freeze_panes", None)
+        if fp is None:
+            return False
+        freeze_at = getattr(fp, "freeze_at", None)
+        if not callable(freeze_at):
+            return False
+        unfreeze = getattr(fp, "unfreeze", None)
+        if callable(unfreeze):
+            unfreeze()
+        freeze_at(freeze_cell)
+        _clear_native_exception_state()
+        aw = _get_window_for_sheet(sheet)
+        if aw is not None and _verify_freeze_applied(aw, header_row=hr, left_col=lc):
+            _prepare_window_view_for_freeze(aw, header_row=hr, left_col=lc)
+            return True
+    except Exception:
+        _clear_native_exception_state()
+    return False
+
+
 def freeze_sheet_below_header_row(
     sheet: Any,
     header_row: int,
     *,
     left_col: int = 1,
-) -> None:
-    """ヘッダ行の直下でウィンドウ枠を固定する（header_row=1 で1行目固定）。"""
+) -> bool:
+    """ヘッダ行の直下でウィンドウ枠を固定する（header_row=1 で1行目固定）。
+
+    Returns:
+        FreezePanes が期待位置で True になったとき True。
+    """
     hr = max(1, int(header_row))
     lc = max(1, int(left_col))
     freeze_cell = _a1_cell_1based(hr + 1, lc)
+
+    _clear_native_exception_state()
     try:
-        fp = getattr(sheet, "freeze_panes", None)
-        if fp is not None:
-            freeze_at = getattr(fp, "freeze_at", None)
-            if callable(freeze_at):
-                unfreeze = getattr(fp, "unfreeze", None)
-                if callable(unfreeze):
-                    unfreeze()
-                freeze_at(freeze_cell)
-                return
-    except Exception:
-        pass
-    try:
+        _activate_sheet_best_effort(sheet)
+
         api = getattr(sheet, "api", None)
-        if api is None:
-            return
-        book = getattr(sheet, "book", None)
-        xl_app = getattr(book, "app", None) if book else None
-        if xl_app is None:
-            return
-        app_api = getattr(xl_app, "api", None)
-        if app_api is None:
-            return
-        aw = getattr(app_api, "ActiveWindow", None)
-        if aw is None:
-            return
-        aw.FreezePanes = False
-        api.Range(freeze_cell).Select()
-        aw.FreezePanes = True
-    except Exception:
-        pass
+        if api is not None:
+            for aw in _iter_workbook_windows(api):
+                _activate_sheet_best_effort(sheet)
+                if _freeze_window_via_split(aw, header_row=hr, left_col=lc):
+                    return True
+
+            aw = _get_window_for_sheet(sheet)
+            if aw is not None and _freeze_window_via_split(
+                aw, header_row=hr, left_col=lc
+            ):
+                return True
+
+        if _try_freeze_via_xlwings(
+            sheet, freeze_cell, header_row=hr, left_col=lc
+        ):
+            return True
+        return False
+    except BaseException:
+        _clear_native_exception_state()
+        return False
+    finally:
+        _clear_native_exception_state()
 
 
 def _clear_worksheet_autofilter(ws: Any) -> None:
@@ -1371,15 +1552,21 @@ def apply_new_sheet_view_options(
         except Exception as e:
             logger.warning("[DATA_AGG_WRITE] オートフィルタエラー: %s", e)
     if freeze_header_row:
-        try:
-            freeze_sheet_below_header_row(sheet, tr, left_col=tc)
+        _clear_native_exception_state()
+        ok_fr = freeze_sheet_below_header_row(sheet, tr, left_col=tc)
+        _clear_native_exception_state()
+        if ok_fr:
             logger.info(
                 "[DATA_AGG_WRITE] 新規シート: ヘッダ行固定 header_row=%s left_col=%s",
                 tr,
                 tc,
             )
-        except Exception as e:
-            logger.warning("[DATA_AGG_WRITE] ヘッダ行固定エラー: %s", e)
+        else:
+            logger.warning(
+                "[DATA_AGG_WRITE] ヘッダ行固定未適用 header_row=%s left_col=%s",
+                tr,
+                tc,
+            )
 
 
 def _scenario_export_apply_layout(

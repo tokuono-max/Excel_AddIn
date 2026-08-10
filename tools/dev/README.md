@@ -4,8 +4,9 @@
 
 **Excel は起動しない。** 同じ PC でスタートメニューやショートカットから Excel を開くと、そのプロセスは **直前にこのバッチで整えた環境**を引き継ぐ（**新規起動の Excel** に限る）。
 
-- **`start_excel.bat`**（引数なし）… メニューで **`1`**＝配布（既定 **`C:\Program Files\Excel_Addin\CSV_Tool`**）、**`2`**＝開発。**`start_excel 1 "別パス"`** でルート上書き。**`start_excel packaged`** / **`start_excel dev`** も可。
-- **`start_excel_packaged_test.bat`** … **`HC_PACKAGED_DEPLOYMENT=1`** と **`HC_INSTALL_ROOT`** をセット。既定ルートは **`C:\Program Files\Excel_Addin\CSV_Tool`**。ローカル **`dist\CSV_Tool`** で試すときは **`set CSV_TOOL_PACKAGED_ROOT=dist\CSV_Tool`** を付けてから実行するか、第1引数にパスを渡す。
+- **`start_excel.bat`**（引数なし）… メニューで **`1`**＝配布、**`2`**＝開発。配布ルートはメニューに表示される。**`start_excel 1 "別パス"`** でルート上書き。**`start_excel packaged`** / **`start_excel dev`** も可。
+- **`start_excel_packaged_test.bat`** … **`HC_PACKAGED_DEPLOYMENT=1`** と **`HC_INSTALL_ROOT`** をセット。
+- **配布ルートの解決順**（`resolve_packaged_install_root.bat`）: 第1引数 → **`CSV_TOOL_PACKAGED_ROOT`** → **`packaged_root.local.bat`**（`packaged_root.local.bat.example` をコピー）→ **HKCU の `HC_INSTALL_ROOT`** → フォールバック **`C:\Program Files\Excel_Addin\CSV_Tool`**。
 
 運用方針の全体像は **`docs/Exe化（開発者向け）.md` セクション 2.6** を参照。
 
@@ -62,9 +63,18 @@ call tools\dev\start_excel_packaged_test.bat
 - **`start_excel 1`** / **`start_excel 2`** … メニューなし。
 - **`start_excel packaged`** / **`start_excel dev`** も可。
 
+## 配布ルートの固定（`packaged_root.local.bat`）
+
+```bat
+copy tools\dev\packaged_root.local.bat.example tools\dev\packaged_root.local.bat
+REM 中の CSV_TOOL_PACKAGED_ROOT を自分のインストール先に編集
+```
+
+`packaged_root.local.bat` は **gitignore** 済み。未作成なら **HKCU の `HC_INSTALL_ROOT`**（インストーラが書いた値）を自動参照する。
+
 ## `start_excel_packaged_test.bat`
 
-- **第1引数を省略**すると **`C:\Program Files\Excel_Addin\CSV_Tool`**（既定）。**`dist\CSV_Tool`** を既定にしたいときは **`set CSV_TOOL_PACKAGED_ROOT=dist\CSV_Tool`**（リポジトリルート基準の相対パス可）。
+- **第1引数**でルートを直接指定可能。省略時は上記の解決順に従う。
 - 第1引数に **インストールルート**を渡すこともできる。例:  
   `call tools\dev\start_excel_packaged_test.bat "dist\CSV_Tool"`  
   `call tools\dev\start_excel_packaged_test.bat "C:\Temp\CSV_Tool"`

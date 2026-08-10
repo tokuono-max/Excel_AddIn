@@ -91,8 +91,14 @@ def test_apply_new_sheet_view_options_freeze_and_filter() -> None:
     sheet = MagicMock()
     sheet.freeze_panes = None
     sheet.api = MagicMock()
-    sheet.api.AutoFilterMode = False
+    sheet.api.Name = "S1"
+    sheet.api.Parent.Windows = MagicMock(Count=0)
     aw = MagicMock()
+    aw.ActiveSheet = MagicMock()
+    aw.ActiveSheet.Name = "S1"
+    aw.FreezePanes = False
+    aw.SplitRow = 0
+    aw.SplitColumn = 0
     sheet.book.app.api.ActiveWindow = aw
 
     def _enable_af(*_a: object, **_k: object) -> None:
@@ -111,6 +117,8 @@ def test_apply_new_sheet_view_options_freeze_and_filter() -> None:
     sheet.activate.assert_called()
     sheet.api.Range.return_value.AutoFilter.assert_called()
     assert aw.FreezePanes is True
+    assert aw.SplitRow == 1
+    assert aw.SplitColumn == 0
 
 
 def test_apply_new_sheet_view_options_noop_when_disabled() -> None:
@@ -130,10 +138,79 @@ def test_freeze_sheet_below_header_row_at_anchor() -> None:
     sheet = MagicMock()
     sheet.freeze_panes = None
     sheet.api = MagicMock()
+    sheet.api.Name = "Data"
+    sheet.api.Parent.Windows = MagicMock(Count=0)
     aw = MagicMock()
+    aw.ActiveSheet = MagicMock()
+    aw.ActiveSheet.Name = "Data"
+    aw.FreezePanes = False
+    aw.SplitRow = 0
+    aw.SplitColumn = 0
     sheet.book.app.api.ActiveWindow = aw
-    freeze_sheet_below_header_row(sheet, 5, left_col=3)
-    sheet.api.Range.assert_called_with("C6")
+    ok = freeze_sheet_below_header_row(sheet, 5, left_col=3)
+    assert ok is True
+    assert aw.SplitRow == 5
+    assert aw.SplitColumn == 2
+    assert aw.FreezePanes is True
+    sheet.api.Range.assert_not_called()
+
+
+def test_freeze_sheet_below_header_row_returns_false_without_api() -> None:
+    sheet = MagicMock()
+    sheet.freeze_panes = None
+    sheet.api = None
+    assert freeze_sheet_below_header_row(sheet, 1, left_col=1) is False
+
+
+def test_freeze_sheet_below_header_row_tries_all_workbook_windows() -> None:
+    sheet = MagicMock()
+    sheet.freeze_panes = None
+    ws = MagicMock()
+    ws.Name = "S1"
+    sheet.api = ws
+    win1 = MagicMock()
+    win1.FreezePanes = False
+    win1.SplitRow = 0
+    win1.SplitColumn = 0
+    win2 = MagicMock()
+    win2.FreezePanes = False
+    win2.SplitRow = 0
+    win2.SplitColumn = 0
+    wins = MagicMock()
+    wins.Count = 2
+    wins.side_effect = lambda i: win1 if i == 1 else win2
+    ws.Parent.Windows = wins
+
+    ok = freeze_sheet_below_header_row(sheet, 1, left_col=1)
+
+    assert ok is True
+    assert win1.FreezePanes is True
+    assert win1.SplitRow == 1
+
+
+def test_freeze_prefers_split_before_xlwings() -> None:
+    """SplitRow 経路が xlwings より先に試される。"""
+    sheet = MagicMock()
+    sheet.api = MagicMock()
+    sheet.api.Name = "S1"
+    sheet.api.Parent.Windows = MagicMock(Count=0)
+    fp = MagicMock()
+    fp.unfreeze = MagicMock()
+    fp.freeze_at = MagicMock()
+    sheet.freeze_panes = fp
+    aw = MagicMock()
+    aw.ActiveSheet = MagicMock()
+    aw.ActiveSheet.Name = "S1"
+    aw.FreezePanes = False
+    aw.SplitRow = 0
+    aw.SplitColumn = 0
+    sheet.book.app.api.ActiveWindow = aw
+
+    ok = freeze_sheet_below_header_row(sheet, 1, left_col=1)
+
+    assert ok is True
+    fp.freeze_at.assert_not_called()
+    assert aw.SplitRow == 1
     assert aw.FreezePanes is True
 
 

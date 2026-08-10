@@ -3,8 +3,8 @@
 Python: 3.12+
 Module: svc/svc_csv_sv.py
 Created: 2026-03-05
-Updated: 2026-06-30
-Version: 1.3.13
+Updated: 2026-07-03
+Version: 1.3.14
 Purpose:
   CSV保存（Qt UIサーバ方式 / 2プロセス分離）。
   - UI表示は ui_qt/ui_csv_sv（ファイル「名前を付けて保存」ダイアログ）で行う。
@@ -13,6 +13,7 @@ Purpose:
   - 完了時は csv_ld と同様の完了通知（シート名・ファイル名・容量・行数）を表示。
 
 History (latest 3):
+  - 1.3.14 (2026-07-03) UI 待ち後は resolve_fresh_book_after_ui_wait で Book を先に再取得（COM_NG 根本対策）。
   - 1.3.13 (2026-06-30) 進捗 pickle: 書込失敗ログ・リトライ・seq 同期・DONE read-back 検証。SaveBlock はメインスレッド書込既定。
   - 1.3.12 (2026-06-30) 進捗クローズ ACK 待ち＋nudge（csv_ld/mg 同型）。即時進捗・submit 双方で progress_closed_path を渡す。
   - 1.3.11 (2026-06-22) 保存ダイアログ待ち後に Book/Sheet を再取得（COM 切れ緩和。csv_ld と同経路）。
@@ -141,38 +142,36 @@ def _reattach_book(
     parent_hwnd: int,
     attach_keys: tuple[int, str, str] | None = None,
 ) -> Any | None:
-    """ファイルダイアログ待ち後など COM が切れたとき book を再取得する。"""
+    """ファイルダイアログ待ち後に HWND から Book を再取得する（保険経路含む）。"""
     excel_hwnd, book_fullname, book_name = attach_keys or (0, "", "")
     if not excel_hwnd and not book_fullname and not book_name:
         excel_hwnd, book_fullname, book_name = _capture_book_attach_keys(book)
     hwnd_for_attach = int(excel_hwnd or parent_hwnd or 0)
-    if hwnd_for_attach or book_fullname or book_name:
-        try:
-            from svc.svc_server import _attach_book
 
-            book2 = _attach_book(
-                excel_hwnd=hwnd_for_attach,
-                book_fullname=book_fullname,
-                book_name=book_name,
-            )
-            if book2 is not None:
-                logger.info(
-                    "[CSV_SV] phase=book_reattached hwnd=%s fullname=%s",
-                    hwnd_for_attach,
-                    os.path.basename(book_fullname) if book_fullname else "",
-                )
-                return book2
-        except Exception as ex:
-            logger.warning(
-                "[CSV_SV] book reattach failed hwnd=%s ex=%r",
-                hwnd_for_attach,
-                ex,
-            )
+    from svc.svc_server import resolve_fresh_book_after_ui_wait
+
+    book2 = resolve_fresh_book_after_ui_wait(
+        book,
+        excel_hwnd=hwnd_for_attach,
+        book_fullname=book_fullname,
+        book_name=book_name,
+        parent_hwnd=parent_hwnd,
+        log_prefix="CSV_SV",
+    )
+    if book2 is not None and book2 is not book:
+        return book2
+
     if parent_hwnd and xlc is not None:
         ctx = xlc.get_excel_context_from_hwnd(int(parent_hwnd), "")
         if ctx is not None:
             _app, book3, _sh, _hwnd = ctx
             if book3 is not None:
+                try:
+                    from svc.svc_server import _store_attached_book
+
+                    _store_attached_book(int(parent_hwnd), book3)
+                except Exception:
+                    pass
                 logger.info(
                     "[CSV_SV] phase=book_resolved_via_hwnd hwnd=%s",
                     parent_hwnd,
@@ -188,16 +187,11 @@ def _resolve_book_and_sheet(
     ptr_s: Any | None = None,
     attach_keys: tuple[int, str, str] | None = None,
 ) -> tuple[Any | None, Any | None]:
-    """保存直前に Book/Sheet を再解決する（UI 待ち中の COM 切れ緩和）。"""
+    """保存直前に Book/Sheet を再解決する（UI 待ち後は HWND から Book を先に再取得）。"""
     if book is None:
         return None, None
 
     sid = str(sheet_id or "").strip()
-    if xlc is not None and sid:
-        sh = xlc.find_sheet_by_guid(book, sid)
-        if sh is not None:
-            return book, sh
-
     book2 = _reattach_book(book, parent_hwnd, attach_keys=attach_keys)
     if book2 is None:
         return book, None
@@ -205,7 +199,6 @@ def _resolve_book_and_sheet(
     if xlc is not None and sid:
         sh2 = xlc.find_sheet_by_guid(book2, sid)
         if sh2 is not None:
-            logger.info("[CSV_SV] phase=sheet_resolved_after_reattach sheet_id=%s", sid)
             return book2, sh2
         if parent_hwnd:
             ctx = xlc.get_excel_context_from_hwnd(int(parent_hwnd), sid)

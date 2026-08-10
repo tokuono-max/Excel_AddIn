@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_server.py
 Created: 2026-02-15
-Updated: 2026-06-14
-Version: 0.1.20
+Updated: 2026-07-03
+Version: 0.1.22
 Purpose:
   別プロセスで常駐する svc サーバ。
   - hc_main からの svc_req_*.pkl を監視し、action に応じて svc/hc_<feature>.py を遅延 import して実行する。
@@ -15,6 +15,8 @@ Shutdown (L1):
   - control/svc_shutdown.flag を検知したら停止する。
 
 History (latest 3):
+  - 0.1.22 (2026-07-03): resolve_fresh_book_after_ui_wait — UI 待ち後は古い Book 参照を使わず HWND 再取得（COM_NG 根本対策）。
+  - 0.1.21 (2026-07-03): attach_book — UI/長処理 action は cache 無効化＋HWND 再取得。com_error 後 PyErr_Clear・1 回リトライ。操作後キャッシュ破棄。
   - 0.1.20 (2026-06-16): com_monitor 掃除時に svc_last_com_hwnd.txt を同期。warmup リスト見直しと整合。
   - 0.1.19 (2026-06-14): B+ — 成功時は常駐維持。COM 汚染時のみ com_recycle。HWND 監視はキャッシュ掃除のみ。
   - 0.1.18 (2026-06-14): A+ — excel_com_session で COM recycle を全 Excel action に統一。
@@ -386,14 +388,19 @@ _last_attached_hwnd: int = 0
 
 
 def _is_com_broken(exc: BaseException) -> bool:
-    try:
-        import pywintypes
+    from core.excel_com_session import is_com_session_error
 
-        if isinstance(exc, pywintypes.com_error):
-            return True
+    return is_com_session_error(exc)
+
+
+def _clear_native_exception_state() -> None:
+    """pywin32 com_error 捕捉後に C レベルで残る例外状態をクリアする（Nuitka 等）。"""
+    try:
+        import ctypes
+
+        ctypes.pythonapi.PyErr_Clear()
     except Exception:
         pass
-    return type(exc).__name__ in ("com_error", "COMError")
 
 
 def _excel_hwnd_is_live(hwnd: int) -> bool:
@@ -415,6 +422,7 @@ def _validate_book_alive(book: Any) -> bool:
         _ = str(getattr(book, "name", "") or "")
         return True
     except Exception:
+        _clear_native_exception_state()
         return False
 
 
@@ -690,6 +698,73 @@ def _attach_book_via_xlc_context(
     return book
 
 
+def invalidate_attached_book_cache(excel_hwnd: int = 0) -> None:
+    """Book キャッシュを破棄する（操作境界の再取得用）。excel_hwnd=0 は全 HWND。"""
+    ph = int(excel_hwnd or 0)
+    with _book_cache_lock:
+        if ph <= 0:
+            _book_cache_by_hwnd.clear()
+        else:
+            _book_cache_by_hwnd.pop(ph, None)
+    if ph > 0:
+        _reset_app_binding_for_hwnd(ph)
+
+
+def resolve_fresh_book_after_ui_wait(
+    book: Any,
+    *,
+    excel_hwnd: int = 0,
+    book_fullname: str = "",
+    book_name: str = "",
+    parent_hwnd: int = 0,
+    log_prefix: str = "SVC_SERVER",
+) -> Any:
+    """UI 待ち後に HWND から Book を再取得する（古い xlwings 参照で COM を触らない）。
+
+    find_sheet_by_guid 等の前に呼び、COM_NG の根本回避とする。失敗時は book をそのまま返す。
+    """
+    hwnd = int(excel_hwnd or parent_hwnd or 0)
+    bfn = str(book_fullname or "")
+    bname = str(book_name or "")
+    if hwnd <= 0 and not bfn and not bname and book is not None:
+        try:
+            hwnd = int(getattr(book.app, "hwnd", 0) or 0)
+        except Exception:
+            hwnd = 0
+        try:
+            bfn = str(getattr(book, "fullname", "") or "")
+        except Exception:
+            bfn = ""
+        try:
+            bname = str(getattr(book, "name", "") or "")
+        except Exception:
+            bname = ""
+    if hwnd <= 0 and not bfn and not bname:
+        return book
+    try:
+        fresh = _attach_book(
+            excel_hwnd=hwnd,
+            book_fullname=bfn,
+            book_name=bname,
+            skip_cache=True,
+        )
+        logger.info(
+            "[%s] book_fresh_after_ui_wait hwnd=%s book=%s",
+            log_prefix,
+            hwnd,
+            _book_label(fresh),
+        )
+        return fresh
+    except Exception as ex:
+        logger.warning(
+            "[%s] book_fresh_after_ui_wait failed hwnd=%s ex=%r",
+            log_prefix,
+            hwnd,
+            ex,
+        )
+        return book
+
+
 def _store_attached_book(excel_hwnd: int, book: Any) -> Any:
     global _last_attached_hwnd
 
@@ -723,26 +798,13 @@ def _cached_book_if_alive(excel_hwnd: int) -> Any | None:
     return None
 
 
-def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
-    """excel_hwnd と book識別子から xlwings.Book を取得する。
-
-    Notes:
-        - マルチ Excel は _book_cache_by_hwnd で HWND ごとに Book を保持する（B+ 常駐）。
-        - 接続経路は short_runner と同じ get_excel_context_from_hwnd を優先する。
-    """
+def _resolve_attached_book(
+    excel_hwnd: int,
+    book_fullname: str,
+    book_name: str,
+) -> Any:
+    """HWND から Book を解決しキャッシュへ格納する（cache_hit なし）。"""
     ph = int(excel_hwnd or 0)
-    if ph <= 0:
-        raise RuntimeError("excel_hwnd missing")
-    if not _excel_hwnd_is_live(ph):
-        raise RuntimeError(f"Excel window not found (hwnd={ph})")
-
-    _purge_dead_excel_app_shells()
-
-    cached = _cached_book_if_alive(ph)
-    if cached is not None:
-        logger.info("[SVC_SERVER] attach_book phase=cache_hit hwnd=%s", ph)
-        return cached
-
     logger.info(
         "[SVC_SERVER] attach_book phase=resolve_enter hwnd=%s fullname=%r name=%r",
         ph,
@@ -775,6 +837,52 @@ def _attach_book(excel_hwnd: int, book_fullname: str, book_name: str):
         _book_label(book),
     )
     return _store_attached_book(ph, book)
+
+
+def _attach_book(
+    excel_hwnd: int,
+    book_fullname: str,
+    book_name: str,
+    *,
+    skip_cache: bool = False,
+):
+    """excel_hwnd と book識別子から xlwings.Book を取得する。
+
+    Notes:
+        - マルチ Excel は _book_cache_by_hwnd で HWND ごとに Book を保持する（B+ 常駐）。
+        - skip_cache=True のときは cache_hit せず HWND から再取得する（UI 待ち action 用）。
+        - 接続経路は short_runner と同じ get_excel_context_from_hwnd を優先する。
+    """
+    ph = int(excel_hwnd or 0)
+    if ph <= 0:
+        raise RuntimeError("excel_hwnd missing")
+    if not _excel_hwnd_is_live(ph):
+        raise RuntimeError(f"Excel window not found (hwnd={ph})")
+
+    _purge_dead_excel_app_shells()
+
+    if skip_cache:
+        invalidate_attached_book_cache(ph)
+    else:
+        cached = _cached_book_if_alive(ph)
+        if cached is not None:
+            logger.info("[SVC_SERVER] attach_book phase=cache_hit hwnd=%s", ph)
+            return cached
+
+    try:
+        return _resolve_attached_book(ph, book_fullname, book_name)
+    except Exception as ex:
+        if not _is_com_broken(ex):
+            raise
+        logger.warning(
+            "[SVC_SERVER] attach_book com_retry hwnd=%s ex=%r",
+            ph,
+            ex,
+        )
+        _clear_native_exception_state()
+        invalidate_attached_book_cache(ph)
+        _recover_com_apartment()
+        return _resolve_attached_book(ph, book_fullname, book_name)
 
 
 _COM_MONITOR_POLL_SEC = 1.0
@@ -940,6 +1048,7 @@ def _call_handler(
 
 def _process_one(req_path: Path) -> None:
     from core.excel_com_session import (
+        action_attach_book_fresh_resolve,
         action_uses_attach_book,
         should_schedule_com_recycle_after_handler,
     )
@@ -972,8 +1081,14 @@ def _process_one(req_path: Path) -> None:
 
         # action ごとの呼び分け（既存svcモジュールのシグネチャを尊重）
         if action_uses_attach_book(action):
+            fresh = action_attach_book_fresh_resolve(action)
+            if fresh and excel_hwnd > 0:
+                invalidate_attached_book_cache(excel_hwnd)
             book = _attach_book(
-                excel_hwnd=excel_hwnd, book_fullname=book_fullname, book_name=book_name
+                excel_hwnd=excel_hwnd,
+                book_fullname=book_fullname,
+                book_name=book_name,
+                skip_cache=fresh,
             )
             _call_handler(
                 handler,
@@ -1032,6 +1147,8 @@ def _process_one(req_path: Path) -> None:
             exc=handler_exc,
         ):
             _schedule_com_recycle_after_op(reason="com_session_error")
+        elif action_uses_attach_book(action) and excel_hwnd > 0:
+            invalidate_attached_book_cache(excel_hwnd)
         try:
             req_path.unlink(missing_ok=True)
         except Exception:

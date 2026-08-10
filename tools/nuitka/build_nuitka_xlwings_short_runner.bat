@@ -52,6 +52,7 @@ rem svc_host (included) can import bootstrap.update_bootstrap for pending apply;
   --include-module=ui_qt.ipc_file ^
   --include-package=svc ^
   --include-package=core ^
+  --include-package=xlrd ^
   --nofollow-import-to=polars,pandas,numpy,scipy ^
   --show-progress ^
   --jobs=%NUITKA_JOBS%
