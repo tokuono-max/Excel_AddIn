@@ -1895,7 +1895,6 @@ def extract_item_values(
         stype = (src.get("type") or "cell").strip().lower()
         if stype == "name_extract":
             if not name_extract_search_matches(file_path, src):
-                results.append(None)
                 continue
             ui_blk = source_ui_block(src)
             ex_mode = str((ui_blk or {}).get("extract_mode") or "extract").strip().lower()
@@ -1908,8 +1907,6 @@ def extract_item_values(
                             v_fix, ui_blk if isinstance(ui_blk, dict) else None
                         )
                     )
-                else:
-                    results.append(None)
                 continue
             v = extract_from_name(
                 file_path,
@@ -1925,7 +1922,7 @@ def extract_item_values(
                 pattern=src.get("pattern"),
                 replacement=src.get("replacement"),
             )
-            if v is not None:
+            if v is not None and str(v) != "":
                 results.append(
                     postprocess_name_extract_primary(v, ui_blk if isinstance(ui_blk, dict) else None)
                 )

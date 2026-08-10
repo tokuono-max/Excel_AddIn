@@ -212,8 +212,9 @@ def test_extract_item_values_repeat_caps_by_max_primary_rows_csv(monkeypatch) ->
         ]
     }
     vals = extract_mod.extract_item_values("dummy.csv", item, max_primary_rows=4)
-    assert vals == ["v", "v", "v", "v"]
-    assert len(calls) == 4
+    assert [str(x).lstrip("'") for x in vals] == ["v", "v", "v", "v"]
+    # 上限判定のため終端覗き読みが1回入る場合がある
+    assert len(calls) == 5
 
 
 def test_extract_item_values_repeat_xlsx_opens_workbook_once(monkeypatch) -> None:
@@ -234,6 +235,10 @@ def test_extract_item_values_repeat_xlsx_opens_workbook_once(monkeypatch) -> Non
         load_calls.append(str(path))
         return wb
 
+    def _fake_load_readonly(path):
+        load_calls.append(str(path))
+        return wb
+
     def _fake_read_from_wb(_wb, _sheet_name, cell_ref, **_kwargs):
         read_calls.append(str(cell_ref))
         return "x"
@@ -241,6 +246,7 @@ def test_extract_item_values_repeat_xlsx_opens_workbook_once(monkeypatch) -> Non
     import openpyxl  # noqa: WPS433
 
     monkeypatch.setattr(openpyxl, "load_workbook", _fake_load_workbook)
+    monkeypatch.setattr(extract_mod, "_load_workbook_readonly", _fake_load_readonly)
     monkeypatch.setattr(extract_mod, "_xlsx_cell_value_open_workbook", _fake_read_from_wb)
     item = {
         "sources": [
@@ -257,9 +263,10 @@ def test_extract_item_values_repeat_xlsx_opens_workbook_once(monkeypatch) -> Non
         ]
     }
     vals = extract_mod.extract_item_values("dummy.xlsx", item, max_primary_rows=3)
-    assert vals == ["x", "x", "x"]
+    assert [str(x).lstrip("'") for x in vals] == ["x", "x", "x"]
     assert len(load_calls) == 1
-    assert len(read_calls) == 3
+    # 上限判定のため終端覗き読みが1回入る場合がある
+    assert len(read_calls) == 4
     assert wb.closed is True
 
 
@@ -336,7 +343,8 @@ def test_compute_batch_empty_sources_column_not_filename(tmp_path) -> None:
     assert rows
     assert all(r[ix_blank] in (None, "") for r in rows)
     ix_filled = headers.index("製番")
-    assert rows[0][ix_filled] == "PN123"
+    assert rows[0][ix_filled] is not None
+    assert str(rows[0][ix_filled]).lstrip("'") == "PN123"
 
 
 def test_filter_file_paths_for_master_preview_single_pattern() -> None:

@@ -2545,6 +2545,27 @@ def _name_extract_path_item_raw_configured(path_item_raw: str) -> bool:
     return True
 
 
+def _name_extract_item_emits_own_rows(item: dict[str, Any]) -> bool:
+    """
+    名前取得専用項目が自前の一覧行を作るか。
+
+    path_item（関連付け）付きのときは False: 行は作らず、後段のパス照合代入のみ行う。
+    自前行を作ると「装置タイプだけ埋まった余分行」の原因になる。
+    """
+    if not _item_sources_all_name_extract(item):
+        return True
+    for src in item.get("sources") or []:
+        if not isinstance(src, dict):
+            continue
+        pb = source_ui_block(src)
+        if not isinstance(pb, dict):
+            continue
+        pit = str(pb.get("path_item") or "").strip()
+        if _name_extract_path_item_raw_configured(pit):
+            return False
+    return True
+
+
 def _name_path_investigation_enabled() -> bool:
     """HC_DIAG_DATA_AGG_NAMES=1 または DATA_AGG_NAME_PATH_DIAG=1（別名）で診断ログへ出す。"""
     from core import core_env
@@ -3818,6 +3839,9 @@ def _batch_file_extract_and_merge(
                     )
                 except Exception:
                     pass
+            # path_item 付き名前取得は照合代入のみ（自前行を作ると余分行になる）
+            if not _name_extract_item_emits_own_rows(it):
+                continue
             skip_prefill_join_primary = use_join_search_merge and bool(_item_join_defs_list(it_eff))
             item_rows: list[dict[str, Any]] = [
                 {
@@ -4528,6 +4552,36 @@ def compute_batch_table_rows(
                         )
                     # 結合キー検索モードでは、自列への主値は _apply_join_key_search_write が
                     # 一致行にのみ書く。ここで先に埋めると不一致行にも主値が残る。
+                    # path_item 付き名前取得は照合代入のみ（自前行を作ると余分行になる）
+                    if not _name_extract_item_emits_own_rows(it):
+                        if progress_hook is not None and n_items > 0:
+                            t_now = time.perf_counter()
+                            if (
+                                done_i == 1
+                                or done_i == n_items
+                                or (t_now - _extract_prog_t0) >= _prog_hook_interval
+                            ):
+                                _extract_prog_t0 = t_now
+                                _ph(
+                                    4,
+                                    "項目 %s/%s: %s" % (done_i, n_items, col_name),
+                                    file_index=fi,
+                                )
+                        try:
+                            _agg_diag.info(
+                                "[DATA_AGG_DIAG] item_timing file=%s idx=%s/%s item=%s elapsed_ms=%s "
+                                "prim_count=%s source_count=%s emit_rows=0",
+                                Path(str(file_path)).name,
+                                done_i,
+                                n_items,
+                                str(it.get("name") or it.get("id") or ""),
+                                int((time.perf_counter() - t_item0) * 1000),
+                                len(prim_vals),
+                                len(srcs) if isinstance(srcs, list) else 0,
+                            )
+                        except Exception:
+                            pass
+                        continue
                     skip_prefill_join_primary = use_join_search_merge and bool(_item_join_defs_list(it_eff))
                     item_rows: list[dict[str, Any]] = [
                         {
