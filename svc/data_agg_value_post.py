@@ -2,11 +2,10 @@
 """データ集約: 抽出直後の主値・連携キー値の加工（チェック・整形 DSL）。"""
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
-from core.core_excel_text import as_excel_forced_text
+from core.core_excel_text import as_excel_forced_text, scalar_to_text
 from core.core_value_shape import apply_value_shape, shape_date_value
 
 _YMD_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
@@ -14,24 +13,8 @@ _YMD_HM_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{1,2}:\d{2}$")
 
 
 def _coerce_cell_scalar_to_full_text(val: Any) -> str:
-    """セル由来のスカラーを文字列化する。float の str() による科学表記を避ける。"""
-    if val is None:
-        return ""
-    if isinstance(val, bool):
-        return "True" if val else "False"
-    if isinstance(val, int):
-        return str(val)
-    if isinstance(val, float):
-        if not math.isfinite(val):
-            return str(val)
-        iv = int(val)
-        if val == iv:
-            return str(iv)
-        s = format(val, ".20f").rstrip("0").rstrip(".")
-        if s in ("", "-", "-0"):
-            s = "0"
-        return s
-    return str(val)
+    """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。"""
+    return scalar_to_text(val)
 
 
 def apply_check_labels(val: Any, labels: list[Any] | None, *, raw: Any | None = None) -> str:

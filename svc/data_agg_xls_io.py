@@ -143,7 +143,10 @@ def _cell_value_from_sheet(sheet: Any, row: int, col: int, book: Any) -> Any:
         return None
     if ctype == xlrd.XL_CELL_DATE:
         try:
-            return xlrd.xldate_as_datetime(val, getattr(book, "datemode", 0))
+            from svc.data_agg_excel_read import extract_read_scalar
+
+            dt = xlrd.xldate_as_datetime(val, getattr(book, "datemode", 0))
+            return extract_read_scalar(dt)
         except Exception:
             return val
     if ctype == xlrd.XL_CELL_BOOLEAN:

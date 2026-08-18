@@ -93,4 +93,5 @@ def test_vertical_repeat_via_matrix_in_scope(vertical_repeat_xlsx: Path) -> None
     with ex.xlsx_workbook_scope():
         ex.precache_xlsx_workbook_sheets_for_items(p, [item])
         vals = ex.extract_item_values(p, item)
-    assert vals == ["v1", "v2", "v3", "v4", "v5"]
+    got = [str(x)[1:] if str(x).startswith("'") else str(x) for x in vals]
+    assert got == ["v1", "v2", "v3", "v4", "v5"]

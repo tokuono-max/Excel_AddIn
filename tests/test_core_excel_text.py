@@ -2,7 +2,7 @@
 """core_excel_text のユニットテスト。"""
 from __future__ import annotations
 
-from core.core_excel_text import as_excel_forced_text, matrix_as_excel_forced_text
+from core.core_excel_text import as_excel_forced_text, matrix_as_excel_forced_text, scalar_to_text
 
 
 def test_as_excel_forced_text_prefixes_non_empty() -> None:
@@ -20,6 +20,18 @@ def test_as_excel_forced_text_empty_and_already_frozen() -> None:
 
 def test_as_excel_forced_text_float_without_scientific() -> None:
     assert as_excel_forced_text(1000000000000000.0) == "'1000000000000000"
+
+
+def test_scalar_to_text_keeps_short_decimal() -> None:
+    assert scalar_to_text(2020.4) == "2020.4"
+    assert as_excel_forced_text(2020.4) == "'2020.4"
+    assert "03999" not in scalar_to_text(2020.4)
+
+
+def test_scalar_to_text_avoids_scientific_for_tiny_float() -> None:
+    s = scalar_to_text(1e-7)
+    assert "e" not in s.lower()
+    assert s.startswith("0.0000001")
 
 
 def test_matrix_as_excel_forced_text() -> None:

@@ -7,7 +7,12 @@ from typing import Any
 
 
 def scalar_to_text(val: Any) -> str:
-    """セル値を文字列化する。float の str() による科学表記を避ける。"""
+    """
+    セル値を文字列化する。Excel 由来は表示に近い文字列として扱う。
+
+    float は str()（最短の round-trip 表現）を基本とし、科学表記になるときだけ
+    固定小数へ落とす。.20f は IEEE 誤差を露出するため使わない。
+    """
     if val is None:
         return ""
     if isinstance(val, bool):
@@ -20,9 +25,11 @@ def scalar_to_text(val: Any) -> str:
         iv = int(val)
         if val == iv:
             return str(iv)
-        s = format(val, ".20f").rstrip("0").rstrip(".")
-        if s in ("", "-", "-0"):
-            s = "0"
+        s = str(val)
+        if "e" in s or "E" in s:
+            s = format(val, ".16f").rstrip("0").rstrip(".")
+            if s in ("", "-", "-0"):
+                s = "0"
         return s
     return str(val)
 

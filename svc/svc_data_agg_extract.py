@@ -3,13 +3,15 @@
 Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
-Updated: 2026-03-18
-Version: 0.1.11
+Updated: 2026-08-18
+Version: 0.1.14
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.14 (2026-08-18) Excel 読取: 文字列は無変換、日付/小数書式のみ寄せる（0埋め書式は適用しない）。
+  - 0.1.13 (2026-08-18) 連携一括読取が row_step を無視していた不具合を修正。
   - 0.1.12 (2026-06-23) CSV Polars DF キャッシュ、link batch postprocess、スコープ内 legacy 禁止。
   - 0.1.11 (2026-06-23) CSV 主キー縦/横反復の行列一括読取、Polars rows() 化、path_key キャッシュ。
   - 0.1.10 (2026-06-23) CSV 行列キャッシュ（xlsx_workbook_scope 内必須）と link/join 列一括読取 fast path。
@@ -66,6 +68,10 @@ from svc.data_agg_sheet_resolve import (  # noqa: E402
     matching_sheets_for_cell_source,
     patch_item_sheet_exact,
 )
+from svc.data_agg_excel_read import (  # noqa: E402
+    extract_read_openpyxl_cell,
+    extract_read_openpyxl_row,
+)
 from svc.data_agg_value_post import (  # noqa: E402
     postprocess_cell_primary,
     postprocess_cell_primary_batch,
@@ -76,7 +82,7 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.12"
+__version__ = "0.1.14"
 
 
 class DataAggCsvReadError(Exception):
@@ -1224,7 +1230,7 @@ def _get_excel_cell(
             ws = wb.active
         if ws is None:
             return None
-        val = ws[cell_ref].value
+        val = extract_read_openpyxl_cell(ws[cell_ref])
         wb.close()
         return val
     except Exception as e:
@@ -1243,12 +1249,12 @@ def _resolve_readonly_worksheet(wb: Any, sheet_name: Optional[str]) -> tuple[Any
 
 
 def _materialize_readonly_sheet_matrix(ws: Any) -> list[list[Any]]:
-    """read_only シートを一度だけ走査し values の行リストにする（以降 ws[ref] は使わない）。"""
+    """read_only シートを一度だけ走査し抽出用スカラーの行リストにする（以降 ws[ref] は使わない）。"""
     if ws is None:
         return []
     rows: list[list[Any]] = []
-    for tup in ws.iter_rows(values_only=True):
-        rows.append(list(tup))
+    for tup in ws.iter_rows(values_only=False):
+        rows.append(extract_read_openpyxl_row(tup))
     return rows
 
 
@@ -1434,7 +1440,7 @@ def _xlsx_cell_value_open_workbook_rc(
             if ws is None:
                 return None
             cell_ref = _col_row_to_cell_ref(col, row)
-            return ws[cell_ref].value
+            return extract_read_openpyxl_cell(ws[cell_ref])
         except Exception:
             return None
 
@@ -1472,7 +1478,7 @@ def _xlsx_cell_value_open_workbook_rc(
         if hits < _SHEET_MATERIALIZE_THRESHOLD:
             try:
                 cell_ref = _col_row_to_cell_ref(col, row)
-                return ws[cell_ref].value
+                return extract_read_openpyxl_cell(ws[cell_ref])
             except Exception:
                 return None
 
@@ -1566,14 +1572,14 @@ def _xlsx_read_repeated_series_open_workbook(
                     max_row=max_row,
                     min_col=min_col,
                     max_col=min_col,
-                    values_only=True,
+                    values_only=False,
                 )
             ):
                 if i % 64 == 0:
                     _poll_cancel_check(cancel_check)
                 if step > 1 and (i % step) != 0:
                     continue
-                v = tup[0] if tup else None
+                v = extract_read_openpyxl_cell(tup[0]) if tup else None
                 if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                     break
                 vals.append(v)
@@ -1591,16 +1597,17 @@ def _xlsx_read_repeated_series_open_workbook(
                     max_row=min_row,
                     min_col=min_col,
                     max_col=max_col,
-                    values_only=True,
+                    values_only=False,
                 )
             ):
                 # 1行のみだが要素数は limit 相当
                 picked = 0
-                for j, v in enumerate(tup):
+                for j, cell in enumerate(tup):
                     if j % 64 == 0:
                         _poll_cancel_check(cancel_check)
                     if step > 1 and (j % step) != 0:
                         continue
+                    v = extract_read_openpyxl_cell(cell)
                     if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                         return vals
                     vals.append(v)
@@ -2529,9 +2536,9 @@ def _extract_cell_rules_series_fast_map(
     複数 link/join ルールを 1 回の列範囲走査でまとめて取得する高速経路。
     対応条件（厳しめ）:
       - OpenXML Excel（.xlsx / .xlsm）または CSV
-      - 非固定値ルールはすべて row=1,col=0（縦反復）
-      - 非固定値ルールの基準行が同一
+      - 非固定値ルールは同一基準行・同一 row_step（col=0 の縦反復）
     非対応時は None（呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバック）。
+    部分適用: 開始行や歩幅が違うルールは個別高速経路へ回す。
     """
     if n_src < 1:
         return {}
@@ -2551,6 +2558,7 @@ def _extract_cell_rules_series_fast_map(
     non_fixed: list[tuple[int, int, int, dict[str, Any]]] = []
     fixed: list[tuple[int, Any, dict[str, Any]]] = []
     base_row_ref: Optional[int] = None
+    row_step_ref: Optional[int] = None
     for i, r in enumerate(rules):
         if not isinstance(r, dict):
             return None
@@ -2575,13 +2583,14 @@ def _extract_cell_rules_series_fast_map(
             or (row_step == 0 and col_step == 0)
         ):
             continue
-        # 現実装のバッチ走査は同一基準行の縦反復のみ対象。
-        # それ以外（横反復/固定セル）は個別高速経路へ回す。
+        # 現実装のバッチ走査は同一基準行・同一歩幅の縦反復のみ対象。
+        # それ以外（横反復/固定セル/開始行違い/歩幅違い）は個別高速経路へ回す。
         if not (row_step > 0 and col_step == 0):
             continue
         if base_row_ref is None:
             base_row_ref = r0
-        elif base_row_ref != r0:
+            row_step_ref = row_step
+        elif base_row_ref != r0 or row_step != row_step_ref:
             continue
         non_fixed.append((i, c0, r0, r))
     out: dict[int, list[Any]] = {}
@@ -2589,12 +2598,24 @@ def _extract_cell_rules_series_fast_map(
         out[i] = [postprocess_link_rule_value(fv, r)] * n_src
     if not non_fixed:
         return out
+    step = int(row_step_ref or 1)
+    if step < 1:
+        step = 1
     if is_csv:
         df = _get_csv_df(p_abs, create=True)
         row0_csv = base_row_ref or 0
         if df is not None:
             for i, c, _r, rule in non_fixed:
-                raw = _df_column_slice(df, c, row0_csv, n_src)
+                raw = _read_repeated_series_from_df(
+                    df,
+                    base_col=c,
+                    base_row=row0_csv,
+                    row_step=step,
+                    col_step=0,
+                    limit=n_src,
+                    repeat_until_empty=False,
+                    cancel_check=cancel_check,
+                )
                 if len(raw) < n_src:
                     raw = raw + [None] * (n_src - len(raw))
                 out[i] = postprocess_link_rule_value_batch(raw[:n_src], rule)
@@ -2604,7 +2625,7 @@ def _extract_cell_rules_series_fast_map(
             return None
         for i, c, _r, rule in non_fixed:
             raw = [
-                _matrix_cell_value(mat, c, row0_csv + ri) for ri in range(n_src)
+                _matrix_cell_value(mat, c, row0_csv + ri * step) for ri in range(n_src)
             ]
             out[i] = postprocess_link_rule_value_batch(raw, rule)
         return out
@@ -2636,8 +2657,9 @@ def _extract_cell_rules_series_fast_map(
             for ri in range(n_src):
                 if ri % 64 == 0:
                     _poll_cancel_check(cancel_check)
+                src_row = row0 + ri * step
                 for i, c, _r, rule in non_fixed:
-                    v = _matrix_cell_value(mat, c, row0 + ri)
+                    v = _matrix_cell_value(mat, c, src_row)
                     bucket[i].append(postprocess_link_rule_value(v, rule))
         else:
             ws, _ = _resolve_readonly_worksheet(wb_ctx, src.get("sheet_name"))
@@ -2646,23 +2668,30 @@ def _extract_cell_rules_series_fast_map(
             min_col = min(cols) + 1
             max_col = max(cols) + 1
             min_row = row0 + 1
-            max_row = min_row + max(0, n_src - 1)
+            max_row = min_row + max(0, (n_src - 1) * step)
             col_pos = {c: (c + 1 - min_col) for c in cols}
+            take_i = 0
             for ri, tup in enumerate(
                 ws.iter_rows(
                     min_row=min_row,
                     max_row=max_row,
                     min_col=min_col,
                     max_col=max_col,
-                    values_only=True,
+                    values_only=False,
                 )
             ):
-                if ri % 64 == 0:
+                if take_i >= n_src:
+                    break
+                if ri % step != 0:
+                    continue
+                if take_i % 64 == 0:
                     _poll_cancel_check(cancel_check)
                 for i, c, _r, rule in non_fixed:
                     pos = col_pos.get(c, -1)
-                    v = tup[pos] if (0 <= pos < len(tup)) else None
+                    cell = tup[pos] if (0 <= pos < len(tup)) else None
+                    v = extract_read_openpyxl_cell(cell)
                     bucket[i].append(postprocess_link_rule_value(v, rule))
+                take_i += 1
         for i in bucket:
             if len(bucket[i]) < n_src:
                 bucket[i].extend([None] * (n_src - len(bucket[i])))
