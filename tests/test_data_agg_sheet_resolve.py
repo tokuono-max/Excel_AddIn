@@ -10,6 +10,7 @@ import pytest
 from svc.data_agg_sheet_resolve import (
     SHEET_MISS_LABEL,
     classify_sheet_rule,
+    patch_item_sheet_exact,
     resolve_all_sheet_names_by_rule,
     resolve_sheet_name_by_rule,
 )
@@ -215,3 +216,168 @@ def test_multi_sheet_primary_merge_order(tmp_path: Path) -> None:
     assert [p["sheet_name"] for p in parts] == ["Foo_R_Bar", "R_Only"]
     got = [str(p["primary_values"][0]) for p in parts]
     assert "A" in got[0] and "B" in got[1]
+
+
+def test_patch_item_sheet_exact_all_cell_sources() -> None:
+    item = {
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "ui_scenario_source_v1": {"sheet_rule": "含む"},
+            },
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "ui_scenario_source_v1": {"sheet_rule": "含む"},
+            },
+        ]
+    }
+    out = patch_item_sheet_exact(item, "R_Only")
+    for src in out["sources"]:
+        assert src["sheet_name"] == "R_Only"
+        assert src["ui_scenario_source_v1"]["sheet_rule"] == "完全一致"
+
+
+def test_extract_item_bundle_second_source_contains_multi_sheet(tmp_path: Path) -> None:
+    """先頭ソースはファイル名でスキップし、2本目が含む＋複数シートを読む。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    fp = tmp_path / "938Bカード履歴(過去_x.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Cover"
+    wb.active["A1"] = "COVER"
+    wb.active["D4"] = "NOPE"
+    s1 = wb.create_sheet("R_One")
+    s1["D4"] = "P1"
+    s2 = wb.create_sheet("R_Two")
+    s2["D4"] = "P2"
+    wb.save(fp)
+    wb.close()
+
+    item = {
+        "id": "item_10",
+        "name": "機器番号",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "F4",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "938Bｶｰﾄﾞ履歴(現在",
+                    "file_name_rule": "含む",
+                },
+            },
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "D4",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "938Bカード履歴(過去",
+                    "file_name_rule": "含む",
+                    "link_defs": [
+                        {
+                            "item": "品名",
+                            "mode": "固定値",
+                            "cell": "PAST",
+                            "row": 0,
+                            "col": 0,
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+
+    with xlsx_workbook_scope():
+        b = extract_item_bundle(str(fp), item, item_id="item_10")
+    prim = [str(x).lstrip("'") for x in (b.get("primary_values") or [])]
+    assert prim == ["P1", "P2"]
+    spans = b.get("_cell_source_spans") or {}
+    assert spans.get(1) == (0, 2)
+    assert 0 not in spans
+    links = [str(x).lstrip("'") for x in ((b.get("link_values") or {}).get("品名") or [])]
+    assert links == ["PAST", "PAST"]
+    parts = b.get("_sheet_parts") or []
+    assert [p["sheet_name"] for p in parts] == ["R_One", "R_Two"]
+
+
+def test_extract_item_bundle_two_scenarios_two_files_vertical(tmp_path: Path) -> None:
+    """同一項目の2シナリオが別ファイルから縦結合される。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    from svc.svc_data_agg import compute_batch_table_rows
+    from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+
+    p1 = tmp_path / "now_card.xlsx"
+    wb1 = openpyxl.Workbook()
+    wb1.active.title = "Cover"
+    s1 = wb1.create_sheet("R_A")
+    s1["F4"] = "NOW1"
+    wb1.save(p1)
+    wb1.close()
+
+    p2 = tmp_path / "past_card.xlsx"
+    wb2 = openpyxl.Workbook()
+    wb2.active.title = "Cover"
+    s2 = wb2.create_sheet("R_B")
+    s2["D4"] = "PAST1"
+    wb2.save(p2)
+    wb2.close()
+
+    item = {
+        "id": "item_10",
+        "name": "機器番号",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "F4",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "now_card",
+                    "file_name_rule": "含む",
+                },
+            },
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "D4",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "past_card",
+                    "file_name_rule": "含む",
+                },
+            },
+        ],
+    }
+    with xlsx_workbook_scope():
+        b1 = extract_item_bundle(str(p1), item, item_id="item_10")
+        b2 = extract_item_bundle(str(p2), item, item_id="item_10")
+    assert [str(x).lstrip("'") for x in (b1.get("primary_values") or [])] == ["NOW1"]
+    assert [str(x).lstrip("'") for x in (b2.get("primary_values") or [])] == ["PAST1"]
+
+    data = {
+        "version": 1,
+        "items": [item],
+        "match_keys": [],
+    }
+    _h, rows, _, _ = compute_batch_table_rows(
+        data,
+        [str(p1), str(p2)],
+        max_primary_rows=50,
+        max_table_rows=50,
+        probe_caller="excel_batch_submit",
+    )
+    vals = [str(r[0]).lstrip("'") for r in rows]
+    assert "NOW1" in vals
+    assert "PAST1" in vals

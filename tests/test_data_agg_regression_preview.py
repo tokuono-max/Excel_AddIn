@@ -403,3 +403,36 @@ def test_filter_file_paths_for_master_preview_multi_pattern_or_union() -> None:
         r"C:\data\光特性履歴.xlsx",
         r"C:\data\紐づけ履歴.xlsx",
     ]
+
+
+def test_filter_file_paths_for_master_preview_multi_source_one_item() -> None:
+    files = [
+        r"C:\data\938Bｶｰﾄﾞ履歴(現在_a.xlsx",
+        r"C:\data\938カード履歴(過去_b.xlsx",
+        r"C:\data\other.xlsx",
+    ]
+    items = [
+        {
+            "name": "機器番号",
+            "sources": [
+                {
+                    "type": "cell",
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "938Bｶｰﾄﾞ履歴(現在",
+                        "file_name_rule": "含む",
+                    },
+                },
+                {
+                    "type": "cell",
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "938カード履歴(過去",
+                        "file_name_rule": "含む",
+                    },
+                },
+            ],
+        }
+    ]
+    out = filter_file_paths_for_master_preview(files, items)
+    assert r"C:\data\938Bｶｰﾄﾞ履歴(現在_a.xlsx" in out
+    assert r"C:\data\938カード履歴(過去_b.xlsx" in out
+    assert r"C:\data\other.xlsx" not in out

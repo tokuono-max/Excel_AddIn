@@ -27,6 +27,8 @@ def _rule_def_extra_suffix(rule: dict[str, Any]) -> str:
     vss = str(rule.get("value_shape_script") or "").strip()
     if vss:
         parts.append("DSL=%s" % vss)
+    if rule.get("carry_empty"):
+        parts.append("前置保持")
     return (" %s" % " ".join(parts)) if parts else ""
 
 
@@ -130,7 +132,7 @@ def cell_coordinate_setting_lines(
             if not isinstance(ld, dict):
                 continue
             lines.append(
-                "%s%s: セル=%s 行=%s 列=%s 項目=%s"
+                "%s%s: セル=%s 行=%s 列=%s 項目=%s%s"
                 % (
                     pfx,
                     lfmt % (i + 1),
@@ -138,6 +140,7 @@ def cell_coordinate_setting_lines(
                     ld.get("row", ""),
                     ld.get("col", ""),
                     ld.get("item", ""),
+                    _rule_def_extra_suffix(ld),
                 )
             )
     else:
@@ -295,13 +298,14 @@ def cell_coordinate_full_detail_lines(
         if not isinstance(ld, dict):
             continue
         link_bodies.append(
-            "4.%d セル=%s 行=%s 列=%s 項目=%s"
+            "4.%d セル=%s 行=%s 列=%s 項目=%s%s"
             % (
                 i + 1,
                 ld.get("cell", ""),
                 ld.get("row", ""),
                 ld.get("col", ""),
                 ld.get("item", ""),
+                _rule_def_extra_suffix(ld),
             )
         )
     _append_section("SEC_LINK_TITLE", "4. 連携キー", link_bodies)

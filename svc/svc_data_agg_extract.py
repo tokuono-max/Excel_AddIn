@@ -3,13 +3,15 @@
 Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
-Updated: 2026-08-18
-Version: 0.1.14
+Updated: 2026-08-19
+Version: 0.1.16
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.16 (2026-08-19) 連携キー carry_empty: 同一シート内の空欄を前回非空値で埋める。
+  - 0.1.15 (2026-08-19) 同一項目の複数シナリオと含むシート全走査をソース番号付きで連結。
   - 0.1.14 (2026-08-18) Excel 読取: 文字列は無変換、日付/小数書式のみ寄せる（0埋め書式は適用しない）。
   - 0.1.13 (2026-08-18) 連携一括読取が row_step を無視していた不具合を修正。
   - 0.1.12 (2026-06-23) CSV Polars DF キャッシュ、link batch postprocess、スコープ内 legacy 禁止。
@@ -65,8 +67,10 @@ from svc.data_agg_primary_end import (  # noqa: E402
 )
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_sheet_resolve import (  # noqa: E402
-    matching_sheets_for_cell_source,
+    list_workbook_sheet_names,
     patch_item_sheet_exact,
+    resolve_all_sheet_names_by_rule,
+    source_skips_sheet_extract,
 )
 from svc.data_agg_excel_read import (  # noqa: E402
     extract_read_openpyxl_cell,
@@ -82,7 +86,7 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.14"
+__version__ = "0.1.16"
 
 
 class DataAggCsvReadError(Exception):
@@ -301,6 +305,119 @@ def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -
     if "含まない" in rule or rule.lower() in ("exclude", "not_contains"):
         return pat_l not in stem_l
     return pat_l in stem_l
+
+
+def matching_sheets_for_item(
+    file_path: str | Path,
+    item_config: dict[str, Any],
+) -> list[str] | None:
+    """
+    項目内の cell ソース（ファイル名条件に合うもの）のシート条件を和集合し、
+    ブック左→右順で返す。名前取得のみ・CSV は None。該当なしは []。
+    """
+    sheets, _names = matching_sheets_and_names_for_item(file_path, item_config)
+    return sheets
+
+
+def matching_sheets_and_names_for_item(
+    file_path: str | Path,
+    item_config: dict[str, Any],
+) -> tuple[list[str] | None, list[str] | None]:
+    """matching_sheets_for_item に加え、ブックのシート名一覧を返す（CSV 等は両方 None）。"""
+    sources = item_config.get("sources") or []
+    has_cell = False
+    for src in sources:
+        if not isinstance(src, dict) or source_skips_sheet_extract(src):
+            continue
+        stype = str(src.get("type") or "cell").strip().lower()
+        if stype in ("name_extract", "metadata", "meta", "filename"):
+            continue
+        has_cell = True
+        break
+    if not has_cell:
+        return None, None
+    names = list_workbook_sheet_names(file_path)
+    if names is None:
+        return None, None
+    wanted: set[str] = set()
+    for src in sources:
+        if not isinstance(src, dict) or source_skips_sheet_extract(src):
+            continue
+        stype = str(src.get("type") or "cell").strip().lower()
+        if stype in ("name_extract", "metadata", "meta", "filename"):
+            continue
+        if not source_passes_file_name_filter(file_path, src):
+            continue
+        sn = str(src.get("sheet_name") or "").strip()
+        pb = source_ui_block(src) or {}
+        rule = str(pb.get("sheet_rule") or "")
+        wanted.update(resolve_all_sheet_names_by_rule(names, rule, sn))
+    return [n for n in names if n in wanted], names
+
+
+def _mini_spans_from_local(
+    local_spans: Any,
+    n_src: int,
+) -> dict[int, tuple[int, int]]:
+    """シート部分の _cell_source_spans を (開始, 行数) のままミニバンドル用にコピーする。"""
+    mini: dict[int, tuple[int, int]] = {}
+    if isinstance(local_spans, dict):
+        for si, sp in local_spans.items():
+            if not isinstance(sp, (tuple, list)) or len(sp) != 2:
+                continue
+            try:
+                start = int(sp[0])
+                ln = int(sp[1])
+            except (TypeError, ValueError):
+                continue
+            if ln > 0:
+                mini[int(si)] = (start, ln)
+    if not mini:
+        return {0: (0, n_src)} if n_src else {}
+    return mini
+
+
+def _merged_cell_source_spans(
+    parts: list[tuple[str, dict[str, Any]]],
+) -> dict[int, tuple[int, int]]:
+    """シート連結後もソース番号を保ち、連続区間なら (開始, 行数) にまとめる。"""
+    by_si: dict[int, list[tuple[int, int]]] = {}
+    g_off = 0
+    for _sh, b in parts:
+        if not isinstance(b, dict):
+            continue
+        n = len(b.get("primary_values") or [])
+        local_spans = b.get("_cell_source_spans")
+        if not isinstance(local_spans, dict):
+            local_spans = {0: (0, n)} if n else {}
+        for si, sp in local_spans.items():
+            if not isinstance(sp, (tuple, list)) or len(sp) != 2:
+                continue
+            try:
+                local_off = int(sp[0])
+                ln = int(sp[1])
+            except (TypeError, ValueError):
+                continue
+            if ln < 1:
+                continue
+            by_si.setdefault(int(si), []).append((g_off + local_off, ln))
+        g_off += n
+    out: dict[int, tuple[int, int]] = {}
+    for si, segs in by_si.items():
+        segs.sort(key=lambda x: x[0])
+        start = segs[0][0]
+        total = 0
+        expected = start
+        contiguous = True
+        for st, ln in segs:
+            if st != expected:
+                contiguous = False
+                break
+            total += ln
+            expected = st + ln
+        if contiguous and total > 0:
+            out[si] = (start, total)
+    return out
 
 
 def file_paths_for_source_extract(
@@ -1731,8 +1848,12 @@ def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any])
         if not tokens:
             continue
         any_skip = True
+        if source_skips_sheet_extract(src):
+            continue
         sp = span_map.get(si)
         if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
+            if isinstance(span_map_raw, dict) and span_map:
+                continue
             g_off, n_src = 0, len(prim)
         else:
             try:
@@ -1836,6 +1957,89 @@ def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any])
         else:
             new_spans[si] = (cursor, 0)
     bundle["_cell_source_spans"] = new_spans
+
+
+def link_def_wants_carry_empty(ld: dict[str, Any] | None) -> bool:
+    """連携キー定義の空欄前置保持が有効か。"""
+    if not isinstance(ld, dict):
+        return False
+    v = ld.get("carry_empty")
+    if v is True or v == 1:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
+def _is_blank_link_carry_value(v: Any) -> bool:
+    """前置保持用の空欄判定（空白のみ・Excel テキストの先頭 ' のみも空）。"""
+    if v is None:
+        return True
+    s = str(v).strip()
+    if s.startswith("'"):
+        s = s[1:].strip()
+    return s == ""
+
+
+def _apply_carry_empty_link_values(bundle: dict[str, Any], sources: list[Any]) -> None:
+    """
+    carry_empty の連携キー列について、ソース区間内で空欄を直前の非空値で埋める。
+    シート／ファイルをまたがない（呼び出し側がシート単位の bundle であること）。
+    """
+    vals_map = bundle.get("link_values")
+    if not isinstance(vals_map, dict) or not vals_map:
+        return
+    span_map_raw = bundle.get("_cell_source_spans")
+    span_map: dict[Any, Any] = span_map_raw if isinstance(span_map_raw, dict) else {}
+    n_all = len(bundle.get("primary_values") or [])
+    for si, src in enumerate(sources):
+        if not isinstance(src, dict):
+            continue
+        if (src.get("type") or "cell").strip().lower() != "cell":
+            continue
+        if source_skips_sheet_extract(src):
+            continue
+        ui_blk = source_ui_block(src)
+        if not isinstance(ui_blk, dict):
+            continue
+        sp = span_map.get(si) if span_map else None
+        if sp and isinstance(sp, (tuple, list)) and len(sp) == 2:
+            try:
+                g_off = int(sp[0])
+                n_src = int(sp[1])
+            except (TypeError, ValueError):
+                continue
+        else:
+            if span_map:
+                continue
+            g_off, n_src = 0, n_all
+        if n_src < 1:
+            continue
+        for ld in ui_blk.get("link_defs") or []:
+            if not isinstance(ld, dict):
+                continue
+            if not link_def_wants_carry_empty(ld):
+                continue
+            mode = str(ld.get("mode") or "セル座標").strip()
+            if "固定" in mode or mode.lower() in ("fixed", "literal"):
+                continue
+            target = str(ld.get("item") or "").strip()
+            if not target:
+                continue
+            series = vals_map.get(target)
+            if not isinstance(series, list) or not series:
+                continue
+            last: Any = None
+            for local_i in range(n_src):
+                gi = g_off + local_i
+                if gi < 0 or gi >= len(series):
+                    break
+                cur = series[gi]
+                if _is_blank_link_carry_value(cur):
+                    if last is not None:
+                        series[gi] = last
+                else:
+                    last = cur
 
 
 def _resolve_cell_source_repeat(src: dict[str, Any]) -> tuple[bool, bool, Optional[int]]:
@@ -1982,6 +2186,8 @@ def extract_item_values(
         else:
             # cell / coordinate（絶対 or 相対）
             if not source_passes_file_name_filter(file_path, src):
+                continue
+            if source_skips_sheet_extract(src):
                 continue
             cell_start = len(results)
             sheet_name = src.get("sheet_name")
@@ -2866,7 +3072,7 @@ def _merge_primary_sheet_bundles(
     merged["primary_values"] = prim_all
     merged["iteration_contexts"] = ictx_all
     merged["_sheet_parts"] = sheet_parts
-    merged["_cell_source_spans"] = {0: (0, len(prim_all))} if prim_all else {}
+    merged["_cell_source_spans"] = _merged_cell_source_spans(parts)
     return merged
 
 
@@ -2933,6 +3139,7 @@ def _extract_link_join_across_sheet_parts(
             cancel_check=cancel_check,
         )
     fp = str(file_path)
+    wb_names = list_workbook_sheet_names(file_path)
     for part in parts:
         if not isinstance(part, dict):
             continue
@@ -2942,15 +3149,7 @@ def _extract_link_join_across_sheet_parts(
         if not sh or n_src < 1:
             continue
         local_spans = part.get("_cell_source_spans")
-        if not isinstance(local_spans, dict) or not local_spans:
-            local_spans = {0: (0, n_src)}
-        mini_spans = {
-            int(si): (0, int(sp[1]))
-            for si, sp in local_spans.items()
-            if isinstance(sp, (tuple, list)) and len(sp) == 2 and int(sp[1]) > 0
-        }
-        if not mini_spans:
-            mini_spans = {0: (0, n_src)}
+        mini_spans = _mini_spans_from_local(local_spans, n_src)
         mini_prim = list(part.get("primary_values") or [])[:n_src]
         mini = {
             "primary_values": mini_prim,
@@ -2973,7 +3172,7 @@ def _extract_link_join_across_sheet_parts(
         }
         partial = _extract_item_bundle_impl(
             file_path,
-            patch_item_sheet_exact(item_config, sh),
+            patch_item_sheet_exact(item_config, sh, workbook_sheet_names=wb_names),
             item_id=item_id,
             cell_positions={},
             join_path_header=join_path_header,
@@ -3012,9 +3211,6 @@ def extract_item_bundle(
     複数一致時はブック左端から右へ順に読み取って連結する。
     マスタデバッグ／シナリオデバッグ／本番一括で共通。
     """
-    sources = item_config.get("sources") or []
-    s0 = sources[0] if sources and isinstance(sources[0], dict) else None
-
     if debug_step_scope in ("link", "join"):
         if (
             isinstance(existing_bundle, dict)
@@ -3043,7 +3239,7 @@ def extract_item_bundle(
             cancel_check=cancel_check,
         )
 
-    sheets = matching_sheets_for_cell_source(file_path, s0)
+    sheets, wb_names = matching_sheets_and_names_for_item(file_path, item_config)
     if sheets is None:
         return _extract_item_bundle_impl(
             file_path,
@@ -3061,7 +3257,9 @@ def extract_item_bundle(
     if len(sheets) == 1:
         return _extract_item_bundle_impl(
             file_path,
-            patch_item_sheet_exact(item_config, sheets[0]),
+            patch_item_sheet_exact(
+                item_config, sheets[0], workbook_sheet_names=wb_names
+            ),
             item_id=item_id,
             cell_positions=cell_positions,
             join_path_header=join_path_header,
@@ -3077,7 +3275,7 @@ def extract_item_bundle(
             break
         b = _extract_item_bundle_impl(
             file_path,
-            patch_item_sheet_exact(item_config, sh),
+            patch_item_sheet_exact(item_config, sh, workbook_sheet_names=wb_names),
             item_id=item_id,
             cell_positions=cell_positions,
             join_path_header=join_path_header,
@@ -3255,6 +3453,8 @@ def _extract_item_bundle_impl(
                 continue
             if not source_passes_file_name_filter(file_path, src):
                 continue
+            if source_skips_sheet_extract(src):
+                continue
             if legacy_link_iter:
                 g_off, n_src = 0, n_all
             else:
@@ -3324,6 +3524,8 @@ def _extract_item_bundle_impl(
                         n_src=n_src,
                         cancel_check=cancel_check,
                     )
+        if debug_step_scope == "link":
+            _apply_carry_empty_link_values(bundle, sources)
         return bundle
 
     cell_spans: dict[int, tuple[int, int]] = {}
@@ -3372,6 +3574,8 @@ def _extract_item_bundle_impl(
             continue
         if stype == "cell":
             if not source_passes_file_name_filter(file_path, src):
+                continue
+            if source_skips_sheet_extract(src):
                 continue
             sp = cell_spans.get(si)
             if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
@@ -3510,4 +3714,5 @@ def _extract_item_bundle_impl(
             {"file_path": str(file_path), "iter_index": int(i)} for i in range(n)
         ]
     _apply_skip_empty_primary_filter(bundle, sources if isinstance(sources, list) else [])
+    _apply_carry_empty_link_values(bundle, sources if isinstance(sources, list) else [])
     return bundle

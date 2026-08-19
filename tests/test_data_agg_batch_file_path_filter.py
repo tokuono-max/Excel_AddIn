@@ -48,3 +48,37 @@ def test_file_path_filter_or_patterns() -> None:
     assert "C:/data/ship_a.xlsx" in out
     assert "C:/data/紐づけ履歴.xlsx" in out
     assert "C:/data/other.txt" not in out
+
+
+def test_file_path_filter_or_patterns_same_item_multiple_sources() -> None:
+    """1マスタ項目に複数シナリオがあるとき、先頭ソース以外の file_pattern も残す。"""
+    paths = [
+        "C:/data/938Bｶｰﾄﾞ履歴(現在_a.xlsx",
+        "C:/data/938Bカード履歴(過去_b.xlsx",
+        "C:/data/other.xlsx",
+    ]
+    items = [
+        {
+            "name": "機器番号",
+            "sources": [
+                {
+                    "type": "cell",
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "938Bｶｰﾄﾞ履歴(現在",
+                        "file_name_rule": "含む",
+                    },
+                },
+                {
+                    "type": "cell",
+                    "ui_scenario_source_v1": {
+                        "file_pattern": "938Bカード履歴(過去",
+                        "file_name_rule": "含む",
+                    },
+                },
+            ],
+        },
+    ]
+    out = filter_file_paths_by_item_file_patterns(paths, items)
+    assert "C:/data/938Bｶｰﾄﾞ履歴(現在_a.xlsx" in out
+    assert "C:/data/938Bカード履歴(過去_b.xlsx" in out
+    assert "C:/data/other.xlsx" not in out

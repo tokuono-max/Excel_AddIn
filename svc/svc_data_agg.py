@@ -3,12 +3,13 @@
 Python: 3.12+
 Module: svc/svc_data_agg.py
 Created: 2026-03-18
-Updated: 2026-05-13
-Version: 0.5.5
+Updated: 2026-08-19
+Version: 0.5.6
 Purpose:
   データ集約・クレンジング。シナリオの保存・読込、ステップ実行（動作確認）、一括実行のオーケストレーション。
   画面は ui_qt.ui_data_agg + config/ui_data_agg.json。走査・シナリオ・抽出・書き込みはサブモジュールに分離する。
 History (latest 3):
+  - 0.5.6 (2026-08-19) 同一項目の複数 file_pattern を OR 絞込（先頭ソースのみ見ていた不具合を修正）。
   - 0.5.5 (2026-06-03) 走査 extensions フォールバックとノイズ判定に .xlsm を追加。
   - 0.5.4 (2026-06-06) ステップ実行の Excel 書込も suspend(restore_on_exit=False) + restore_screen_updating。
   - 0.5.3 (2026-06-06) ハング緩和: Excel 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
@@ -71,7 +72,7 @@ from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
 
 logger = get_logger(__name__)
 _agg_diag = get_data_agg_diag_logger()
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 
 # data_agg_master_preview.MASTER_PREVIEW_DIAG_SOURCE と同一（循環 import 避け）
 _MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
@@ -3361,10 +3362,8 @@ def filter_file_paths_by_item_file_patterns(
     items: list[dict[str, Any]],
 ) -> list[str]:
     """
-    cell ソースで file_pattern が空でない項目について走査結果を絞る。
-
-    パターンが1種類のみ: その pattern に合うファイル。
-    複数パターン（光特性×紐づけ等）: OR（いずれかに合致）。
+    cell ソースで file_pattern が空でないものについて走査結果を絞る。
+    同一項目の複数シナリオも含め、パターンは OR（いずれかに合致）。
     """
     from svc import svc_data_agg_extract as extract_mod  # noqa: E402
 
@@ -3372,16 +3371,14 @@ def filter_file_paths_by_item_file_patterns(
     for it in items:
         if not isinstance(it, dict):
             continue
-        cell_src = None
         for src in it.get("sources") or []:
-            if isinstance(src, dict) and str(src.get("type") or "cell").strip().lower() == "cell":
-                cell_src = src
-                break
-        if cell_src is None:
-            continue
-        block = source_ui_block(cell_src)
-        if isinstance(block, dict) and str(block.get("file_pattern") or "").strip():
-            restrictive.append(cell_src)
+            if not isinstance(src, dict):
+                continue
+            if str(src.get("type") or "cell").strip().lower() != "cell":
+                continue
+            block = source_ui_block(src)
+            if isinstance(block, dict) and str(block.get("file_pattern") or "").strip():
+                restrictive.append(src)
     if not restrictive:
         return [str(p) for p in file_paths]
     if len(restrictive) == 1:

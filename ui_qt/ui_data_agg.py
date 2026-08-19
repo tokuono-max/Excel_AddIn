@@ -132,6 +132,7 @@ from ui_qt.ui_common import (
     show_warning_notice,
 )
 from ui_qt.ui_data_agg_scenario_layout import (
+    apply_link_def_mode_widgets,
     build_scenario_detail_cell_scroll,
     build_scenario_detail_name_scroll,
 )
@@ -5111,6 +5112,9 @@ class _ScenarioEditDialog(QDialog):
         lvs = ld.get("value_shape_script")
         if lvs is not None:
             lvs.textChanged.connect(self._on_form_changed)
+        ce = ld.get("carry_empty")
+        if ce is not None:
+            ce.stateChanged.connect(self._on_form_changed)
         for cbx in ld.get("checks") or []:
             cbx.stateChanged.connect(self._on_form_changed)
 
@@ -5151,6 +5155,9 @@ class _ScenarioEditDialog(QDialog):
             lvs = ld.get("value_shape_script")
             if lvs is not None:
                 lvs.textChanged.connect(self._on_form_changed)
+            ce = ld.get("carry_empty")
+            if ce is not None:
+                ce.stateChanged.connect(self._on_form_changed)
             for cbx in ld.get("checks") or []:
                 cbx.stateChanged.connect(self._on_form_changed)
         for jd in cr["join_defs"]:
@@ -5804,6 +5811,9 @@ class _ScenarioEditDialog(QDialog):
             lvs = ld.get("value_shape_script")
             if lvs is not None:
                 lvs.blockSignals(block)
+            ce = ld.get("carry_empty")
+            if ce is not None:
+                ce.blockSignals(block)
             for cbx in ld.get("checks") or []:
                 cbx.blockSignals(block)
         for jd in cr["join_defs"]:
@@ -5967,10 +5977,9 @@ class _ScenarioEditDialog(QDialog):
                     if i2 < len(llist) and isinstance(llist[i2], dict):
                         ld["cell"].setText(str(llist[i2].get("cell") or ""))
                         mode_txt = str(llist[i2].get("mode") or "セル座標").strip()
-                        if mode_txt == fixed_mode_lbl:
-                            ld["mode_fixed"].setChecked(True)
-                        else:
-                            ld["mode_cell"].setChecked(True)
+                        apply_link_def_mode_widgets(
+                            ld, mode_txt, fixed_label=fixed_mode_lbl
+                        )
                         ld["row"].setValue(int(llist[i2].get("row") or 0))
                         ld["col"].setValue(int(llist[i2].get("col") or 0))
                         self._combo_select_saved_master_item(
@@ -5979,6 +5988,9 @@ class _ScenarioEditDialog(QDialog):
                         lnk_vs = ld.get("value_shape_script")
                         if lnk_vs is not None:
                             lnk_vs.setText(str(llist[i2].get("value_shape_script") or ""))
+                        ce = ld.get("carry_empty")
+                        if ce is not None:
+                            ce.setChecked(bool(llist[i2].get("carry_empty")))
                         chk_vals = llist[i2].get("checks") or []
                         if not isinstance(chk_vals, list):
                             chk_vals = []
@@ -6102,6 +6114,13 @@ class _ScenarioEditDialog(QDialog):
                 sync_sheet = self._cell_refs.get("sync_sheet_name_enabled")
                 if callable(sync_sheet):
                     sync_sheet()
+            except Exception:
+                pass
+            try:
+                for ld_fin in self._cell_refs.get("link_defs") or []:
+                    sync_fin = ld_fin.get("sync_mode_state")
+                    if callable(sync_fin):
+                        sync_fin()
             except Exception:
                 pass
             self._resync_right_pane_layout()
@@ -6266,6 +6285,11 @@ class _ScenarioEditDialog(QDialog):
                         if ld.get("value_shape_script") is not None
                         else ""
                     ),
+                    "carry_empty": bool(
+                        ld["carry_empty"].isChecked()
+                    )
+                    if ld.get("carry_empty") is not None
+                    else False,
                 }
                 for ld in r["link_defs"]
                 if _item_ok(ld["item_combo"].currentText())

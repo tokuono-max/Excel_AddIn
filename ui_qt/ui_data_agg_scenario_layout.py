@@ -173,6 +173,53 @@ def _field_lbl(text: str) -> str:
     return s + "："
 
 
+def link_mode_text_is_fixed(mode_txt: Any, fixed_label: str = "固定値") -> bool:
+    """連携キーの保存 mode が固定値か（抽出側の「固定」部分一致と揃える）。"""
+    raw = str(mode_txt or "").strip()
+    if not raw:
+        return False
+    if raw == str(fixed_label or "").strip():
+        return True
+    if "固定" in raw:
+        return True
+    return raw.lower() in ("fixed", "literal")
+
+
+def apply_link_def_mode_widgets(
+    ld: dict[str, Any],
+    mode_txt: Any,
+    *,
+    fixed_label: str = "固定値",
+) -> None:
+    """
+    保存 mode をラジオへ載せ、オフセット可否を mode から確定する。
+    信号ブロック中でも、相手側ラジオを明示的に外してから同期する。
+    """
+    want_fixed = link_mode_text_is_fixed(mode_txt, fixed_label)
+    rad_cell = ld.get("mode_cell")
+    rad_fixed = ld.get("mode_fixed")
+    if want_fixed:
+        if rad_cell is not None:
+            rad_cell.setChecked(False)
+        if rad_fixed is not None:
+            rad_fixed.setChecked(True)
+    else:
+        if rad_fixed is not None:
+            rad_fixed.setChecked(False)
+        if rad_cell is not None:
+            rad_cell.setChecked(True)
+    sync = ld.get("sync_mode_state")
+    if callable(sync):
+        sync(force_fixed=want_fixed)
+    else:
+        row = ld.get("row")
+        col = ld.get("col")
+        if row is not None:
+            row.setEnabled(not want_fixed)
+        if col is not None:
+            col.setEnabled(not want_fixed)
+
+
 def _compact_spin(sb: QSpinBox, max_width: int = 76) -> None:
     sb.setMinimumWidth(0)
     sb.setMaximumWidth(max_width)
@@ -1159,6 +1206,12 @@ def build_scenario_detail_cell_scroll(
             _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
             _value_shape_form_field(le_link_shape, cfg),
         )
+        cb_carry_empty = QCheckBox("")
+        cb_carry_empty.setChecked(False)
+        gf.addRow(
+            _field_lbl(_dcp(cfg, "LABEL_LINK_CARRY_EMPTY", "空欄は前回値を保持")),
+            cb_carry_empty,
+        )
         gv.addLayout(gf)
         row_lbtn = QHBoxLayout()
         row_lbtn.addStretch(1)
@@ -1173,15 +1226,23 @@ def build_scenario_detail_cell_scroll(
             "item_combo": cb_link_item,
             "checks": link_checks,
             "value_shape_script": le_link_shape,
+            "carry_empty": cb_carry_empty,
             "group_box": gb,
         }
-        def _sync_link_mode_state(_: bool = False) -> None:
-            is_fixed = rad_link_fixed.isChecked()
+        def _sync_link_mode_state(*_args: Any, force_fixed: bool | None = None) -> None:
+            # toggled(bool) が第1引数に来る。セル座標がオンならオフセットを有効にする
+            # （信号ブロック中に両方 checked が残っても、画面のセル座標に合わせる）。
+            if force_fixed is None:
+                is_cell = bool(rad_link_cell.isChecked())
+                is_fixed = bool(rad_link_fixed.isChecked()) and not is_cell
+            else:
+                is_fixed = bool(force_fixed)
             lbl_cell_or_fixed.setText(
                 _field_lbl(mode_items[1] if is_fixed else mode_items[0])
             )
             sj.setEnabled(not is_fixed)
             sk.setEnabled(not is_fixed)
+        ld["sync_mode_state"] = _sync_link_mode_state
         rad_link_cell.toggled.connect(_sync_link_mode_state)
         rad_link_fixed.toggled.connect(_sync_link_mode_state)
         _sync_link_mode_state()
@@ -1245,6 +1306,12 @@ def build_scenario_detail_cell_scroll(
                 "TIP_LINK_VALUE_SHAPE",
                 "連携値に適用する整形 DSL です。",
             )
+        _apply_cfg_tip_force(
+            cb_carry_empty,
+            cfg,
+            "TIP_LINK_CARRY_EMPTY",
+            "同じシート内で、空欄の連携値に直前の非空値を入れます。先頭が空なら空のままです。シートやファイルが変わるとリセットします。",
+        )
         _apply_cfg_tip_force(
             btn_rm_l,
             cfg,

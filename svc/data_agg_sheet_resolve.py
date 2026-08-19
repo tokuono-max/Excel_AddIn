@@ -112,6 +112,21 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
     return []
 
 
+SKIP_SHEET_EXTRACT_KEY = "_data_agg_skip_sheet"
+
+
+def source_skips_sheet_extract(src: dict[str, Any] | None) -> bool:
+    """当該シート向けに抑制した cell ソースか。"""
+    return isinstance(src, dict) and bool(src.get(SKIP_SHEET_EXTRACT_KEY))
+
+
+def _is_cell_extract_source(src: dict[str, Any] | None) -> bool:
+    if not isinstance(src, dict):
+        return False
+    typ = str(src.get("type") or "cell").strip().lower()
+    return typ not in ("name_extract", "metadata", "meta", "filename")
+
+
 def matching_sheets_for_cell_source(
     file_path: str | Path,
     src: dict[str, Any] | None,
@@ -139,15 +154,34 @@ def matching_sheets_for_cell_source(
     return resolve_all_sheet_names_by_rule(names, rule, sn)
 
 
-def patch_item_sheet_exact(item: dict[str, Any], sheet_name: str) -> dict[str, Any]:
-    """sources[0] の sheet_name を実名にし、sheet_rule を完全一致にする。"""
+def patch_item_sheet_exact(
+    item: dict[str, Any],
+    sheet_name: str,
+    *,
+    workbook_sheet_names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """
+    cell ソースの sheet_name を実名にし、sheet_rule を完全一致にする。
+    workbook_sheet_names があるとき、元のシート条件に合わないソースは抽出抑制する
+    （インデックスを保ったまま当該シートでは読まない）。
+    """
     import copy
 
-    from svc.data_agg_source_ui import ensure_source_ui_block
+    from svc.data_agg_source_ui import ensure_source_ui_block, source_ui_block
 
     out = copy.deepcopy(item)
-    out_s0 = (out.get("sources") or [None])[0]
-    if isinstance(out_s0, dict):
-        out_s0["sheet_name"] = sheet_name
-        ensure_source_ui_block(out_s0)["sheet_rule"] = "完全一致"
+    names = [str(x) for x in (workbook_sheet_names or []) if str(x).strip() != ""]
+    for src in out.get("sources") or []:
+        if not _is_cell_extract_source(src):
+            continue
+        if names:
+            orig_sn = str(src.get("sheet_name") or "").strip()
+            orig_rule = str((source_ui_block(src) or {}).get("sheet_rule") or "")
+            matched = resolve_all_sheet_names_by_rule(names, orig_rule, orig_sn)
+            if sheet_name not in matched:
+                src[SKIP_SHEET_EXTRACT_KEY] = True
+                continue
+        src.pop(SKIP_SHEET_EXTRACT_KEY, None)
+        src["sheet_name"] = sheet_name
+        ensure_source_ui_block(src)["sheet_rule"] = "完全一致"
     return out

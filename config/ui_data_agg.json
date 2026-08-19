@@ -803,6 +803,8 @@
         "LABEL_LINK_COL": "列移動オフセット",
         "LABEL_LINK_ITEM": "連携項目",
         "LABEL_LINK_CHECKS": "加工",
+        "LABEL_LINK_CARRY_EMPTY": "空欄は前回値を保持",
+        "TIP_LINK_CARRY_EMPTY": "同じシート内で、空欄の連携値に直前の非空値を入れます。先頭が空なら空のままです。シートやファイルが変わるとリセットします。",
         "LINK_CHECK_LABELS": [
           "トリム",
           "全角→半角",

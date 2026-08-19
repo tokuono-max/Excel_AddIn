@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from svc.data_agg_cell_coordinate_summary import cell_coordinate_full_detail_lines
+from svc.data_agg_cell_coordinate_summary import (
+    cell_coordinate_full_detail_lines,
+    _rule_def_extra_suffix,
+)
 from svc.data_agg_name_extract_summary import (
     fmt_ne_length_mode,
     fmt_ne_start_mode,
@@ -191,12 +194,14 @@ def _fmt_link_line(
     else:
         lfmt = str(dc.get("LINK_GROUP_TITLE_FMT") or "連携キー定義 #%d").strip()
         title = lfmt % (i + 1)
-    return "%s: セル=%s 行=%s 列=%s 項目=%s" % (
+    extra = _rule_def_extra_suffix(ld)
+    return "%s: セル=%s 行=%s 列=%s 項目=%s%s" % (
         title,
         ld.get("cell", ""),
         ld.get("row", ""),
         ld.get("col", ""),
         ld.get("item", ""),
+        extra,
     )
 
 

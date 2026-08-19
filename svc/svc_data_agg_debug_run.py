@@ -22,7 +22,7 @@ from svc.data_agg_sheet_resolve import (
     classify_sheet_rule,
     resolve_all_sheet_names_by_rule,
 )
-from svc.data_agg_source_ui import ensure_source_ui_block, source_ui_block
+from svc.data_agg_source_ui import source_ui_block
 
 # 名前取得デバッグ・フェーズ2 の既定文言（MAIN.DEBUG.NAME_EXTRACT_DEBUG で上書き可）
 _NE_DBG_DEFAULTS: dict[str, str] = {
@@ -140,22 +140,17 @@ def _is_name_extract_source(s0: dict[str, Any]) -> bool:
 def _allowed_paths_after_file_filter(
     item: dict[str, Any], paths: list[str]
 ) -> list[str]:
-    """ファイル名フィルタ後のパス一覧（ブックは開かない）。cell は従来どおり、名前から取得は ui ブロックで同ルールを適用。"""
+    """ファイル名フィルタ後のパス一覧（ブックは開かない）。cell は全ソース OR、名前から取得は ui ブロックで同ルールを適用。"""
     from svc.svc_data_agg_extract import source_passes_file_name_filter
 
-    sources = item.get("sources") or []
-    s0 = sources[0] if sources and isinstance(sources[0], dict) else None
+    sources = [s for s in (item.get("sources") or []) if isinstance(s, dict)]
+    cell_sources = [s for s in sources if _normalized_scenario_source_type(s) == "cell"]
+    if not cell_sources:
+        return list(paths)
     allowed_paths: list[str] = []
     for fp in paths:
-        if s0 and isinstance(s0, dict):
-            nt = _normalized_scenario_source_type(s0)
-            if nt == "cell":
-                if not source_passes_file_name_filter(fp, s0):
-                    continue
-            elif nt == "name_extract":
-                # 第2段は name_extract_search_matches のみ（§1.6）。file_pattern / 拡張子の別枠は使わない。
-                pass
-        allowed_paths.append(fp)
+        if any(source_passes_file_name_filter(fp, s) for s in cell_sources):
+            allowed_paths.append(fp)
     return allowed_paths
 
 
@@ -684,15 +679,17 @@ def scenario_debug_phase_result(
     return summary, colvals, events, [None] * len(colvals)
 
 
-def _patch_item_sheet_exact(item: dict[str, Any], sheet_name: str) -> dict[str, Any]:
-    import copy
+def _patch_item_sheet_exact(
+    item: dict[str, Any],
+    sheet_name: str,
+    *,
+    workbook_sheet_names: list[str] | None = None,
+) -> dict[str, Any]:
+    from svc.data_agg_sheet_resolve import patch_item_sheet_exact
 
-    out = copy.deepcopy(item)
-    out_s0 = (out.get("sources") or [None])[0]
-    if isinstance(out_s0, dict):
-        out_s0["sheet_name"] = sheet_name
-        ensure_source_ui_block(out_s0)["sheet_rule"] = "完全一致"
-    return out
+    return patch_item_sheet_exact(
+        item, sheet_name, workbook_sheet_names=workbook_sheet_names
+    )
 
 
 def _merge_primary_sheet_bundles(
@@ -744,8 +741,10 @@ def _extract_link_join_across_sheets(
     scope: str,
 ) -> dict[str, Any]:
     """既存 primary の _sheet_parts に沿って link/join をシート順に再計算する。"""
+    from svc.data_agg_sheet_resolve import list_workbook_sheet_names
     from svc.svc_data_agg_extract import (
         _mini_iter_contexts_for_sheet_part,
+        _mini_spans_from_local,
         extract_item_bundle,
     )
 
@@ -774,6 +773,7 @@ def _extract_link_join_across_sheets(
             existing_bundle=base,
         )
 
+    wb_names = list_workbook_sheet_names(file_path)
     for part in parts:
         if not isinstance(part, dict):
             continue
@@ -783,15 +783,7 @@ def _extract_link_join_across_sheets(
         if not sh or n_src < 1:
             continue
         local_spans = part.get("_cell_source_spans")
-        if not isinstance(local_spans, dict) or not local_spans:
-            local_spans = {0: (0, n_src)}
-        mini_spans = {
-            int(si): (0, int(sp[1]))
-            for si, sp in local_spans.items()
-            if isinstance(sp, (tuple, list)) and len(sp) == 2 and int(sp[1]) > 0
-        }
-        if not mini_spans:
-            mini_spans = {0: (0, n_src)}
+        mini_spans = _mini_spans_from_local(local_spans, n_src)
         mini_prim = list(part.get("primary_values") or [])[:n_src]
         mini = {
             "primary_values": mini_prim,
@@ -814,7 +806,7 @@ def _extract_link_join_across_sheets(
         }
         partial = extract_item_bundle(
             file_path,
-            _patch_item_sheet_exact(item, sh),
+            _patch_item_sheet_exact(item, sh, workbook_sheet_names=wb_names),
             item_id=item_id,
             cell_positions={},
             join_path_header=jp_hdr or None,
@@ -842,7 +834,10 @@ def _extract_bundles_for_matched_sheets(
     existing: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """一致シートを左→右の順に読み、primary は連結、link/join はシート単位で再計算する。"""
-    from svc.svc_data_agg_extract import extract_item_bundle
+    from svc.svc_data_agg_extract import (
+        extract_item_bundle,
+        matching_sheets_and_names_for_item,
+    )
 
     sources = item.get("sources") or []
     s0 = sources[0] if sources and isinstance(sources[0], dict) else None
@@ -877,7 +872,7 @@ def _extract_bundles_for_matched_sheets(
             existing_bundle=base,
         )
 
-    sheets = _list_matching_sheet_names(file_path, s0)
+    sheets, wb_names = matching_sheets_and_names_for_item(file_path, item)
     if sheets is None:
         item_one = _item_with_resolved_sheet_for_debug(item, file_path)
         if item_one is None:
@@ -909,7 +904,7 @@ def _extract_bundles_for_matched_sheets(
         for sh in sheets:
             b = extract_item_bundle(
                 file_path,
-                _patch_item_sheet_exact(item, sh),
+                _patch_item_sheet_exact(item, sh, workbook_sheet_names=wb_names),
                 item_id=item_id,
                 cell_positions={},
                 join_path_header=jp_hdr or None,
@@ -969,16 +964,18 @@ def _item_with_resolved_sheet_for_debug(
     file_path: str,
 ) -> dict[str, Any] | None:
     """先頭の一致シート名へ差し替えた item（単一シート互換）。"""
+    from svc.svc_data_agg_extract import matching_sheets_and_names_for_item
+
     sources = item.get("sources") or []
     s0 = sources[0] if sources and isinstance(sources[0], dict) else None
     if not isinstance(s0, dict) or _is_name_extract_source(s0):
         return item
-    sheets = _list_matching_sheet_names(file_path, s0)
+    sheets, names = matching_sheets_and_names_for_item(file_path, item)
     if sheets is None:
         return item
     if not sheets:
         return None
-    return _patch_item_sheet_exact(item, sheets[0])
+    return _patch_item_sheet_exact(item, sheets[0], workbook_sheet_names=names)
 
 
 def _sheet_column_preview(
