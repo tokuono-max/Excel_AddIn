@@ -416,3 +416,269 @@ def test_until_empty_skip_token_keeps_blank_as_stop(tmp_path: Path) -> None:
         b = extract_item_bundle(str(fp), item, item_id="i1")
     prim = [str(x).lstrip("'") for x in (b["primary_values"] or [])]
     assert prim == ["A", "B"]
+
+
+def test_align_skips_copy_when_same_length_and_iters() -> None:
+    from svc.svc_data_agg_extract import _align_one_rule_series
+
+    vals = ["a", "b", "c"]
+    ctxs = [{"file_path": "f", "iter_index": i} for i in range(3)]
+    nv, nc = _align_one_rule_series(vals, ctxs, 3, file_path="f")
+    assert nv is vals
+    assert nc is ctxs
+
+
+def test_align_places_short_series_on_primary_iters() -> None:
+    from svc.svc_data_agg_extract import _align_one_rule_series
+
+    vals = ["card0", "card1"]
+    ctxs = [
+        {"file_path": "f", "iter_index": 1},
+        {"file_path": "f", "iter_index": 2},
+    ]
+    nv, nc = _align_one_rule_series(vals, ctxs, 3, file_path="f")
+    assert nv is not vals
+    assert ["" if x is None else str(x) for x in nv] == ["", "card0", "card1"]
+    assert [c.get("iter_index") for c in nc] == [0, 1, 2]
+
+
+def test_scenario_debug_skip_n1_hides_row(tmp_path: Path) -> None:
+    """N件=1 でスキップ対象なら、シナリオデバッグは空欄行を出さず主値 0 件。"""
+    from svc.svc_data_agg_debug_run import scenario_debug_phase_result
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = None
+    fp = tmp_path / "skip_n1.xlsx"
+    wb.save(fp)
+    wb.close()
+
+    item = {
+        "id": "i1",
+        "name": "PK",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "S",
+                "cell_ref": "A1",
+                "row_offset": 1,
+                "col_offset": 0,
+                "repeat_direction": "vertical",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "skip_empty_primary": True,
+                "ui_scenario_source_v1": {
+                    "ext_checked": [".xlsx"],
+                    "link_defs": [],
+                    "join_defs": [],
+                },
+            }
+        ],
+    }
+    paths = [str(fp)]
+    cache: dict = {}
+    summary, cols, _e, _t = scenario_debug_phase_result(item, paths, 2, 200, cache)
+    assert summary[2] == "0"
+    assert cols == ["（主値 0 件）"]
+    assert (cache.get(str(fp)) or {}).get("primary_values") == []
+
+
+def test_scenario_debug_phase2_primary_only_then_prefetch_links(tmp_path: Path) -> None:
+    """フェーズ2は主キーのみ。追記後のフェーズ3はキャッシュを再利用する。"""
+    from svc.svc_data_agg_debug_run import (
+        fill_scenario_link_join_after_primary,
+        scenario_debug_phase_result,
+    )
+
+    fp = _make_xlsx(tmp_path)
+    item = _item(skip_empty=True)
+    item["id"] = "i1"
+    item["sources"][0]["ui_scenario_source_v1"]["ext_checked"] = [".xlsx"]
+    paths = [str(fp)]
+    cache: dict = {}
+    _s2, cols2, _e2, _t2 = scenario_debug_phase_result(item, paths, 2, 200, cache)
+    b2 = cache[str(fp)]
+    assert b2.get("_dbg_primary_only") is True
+    assert b2.get("_dbg_full_extract") is not True
+    assert not (b2.get("link_values") or {}).get("連携")
+    assert [_body_dbg(x) for x in cols2] == ["A", "B"]
+    fill_scenario_link_join_after_primary(item, paths, cache, "i1")
+    b3pre = cache[str(fp)]
+    assert b3pre.get("_dbg_full_extract") is True
+    assert [_txt_skip(x) for x in (b3pre.get("link_values") or {}).get("連携") or []] == [
+        "L1",
+        "L3",
+    ]
+    id3 = id(b3pre)
+    _s3, cols3, _e3, _t3 = scenario_debug_phase_result(item, paths, 3, 200, cache)
+    assert cache[str(fp)] is b3pre or id(cache[str(fp)]) == id3
+    assert [_body_dbg(x) for x in cols3] == ["L1", "L3"]
+
+
+def test_scenario_debug_skipped_file_hides_link(tmp_path: Path) -> None:
+    """主キーが全スキップのファイルは、連携フェーズにも値を出さない。"""
+    from svc.svc_data_agg_debug_run import scenario_debug_phase_result
+
+    fp1 = tmp_path / "skip.xlsx"
+    wb1 = Workbook()
+    ws1 = wb1.active
+    ws1.title = "S"
+    ws1["A1"] = None
+    ws1["B1"] = "HIDE"
+    wb1.save(fp1)
+    wb1.close()
+    fp2 = tmp_path / "keep.xlsx"
+    wb2 = Workbook()
+    ws2 = wb2.active
+    ws2.title = "S"
+    ws2["A1"] = "P"
+    ws2["B1"] = "Lkeep"
+    wb2.save(fp2)
+    wb2.close()
+    item = {
+        "id": "i1",
+        "name": "PK",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "S",
+                "cell_ref": "A1",
+                "row_offset": 1,
+                "col_offset": 0,
+                "repeat_direction": "vertical",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "skip_empty_primary": True,
+                "ui_scenario_source_v1": {
+                    "ext_checked": [".xlsx"],
+                    "link_defs": [
+                        {
+                            "item": "連携",
+                            "mode": "セル座標",
+                            "cell": "B1",
+                            "row": 1,
+                            "col": 0,
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    paths = [str(fp1), str(fp2)]
+    cache: dict = {}
+    _s2, cols2, _e2, _t2 = scenario_debug_phase_result(item, paths, 2, 200, cache)
+    _s3, cols3, _e3, _t3 = scenario_debug_phase_result(item, paths, 3, 200, cache)
+    assert [_body_dbg(x) for x in cols2] == ["P"]
+    assert [_body_dbg(x) for x in cols3] == ["Lkeep"]
+
+
+def test_flatten_hides_link_when_primary_skipped() -> None:
+    """主キー 0 件のファイルは連携を出さない。途中スキップ後の長さは主キーに合わせる。"""
+    from svc.svc_data_agg_debug_run import _flatten_map_values_by_defs
+
+    cache = {
+        "empty.xlsx": {
+            "primary_values": [],
+            "link_values": {"連携": ["HIDE1", "HIDE2"]},
+        },
+        "kept.xlsx": {
+            "primary_values": ["A", "B"],
+            "link_values": {"連携": ["L1", "L3", "EXTRA"]},
+        },
+    }
+    cols = _flatten_map_values_by_defs(
+        cache, "link_values", [{"item": "連携"}], 50, "PK"
+    )
+    assert [_body_dbg(x) for x in cols] == ["L1", "L3"]
+
+
+def test_scenario_debug_stops_at_display_row_cap(tmp_path: Path) -> None:
+    """表示上限に達したら以降のファイルを開かない。"""
+    from svc.svc_data_agg_debug_run import scenario_debug_phase_result
+
+    paths: list[str] = []
+    for i in range(4):
+        fp = tmp_path / ("f%d.xlsx" % i)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "S"
+        ws["A1"] = "P%d_1" % i
+        ws["A2"] = "P%d_2" % i
+        wb.save(fp)
+        wb.close()
+        paths.append(str(fp))
+    item = {
+        "id": "i1",
+        "name": "PK",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "S",
+                "cell_ref": "A1",
+                "row_offset": 1,
+                "col_offset": 0,
+                "repeat_direction": "vertical",
+                "repeat_until_empty": False,
+                "repeat_max": 2,
+                "skip_empty_primary": True,
+                "ui_scenario_source_v1": {
+                    "ext_checked": [".xlsx"],
+                    "link_defs": [],
+                },
+            }
+        ],
+    }
+    cache: dict = {}
+    _s, cols, _e, _t = scenario_debug_phase_result(item, paths, 2, 3, cache)
+    bodies = [_body_dbg(x) for x in cols if not str(x).startswith("…")]
+    assert bodies == ["P0_1", "P0_2", "P1_1"]
+    assert paths[0] in cache
+    assert paths[1] in cache
+    assert paths[2] not in cache
+    assert paths[3] not in cache
+    assert any(str(x).startswith("…") for x in cols)
+
+
+def test_append_rule_series_picks_by_rule_iter_holes(tmp_path: Path) -> None:
+    """rule_iter が 0,2 でも列一括読取で L1/L3 を拾う。"""
+    from svc.svc_data_agg_extract import _append_rule_series_to_bundle, xlsx_workbook_scope
+
+    fp = _make_xlsx(tmp_path)
+    src = {
+        "type": "cell",
+        "sheet_name": "S",
+        "cell_ref": "A1",
+    }
+    rule = {"item": "連携", "mode": "セル座標", "cell": "B1", "row": 1, "col": 0}
+    bundle: dict = {"link_values": {}, "link_contexts": {}}
+    ictx = [
+        {"file_path": str(fp), "iter_index": 0, "rule_iter_index": 0, "base_cell": "A1"},
+        {"file_path": str(fp), "iter_index": 1, "rule_iter_index": 2, "base_cell": "A3"},
+    ]
+    with xlsx_workbook_scope():
+        _append_rule_series_to_bundle(
+            bundle=bundle,
+            values_key="link_values",
+            contexts_key="link_contexts",
+            target="連携",
+            file_path=str(fp),
+            src=src,
+            rule=rule,
+            iter_contexts=ictx,
+            n_src=2,
+        )
+    assert [_txt_skip(x) for x in bundle["link_values"]["連携"]] == ["L1", "L3"]
+
+
+def _txt_skip(v: object) -> str:
+    if v is None:
+        return ""
+    return str(v).lstrip("'")
+
+
+def _body_dbg(v: object) -> str:
+    s = str(v).lstrip("'")
+    if "] " in s:
+        s = s.split("] ", 1)[-1].lstrip("'")
+    return s

@@ -19,15 +19,6 @@ History (latest 3):
   - 2.5.12 (2026-06-14): get_excel_context_from_hwnd: sheet_id 指定時は全ブック走査（アクティブブック誤結合を防止）。
   - 2.5.11 (2026-06-06) restore_screen_updating ヘルパを追加（restore_on_exit=False 利用後の復帰用）。
   - 2.5.10 (2026-06-06) suspend_sheet_updates: restore_on_exit=False で ScreenUpdating 復帰を呼び出し側に委譲。
-  - 2.5.9 (2026-06-04) Excel シート名: sanitize_excel_sheet_name / unique / 分割用 part 名（最大 31 文字）。
-  - 2.5.8 (2026-06-04) write_chunk: progress_notify_rows で COM 分割を細かくし progress_cb を高頻度化（chunk_rows は維持可）。
-  - 2.5.6 (2026-04-07) excel_try_set_main_commandbars_enabled: SHOW.TOOLBAR を廃止（ウィンドウ違和感が大きいため）。CommandBars のみ。
-  - 2.5.5 (2026-04-07) excel_try_set_main_commandbars_enabled: ExecuteExcel4Macro SHOW.TOOLBAR（後述 2.5.6 で撤回）。
-  - 2.5.4 (2026-04-07) excel_try_set_main_commandbars_enabled: CommandBars は Item(name) で取得（[] は COMRetryObjectWrapper で不可）。
-  - 2.5.2 (2026-04-01) autofit_sheet_columns: 指定矩形の列 AutoFit（AUTOFIT_MAX_ROWS 超はヘッダ行フォールバック等）。
-  - 2.5.1 (2026-03-09) clear_used_range_overflow で Clear（内容+書式）を優先。Ctrl+End がデータ領域外へ飛ばないよう UsedRange 縮小を促す。
-  - 2.5.0 (2026-03-09) 一括書込み高速化: suspend_sheet_updates コンテキストマネージャと clear_used_range_overflow ヘルパを追加。
-  - 2.4.3 (2026-02-25) Fix: remove unused import for Ruff; no behavior change.
 """
 
 from __future__ import annotations

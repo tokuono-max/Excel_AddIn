@@ -16,6 +16,9 @@
     "dist",
     "build"
   ],
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
   "typeCheckingMode": "basic",
   "reportMissingImports": true,
   "reportMissingModuleSource": false,

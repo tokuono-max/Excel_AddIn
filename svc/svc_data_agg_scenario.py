@@ -23,7 +23,6 @@ History (latest 3):
   - 0.2.2 (2026-04-04) excel_options: new_sheet_custom_name・custom_sheet_name ルール・検証。
   - 0.2.1 (2026-04-04) excel_options（メイン Excel タブ）既定・normalize_excel_options・検証。
   - 0.1.0 (2026-03-18) 新規作成。load_scenario / validate_scenario / save_scenario API。
-  - 0.2.0 (2026-03-23) 系統排他検証・複製追加・結合パス項目・シナリオID・デバッグフラグ・スキーマ文書化。
 """
 from __future__ import annotations
 

@@ -3,30 +3,16 @@
 Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
-Updated: 2026-08-19
-Version: 0.1.16
+Updated: 2026-08-24
+Version: 0.1.19
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
-  - 0.1.16 (2026-08-19) 連携キー carry_empty: 同一シート内の空欄を前回非空値で埋める。
-  - 0.1.15 (2026-08-19) 同一項目の複数シナリオと含むシート全走査をソース番号付きで連結。
-  - 0.1.14 (2026-08-18) Excel 読取: 文字列は無変換、日付/小数書式のみ寄せる（0埋め書式は適用しない）。
-  - 0.1.13 (2026-08-18) 連携一括読取が row_step を無視していた不具合を修正。
-  - 0.1.12 (2026-06-23) CSV Polars DF キャッシュ、link batch postprocess、スコープ内 legacy 禁止。
-  - 0.1.11 (2026-06-23) CSV 主キー縦/横反復の行列一括読取、Polars rows() 化、path_key キャッシュ。
-  - 0.1.10 (2026-06-23) CSV 行列キャッシュ（xlsx_workbook_scope 内必須）と link/join 列一括読取 fast path。
-  - 0.1.9 (2026-06-03) .xlsm を OpenXML Excel（.xlsx と同経路）として読取。is_openxml_excel_suffix ヘルパ追加。
-  - 0.1.8 (2026-05-29) Phase B: 大量反復シートの事前 materialize、反復読取の行列経路、join バッチ走査の行列化。
-  - 0.1.6 (2026-04-07) extract_item_values: sources 空はファイル名ではなく主値 [""]（未設定列を一括出力で空にする）。
-  - 0.1.5 (2026-04-04) read_only シートを iter_rows で一度具体化し ws[ref] の都度走査を避ける（スコープ内・繰り返し抽出）。
-  - 0.1.4 (2026-04-04) DATA_AGG_PER_FILE_TIMING=1 時 load_workbook 所要をスレッドローカルに集計し consume で取得。
-  - 0.1.7 (2026-04-14) extract_item_bundle(link/join): deepcopy を浅いコピーに変更（主値・連携は共有、再計算分のみ新 dict）。
-  - 0.1.3 (2026-04-01) xlsx_workbook_scope: compute_batch 等で同一 .xlsx の load_workbook をファイル単位で再利用。
-  - 0.1.2 (2026-03-28) 主キー・連携の UI 正規表現を廃止。連携は checks→value_shape_script。link/join 抽出後 postprocess_link_rule_value。
-  - 0.1.1 (2026-03-28) extract_item_values: 主値に正規表現・チェック・value_shape_script（core.core_value_shape）を適用。
-  - 0.1.0 (2026-03-18) 新規作成。extract_metadata / extract_from_filename / extract_cell / extract_item_values。
+  - 0.1.19 (2026-08-24) 空スキップ後の非連番 rule_iter でも連携/結合を列一括読取して拾う。
+  - 0.1.18 (2026-08-24) 連携/結合列が主キーと同じ長さ・同じ iter なら揃えコピーを省略。
+  - 0.1.17 (2026-08-24) 一部ソースのみの連携/結合列を主キー行に揃える。短い列の iter 振り直しで他ソース行へ載る不具合を修正。
 """
 from __future__ import annotations
 
@@ -68,6 +54,7 @@ from svc.data_agg_primary_end import (  # noqa: E402
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_sheet_resolve import (  # noqa: E402
     list_workbook_sheet_names,
+    parse_comma_separated_patterns,
     patch_item_sheet_exact,
     resolve_all_sheet_names_by_rule,
     source_skips_sheet_extract,
@@ -149,18 +136,12 @@ def consume_workbook_open_ms_for_path(file_path: str) -> int:
     return int(sec * 1000.0 + 0.5)
 
 
-@contextmanager
-def xlsx_workbook_scope() -> Iterator[None]:
+def new_workbook_cache_frame() -> dict[str, Any]:
     """
-    入れ子可。スレッドローカル。同一スコープ内では resolve 済みパス文字列キーで read_only Workbook を1つだけ保持し、
-    終了時にまとめて close する。スコープ外では従来どおり extract_cell ごとに開閉する。
-    各フレームは wbs（パス→Workbook）と sheet_mats（(パスキー, シート名)→行行列）を持つ。
+    workbook / シート行列 / CSV キャッシュ用の空フレーム。
+    マスタ項目単位など、呼び出し側が寿命管理する共有キャッシュに使う。
     """
-    stack: list[dict[str, Any]] = getattr(_tls_wb_scope, "stack", None)
-    if stack is None:
-        stack = []
-        _tls_wb_scope.stack = stack
-    frame: dict[str, Any] = {
+    return {
         "wbs": {},
         "sheet_mats": {},
         "sheet_hits": {},
@@ -169,33 +150,86 @@ def xlsx_workbook_scope() -> Iterator[None]:
         "xls_books": {},
         "xls_sheet_mats": {},
     }
+
+
+def close_workbook_cache_frame(frame: Optional[dict[str, Any]]) -> None:
+    """フレーム内の Workbook / xlrd Book を閉じ、辞書を空にする。"""
+    if not frame:
+        return
+    for wb in list((frame.get("wbs") or {}).values()):
+        try:
+            wb.close()
+        except Exception:
+            pass
+    try:
+        from svc.data_agg_xls_io import close_xls_workbook
+    except Exception:
+        close_xls_workbook = None  # type: ignore[assignment]
+    for book in list((frame.get("xls_books") or {}).values()):
+        if close_xls_workbook is not None:
+            try:
+                close_xls_workbook(book)
+            except Exception:
+                pass
+        else:
+            try:
+                release = getattr(book, "release_resources", None)
+                if callable(release):
+                    release()
+            except Exception:
+                pass
+    for k in (
+        "wbs",
+        "sheet_mats",
+        "sheet_hits",
+        "csv_mats",
+        "csv_dfs",
+        "xls_books",
+        "xls_sheet_mats",
+    ):
+        d = frame.get(k)
+        if isinstance(d, dict):
+            d.clear()
+
+
+def _xlsx_scope_stack() -> list[dict[str, Any]]:
+    stack: list[dict[str, Any]] = getattr(_tls_wb_scope, "stack", None)
+    if stack is None:
+        stack = []
+        _tls_wb_scope.stack = stack
+    return stack
+
+
+@contextmanager
+def xlsx_workbook_scope(
+    *, shared_frame: Optional[dict[str, Any]] = None
+) -> Iterator[None]:
+    """
+    入れ子可。スレッドローカル。同一スコープ内では resolve 済みパス文字列キーで read_only Workbook を1つだけ保持し、
+    終了時にまとめて close する。スコープ外では従来どおり extract_cell ごとに開閉する。
+    各フレームは wbs（パス→Workbook）と sheet_mats（(パスキー, シート名)→行行列）を持つ。
+
+    shared_frame を渡した場合は既存フレームを TLS に載せるだけ（exit で close しない）。
+    マスタ項目単位キャッシュなど、別スレッドから同じ dict を bind し直す用途。
+    """
+    stack = _xlsx_scope_stack()
+    owned = shared_frame is None
+    frame = new_workbook_cache_frame() if owned else shared_frame
+    assert frame is not None
     stack.append(frame)
     try:
         yield
     finally:
         stack.pop()
-        for wb in frame["wbs"].values():
-            try:
-                wb.close()
-            except Exception:
-                pass
-        try:
-            from svc.data_agg_xls_io import close_xls_workbook
-        except Exception:
-            close_xls_workbook = None  # type: ignore[assignment]
-        for book in (frame.get("xls_books") or {}).values():
-            if close_xls_workbook is not None:
-                try:
-                    close_xls_workbook(book)
-                except Exception:
-                    pass
-            else:
-                try:
-                    release = getattr(book, "release_resources", None)
-                    if callable(release):
-                        release()
-                except Exception:
-                    pass
+        if owned:
+            close_workbook_cache_frame(frame)
+
+
+@contextmanager
+def bind_workbook_cache_frame(frame: dict[str, Any]) -> Iterator[None]:
+    """既存フレームを現在スレッドの TLS に載せる（exit で close しない）。"""
+    with xlsx_workbook_scope(shared_frame=frame):
+        yield
 
 
 def _xlsx_workbook_cache_top() -> Optional[dict[str, Any]]:
@@ -203,6 +237,43 @@ def _xlsx_workbook_cache_top() -> Optional[dict[str, Any]]:
     if not stack:
         return None
     return stack[-1]
+
+
+def xlsx_workbook_scope_active() -> bool:
+    """スレッド内に workbook キャッシュスコープがあるとき True。"""
+    return _xlsx_workbook_cache_top() is not None
+
+
+def _xlsx_cache_path_key(file_path: str | Path) -> str:
+    try:
+        return str(Path(file_path).resolve())
+    except Exception:
+        return str(file_path)
+
+
+def xlsx_workbook_path_cached(file_path: str | Path) -> bool:
+    """
+    現在の TLS スコープ先頭フレームに、当該パスのブック／CSV 実体が既にあるとき True。
+    （シート行列だけのヒットは「未オープン」扱い → 進捗は [F]）
+    """
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return False
+    key = _xlsx_cache_path_key(file_path)
+    if key in (frame.get("wbs") or {}):
+        return True
+    if key in (frame.get("xls_books") or {}):
+        return True
+    if key in (frame.get("csv_mats") or {}):
+        return True
+    if key in (frame.get("csv_dfs") or {}):
+        return True
+    return False
+
+
+def xlsx_progress_cache_mark(file_path: str | Path) -> str:
+    """進捗文言用: キャッシュ再利用なら '[C] '、新規読込なら '[F] '。"""
+    return "[C] " if xlsx_workbook_path_cached(file_path) else "[F] "
 
 
 def _load_workbook_readonly(path: Path) -> Any:
@@ -275,7 +346,11 @@ def _has_polars() -> bool:
 def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -> bool:
     """
     セル系ソースの UI 保存ブロック（`ui_scenario_source_v1`、レガシーキーは source_ui_block で吸収）内の file_pattern / file_name_rule を評価する。
-    file_pattern が空ならフィルタなし（True）。大小文字は区別しない（§10.3.3）。
+    file_pattern が空（トークンなし）ならフィルタなし（True）。大小文字は区別しない（§10.3.3）。
+
+    複数パターンはカンマ区切り（``parse_comma_separated_patterns``。シート名条件と同じ）。
+    - 完全一致／含む: いずれかのトークンに該当（OR）
+    - 含まない: いずれのトークンも含まない（AND of exclusions）
     """
     stype = (src.get("type") or "cell").strip().lower()
     if stype != "cell":
@@ -295,16 +370,16 @@ def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -
         }
         if norm_exts and ext_l not in norm_exts:
             return False
-    pattern = str(block.get("file_pattern") or "").strip()
-    if not pattern:
+    tokens = parse_comma_separated_patterns(block.get("file_pattern"))
+    if not tokens:
         return True
     rule = str(block.get("file_name_rule") or "含む").strip()
-    pat_l = pattern.lower()
+    toks_l = [t.lower() for t in tokens]
     if "完全一致" in rule or rule.lower() in ("exact", "equals"):
-        return stem_l == pat_l
+        return stem_l in set(toks_l)
     if "含まない" in rule or rule.lower() in ("exclude", "not_contains"):
-        return pat_l not in stem_l
-    return pat_l in stem_l
+        return all(t not in stem_l for t in toks_l)
+    return any(t in stem_l for t in toks_l)
 
 
 def matching_sheets_for_item(
@@ -1827,6 +1902,145 @@ def _iter_contexts_rule_indices_contiguous(iter_contexts: list[dict[str, Any]]) 
     return True
 
 
+def _bundle_file_path(bundle: dict[str, Any]) -> str:
+    """iteration_contexts 先頭から file_path を取る。"""
+    ictx = bundle.get("iteration_contexts") or []
+    if ictx and isinstance(ictx[0], dict):
+        return str(ictx[0].get("file_path") or "")
+    return ""
+
+
+def _ctx_iter_index(ctx: Any, fallback: int) -> int:
+    """コンテキストの iter_index。不正時は fallback。"""
+    if not isinstance(ctx, dict):
+        return int(fallback)
+    try:
+        return int(ctx.get("iter_index", fallback))
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _series_already_aligned_to_primary(
+    values: list[Any],
+    contexts: list[Any],
+    n_prim: int,
+) -> bool:
+    """値・コンテキストが主キー行数と同じで、iter_index が 0..n-1 のとき True。"""
+    if n_prim < 1 or len(values) != n_prim:
+        return False
+    if not isinstance(contexts, list) or len(contexts) != n_prim:
+        return False
+    for i, ctx in enumerate(contexts):
+        if _ctx_iter_index(ctx, i) != i:
+            return False
+    return True
+
+
+def _align_one_rule_series(
+    values: list[Any],
+    contexts: list[Any],
+    n_prim: int,
+    *,
+    file_path: str,
+) -> tuple[list[Any], list[Any]]:
+    """
+    値列を主キー反復の長さに揃える。iter_index がある値はその行へ置く（先勝ち）。
+    カード専用列など短い系列がリスト先頭＝ユニット行になるのを防ぐ。
+    すでに同じ長さ・同じ iter ならコピーしない。
+    """
+    if n_prim < 1:
+        return [], []
+    if _series_already_aligned_to_primary(values, contexts, n_prim):
+        return values, contexts
+    placed_v: list[Any] = [None] * n_prim
+    placed_c: list[Any] = [None] * n_prim
+    seen: set[int] = set()
+    n_ctx = len(contexts) if isinstance(contexts, list) else 0
+    n_pair = max(len(values), n_ctx)
+    for i in range(n_pair):
+        v = values[i] if i < len(values) else None
+        ctx = contexts[i] if i < n_ctx else None
+        ix = _ctx_iter_index(ctx, i)
+        if ix < 0 or ix >= n_prim or ix in seen:
+            continue
+        seen.add(ix)
+        placed_v[ix] = v
+        if isinstance(ctx, dict):
+            c = dict(ctx)
+            c["iter_index"] = int(ix)
+            placed_c[ix] = c
+        else:
+            placed_c[ix] = {"file_path": str(file_path), "iter_index": int(ix)}
+    for i in range(n_prim):
+        if placed_c[i] is None:
+            placed_c[i] = {"file_path": str(file_path), "iter_index": int(i)}
+    return placed_v, placed_c
+
+
+def _align_link_join_series_to_primary(bundle: dict[str, Any]) -> None:
+    """link/join/path_item の値列を primary_values の行数・iter_index に揃える。"""
+    n_prim = len(bundle.get("primary_values") or [])
+    if n_prim < 1:
+        return
+    fp = _bundle_file_path(bundle)
+    for vkey, ckey in (
+        ("link_values", "link_contexts"),
+        ("join_values", "join_contexts"),
+        ("path_item_values", "path_item_contexts"),
+    ):
+        vd = bundle.get(vkey)
+        if not isinstance(vd, dict) or not vd:
+            continue
+        cd = bundle.get(ckey)
+        if not isinstance(cd, dict):
+            cd = {}
+            bundle[ckey] = cd
+        for t in list(vd.keys()):
+            vals = vd.get(t)
+            if not isinstance(vals, list):
+                continue
+            ctxs = cd.get(t)
+            if not isinstance(ctxs, list):
+                ctxs = []
+            if _series_already_aligned_to_primary(vals, ctxs, n_prim):
+                continue
+            nv, nc = _align_one_rule_series(vals, ctxs, n_prim, file_path=fp)
+            vd[t] = nv
+            cd[t] = nc
+
+
+def _compress_series_by_kept_iters(
+    values: list[Any],
+    contexts: list[Any],
+    old_to_new: dict[int, int],
+    n_kept: int,
+    file_path: str,
+) -> tuple[list[Any], list[Any]]:
+    """スキップ後、元 iter_index が残った行だけを新しい連番へ移す。"""
+    new_v: list[Any] = [None] * n_kept
+    new_c: list[Any] = [None] * n_kept
+    n_ctx = len(contexts) if isinstance(contexts, list) else 0
+    n_pair = max(len(values), n_ctx)
+    for i in range(n_pair):
+        v = values[i] if i < len(values) else None
+        ctx = contexts[i] if i < n_ctx else None
+        old_ix = _ctx_iter_index(ctx, i)
+        new_i = old_to_new.get(old_ix)
+        if new_i is None or new_c[new_i] is not None:
+            continue
+        new_v[new_i] = v
+        if isinstance(ctx, dict):
+            c = dict(ctx)
+            c["iter_index"] = int(new_i)
+            new_c[new_i] = c
+        else:
+            new_c[new_i] = {"file_path": str(file_path), "iter_index": int(new_i)}
+    for i in range(n_kept):
+        if new_c[i] is None:
+            new_c[i] = {"file_path": str(file_path), "iter_index": int(i)}
+    return new_v, new_c
+
+
 def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any]) -> None:
     """
     skip_empty_primary 対象ソースの空主キー反復を、連携・結合・path_item も含めて落とす。
@@ -1868,6 +2082,9 @@ def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any])
     if not any_skip or not any(drop):
         return
     keep_idx = [i for i, d in enumerate(drop) if not d]
+    old_to_new = {old_i: new_i for new_i, old_i in enumerate(keep_idx)}
+    n_kept = len(keep_idx)
+    fp = _bundle_file_path(bundle)
 
     def _take(lst: Any) -> list[Any]:
         if not isinstance(lst, list):
@@ -1906,33 +2123,29 @@ def _apply_skip_empty_primary_filter(bundle: dict[str, Any], sources: list[Any])
         new_ictx.append(ctx)
     bundle["iteration_contexts"] = new_ictx
 
-    for key in (
-        "link_values",
-        "link_contexts",
-        "join_values",
-        "join_contexts",
-        "path_item_values",
-        "path_item_contexts",
+    # 値列はリスト位置ではなく元 iter_index で残す（短いカード専用列がユニット行に載らないようにする）
+    for vkey, ckey in (
+        ("link_values", "link_contexts"),
+        ("join_values", "join_contexts"),
+        ("path_item_values", "path_item_contexts"),
     ):
-        d = bundle.get(key)
-        if not isinstance(d, dict):
+        vd = bundle.get(vkey)
+        if not isinstance(vd, dict):
             continue
-        for t in list(d.keys()):
-            taken = _take(d[t])
-            # コンテキストの iter_index を圧縮後の主値行番号に合わせる
-            # （_assign_series_to_rows_by_context が file_path+iter_index で紐づけるため）
-            if key.endswith("_contexts"):
-                remapped: list[Any] = []
-                for new_i, ctx in enumerate(taken):
-                    if isinstance(ctx, dict):
-                        c = dict(ctx)
-                        c["iter_index"] = int(new_i)
-                        remapped.append(c)
-                    else:
-                        remapped.append(ctx)
-                d[t] = remapped
-            else:
-                d[t] = taken
+        cd = bundle.get(ckey)
+        if not isinstance(cd, dict):
+            cd = {}
+            bundle[ckey] = cd
+        for t in list(vd.keys()):
+            vals = vd.get(t)
+            if not isinstance(vals, list):
+                continue
+            ctxs = cd.get(t)
+            if not isinstance(ctxs, list):
+                ctxs = []
+            nv, nc = _compress_series_by_kept_iters(vals, ctxs, old_to_new, n_kept, fp)
+            vd[t] = nv
+            cd[t] = nc
 
     # スパンを圧縮後の長さに更新
     new_spans: dict[int, tuple[int, int]] = {}
@@ -3053,7 +3266,10 @@ def _merge_primary_sheet_bundles(
                     for i, ctx in enumerate(vals):
                         c = dict(ctx) if isinstance(ctx, dict) else {}
                         c["file_path"] = str(c.get("file_path") or file_path)
-                        c["iter_index"] = int(g_off + i)
+                        # シート内の iter_index（ソース区間）を維持し、シート連結分だけずらす。
+                        # リスト位置 i で振り直すと、カード専用列がユニット行（iter 0）に載る。
+                        local_ix = _ctx_iter_index(c, i)
+                        c["iter_index"] = int(g_off + local_ix)
                         c["sheet_name"] = sh
                         out_list.append(c)
                 else:
@@ -3073,6 +3289,7 @@ def _merge_primary_sheet_bundles(
     merged["iteration_contexts"] = ictx_all
     merged["_sheet_parts"] = sheet_parts
     merged["_cell_source_spans"] = _merged_cell_source_spans(parts)
+    _align_link_join_series_to_primary(merged)
     return merged
 
 
@@ -3101,7 +3318,8 @@ def _append_rule_maps_with_offset(
             else:
                 c = {"file_path": str(file_path), "base_cell": None}
             c["file_path"] = str(c.get("file_path") or file_path)
-            c["iter_index"] = int(g_off + i)
+            local_ix = _ctx_iter_index(c, i)
+            c["iter_index"] = int(g_off + local_ix)
             out_ctx.append(c)
 
 
@@ -3189,6 +3407,7 @@ def _extract_link_join_across_sheet_parts(
             g_off=g_off,
             file_path=fp,
         )
+    _align_link_join_series_to_primary(out)
     return out
 
 
@@ -3337,6 +3556,20 @@ def _build_source_iter_contexts(
     return iter_contexts
 
 
+def _rule_iter_indices_list(iter_contexts: list[dict[str, Any]]) -> list[int]:
+    """各コンテキストの rule_iter_index（不正時はリスト位置）。"""
+    out: list[int] = []
+    for i, ic in enumerate(iter_contexts):
+        if not isinstance(ic, dict):
+            out.append(i)
+            continue
+        try:
+            out.append(int(ic.get("rule_iter_index", i)))
+        except (TypeError, ValueError):
+            out.append(i)
+    return out
+
+
 def _append_rule_series_to_bundle(
     *,
     bundle: dict[str, Any],
@@ -3350,18 +3583,22 @@ def _append_rule_series_to_bundle(
     n_src: int,
     cancel_check: Optional[Callable[..., None]] = None,
 ) -> None:
-    """link/join の系列値を bundle に追記（非連番 rule_iter はコンテキスト経路）。"""
-    use_fast = _iter_contexts_rule_indices_contiguous(iter_contexts)
+    """link/join の系列値を bundle に追記。非連番 rule_iter も列一括読取して拾う。"""
+    ris = _rule_iter_indices_list(iter_contexts)
+    n_read = int(n_src)
+    if ris:
+        n_read = max(n_read, max(ris) + 1)
     vals_fast = (
         _extract_cell_rule_series_fast(
-            file_path, src, rule, n_src=n_src, cancel_check=cancel_check
+            file_path, src, rule, n_src=n_read, cancel_check=cancel_check
         )
-        if use_fast
-        else None
+        if n_read > 0
+        else []
     )
     if isinstance(vals_fast, list):
         for local_i, iter_ctx in enumerate(iter_contexts):
-            v = vals_fast[local_i] if local_i < len(vals_fast) else None
+            ri = ris[local_i] if local_i < len(ris) else local_i
+            v = vals_fast[ri] if 0 <= ri < len(vals_fast) else None
             bundle[values_key].setdefault(target, []).append(v)
             bundle[contexts_key].setdefault(target, []).append(
                 {
@@ -3525,7 +3762,10 @@ def _extract_item_bundle_impl(
                         cancel_check=cancel_check,
                     )
         if debug_step_scope == "link":
+            _align_link_join_series_to_primary(bundle)
             _apply_carry_empty_link_values(bundle, sources)
+        elif debug_step_scope == "join":
+            _align_link_join_series_to_primary(bundle)
         return bundle
 
     cell_spans: dict[int, tuple[int, int]] = {}
@@ -3713,6 +3953,7 @@ def _extract_item_bundle_impl(
         bundle["path_item_contexts"][jh] = [
             {"file_path": str(file_path), "iter_index": int(i)} for i in range(n)
         ]
+    _align_link_join_series_to_primary(bundle)
     _apply_skip_empty_primary_filter(bundle, sources if isinstance(sources, list) else [])
     _apply_carry_empty_link_values(bundle, sources if isinstance(sources, list) else [])
     return bundle

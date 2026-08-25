@@ -25,6 +25,47 @@ def test_classify_sheet_rule() -> None:
     assert classify_sheet_rule("含まない") == "not_contains"
 
 
+def test_parse_sheet_name_patterns_strips_edge_commas() -> None:
+    from svc.data_agg_sheet_resolve import (
+        parse_comma_separated_patterns,
+        parse_sheet_name_patterns,
+    )
+
+    assert parse_sheet_name_patterns(",R_,実装,") == ["R_", "実装"]
+    assert parse_sheet_name_patterns("R_, 実装") == ["R_", "実装"]
+    assert parse_sheet_name_patterns("a,,b") == ["a", "b"]
+    assert parse_sheet_name_patterns("  ,  , ") == []
+    assert parse_sheet_name_patterns("") == []
+    assert parse_sheet_name_patterns(None) == []
+    # ファイル名フィルタと同一実装
+    assert parse_comma_separated_patterns(",光特性,紐づけ,") == ["光特性", "紐づけ"]
+    assert parse_comma_separated_patterns("光特性, 紐づけ") == parse_sheet_name_patterns(
+        "光特性, 紐づけ"
+    )
+
+
+def test_resolve_multi_patterns() -> None:
+    names = ["Data", "Foo_R_Bar", "実装シート", "Other", "R_Only"]
+    assert resolve_all_sheet_names_by_rule(names, "含む", ",R_,実装,") == [
+        "Foo_R_Bar",
+        "実装シート",
+        "R_Only",
+    ]
+    assert resolve_all_sheet_names_by_rule(names, "完全一致", "Data,Other") == [
+        "Data",
+        "Other",
+    ]
+    assert resolve_all_sheet_names_by_rule(names, "含まない", "R_,実装") == [
+        "Data",
+        "Other",
+    ]
+    # 単一パターン互換
+    assert resolve_all_sheet_names_by_rule(names, "含む", "R_") == [
+        "Foo_R_Bar",
+        "R_Only",
+    ]
+
+
 def test_resolve_four_modes() -> None:
     names = ["Data", "Foo_R_Bar", "Other", "R_Only"]
     assert resolve_sheet_name_by_rule(names, "左端シート", "") == "Data"

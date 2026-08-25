@@ -21,37 +21,6 @@ History (latest 3):
   - 1.4.65 (2026-06-30) csv_ld 進捗: show 直後 ensure_progress_dialog_front。ファイル確定直前に pump（sv/mg 累積後 Z順）。
   - 1.4.64 (2026-06-29) modeless 二重 ensure_front を削除（ui_common ensure_front 強化に一本化）。
   - 1.4.63 (2026-06-29) csv_ld/csv_sv: csv_sp 分割・同名確認・csv_mg 結合のモーダル表示中はファイル選択 IPC を CANCEL で拒否。
-  - 1.4.62 (2026-06-29) ui warmup: data_agg / dupli / csv_mg / csv_sp の import と _get_cfg を起動時に前倒し。
-  - 1.4.61 (2026-06-13) csv_ld: 完了通知の自動 close は行わない（ui_dialog_progress 側で非モーダル show に変更済み）。
-  - 1.4.60 (2026-06-06) 旧 COM WaitForm 解除（install_ribbon_startup_wait_dismiss）を削除。.ready 合図のみ。
-  - 1.4.59 (2026-06-06) create_dialog 成功時に write_waitform_ready_signal（VBA DoEvents 待ち合図）。
-  - 1.4.57 (2026-05-03) ui_qt.ui_help help_show: dlg.exec 直前に bump_front_follow_deferred_ensure_generation と HELP_BEFORE_MODAL_EXEC の QEventLoop 待ち（重複ジャンプ後のヘルプ前面化のため。ui_help.json の TOPMOST/FOLLOW は変更なし）。
-  - 1.4.56 (2026-04-18) Windows: `ensure_ui_server_windows_dll_search_paths` に ``app`` ・ ``PySide6\\lib`` と ``PATH`` 先頭付与を追加（Shiboken.pyd の DLL 解決）。
-  - 1.4.55 (2026-04-18) Windows: `shared_dll_bootstrap.ensure_ui_server_windows_dll_search_paths`（shared + EXE 直下 + shiboken6/PySide6）を PySide6 より前に実行。
-  - 1.4.54 (2026-04-18) Windows: `app\\shared` への `add_dll_directory` を **PySide6 より前**に移動（Nuitka+shiboken が shared 配下にある場合の ImportError 回避）。
-  - 1.4.53 (2026-04-13) create_dialog 成功後に install_ribbon_startup_wait_dismiss_on_first_show。設定エラー QMessageBox 前に notify_wait_form_ready。
-  - 1.4.52 (2026-04-12) Windows: main 冒頭で FreeConsole（コンソール付き起動時のモーダル終了後フォーカスが CMD に戻る抑止）。HC_UI_KEEP_CONSOLE=1 で無効。
-  - 1.4.51 (2026-04-10) progress かつ module=ui_qt.ui_dupli でも sheet_id 空を許可（重複 hlclr 進捗の dispatch 拒否を防ぐ）。
-  - 1.4.50 (2026-04-10) mutex 取得成功直後に `core.ipc_cleanup.run_ui_server_startup_sweeps`（`requests` TTL・`control` の古い `*_starting.flag`）。二重起動時はスキップ。
-  - 1.4.49 (2026-04-09) csv_mg 結合メイン: dlg.finished → QEventLoop.quit を QueuedConnection にし、done()/close 完了後に exec が戻る（キャンセル時の空枠ゴースト抑止）。exec 直後に processEvents を追加。
-  - 1.4.48 (2026-04-09) shutdown 応答改善: 200ms ポーリングで nested QEventLoop を quit、全トップレベルを close。clear_shutdown_flag を mutex 取得後へ移動。
-  - 1.4.47 (2026-04-09) csv_mg 結合メイン: QDialog.exec の代わりに show + ローカル QEventLoop（finished で終了）。IPC／戻り値契約は従来どおり。親なし exec 由来の初回位置チラつき抑止（A案）。
-  - 1.4.46 (2026-04-09) csv_mg 結合メイン: exec 直前に prepare_dialog_excel_center_before_show（excel_rect）を実行。初回表示のモニタ中央→Excel 中央のチラつきを抑止。CENTER_ON_EXCEL 時のみ（_hc_csv_mg_center_on_excel）。
-  - 1.4.45 (2026-04-09) csv_sp_conflict teardown: stale close を即時実行＋競合専用 pump 上限。stale 内は processEvents×4 を _pump_deferred_deletes に統一。
-  - 1.4.44 (2026-04-09) CONFLICT_HWND_DIAG: Win32 クラス名・ウィンドウテキスト・親/ルート HWND。任意で DIAG_TREE で Excel 子孫列挙。
-  - 1.4.43 (2026-04-09) CONFLICT_HWND_DIAG 出力先を get_diag_logger（hc_csv_diag.log）へ変更。
-  - 1.4.42 (2026-04-09) HC_CSV_SP_CONFLICT_HWND_DIAG: csv_sp_conflict／進捗前後の HWND 状態ログ（ゴースト枠の切り分け用）。
-  - 1.4.41 (2026-04-09) csv_sp_conflict: 結合メインと同様にアクティブ参照を保持し、csv_sp progress show 直前に hide/close/flush（_close_stale_csv_sp_conflict_if_any）。キャンセル時は参照のみ解放。
-  - 1.4.40 (2026-04-09) csv_sp progress: show 直前に pump_deferred_deletes＋QTimer.singleShot(~70ms) で prepare/show を遅延（conflict 空枠 HWND の消化余地を確保）。
-  - 1.4.39 (2026-04-09) csv_sp_conflict: exec 復帰後に get_result を先に確定し、その後 hide/close/deleteLater。DeferredDelete 消化のため processEvents を上限付きで追加（進捗前の空枠ゴースト低減）。
-  - 1.4.38 (2026-04-09) import 時の Global\\HC_UI_SERVER を廃止。単一インスタンスは main() 内の Global\\HC_QT_UI_SERVER のみ（is_ui_server_running と整合。二重 mutex による誤起動抑止）。
-  - 1.4.37 (2026-04-09) csv_sp モーダル・csv_sp 進捗: exec/show 前に prepare_dialog_excel_center_before_show。csv_sp_conflict 終了後 hide+close+deleteLater。
-  - 1.4.36 (2026-04-09) csv_sp_conflict: UI_TRACE に modal_exec_ms / post_exec_teardown_ms を追加（exec 復帰と deleteLater 後の切り分け）。
-  - 1.4.35 (2026-04-09) csv_sp_conflict のみ: exec 後は deleteLater＋1x processEvents（hide/close/三重 flush 省略）。枠ゴースト低減。csv_sp 分割・csv_mg は従来どおり。
-  - 1.4.34 (2026-04-09) csv_sp_conflict のみ: exec＋後処理完了までの経過 ms を UI_TRACE に記録（ゴースト枠調査用）。csv_mg 無変更。
-  - 1.4.33 (2026-04-08) csv_sp: 分割メイン参照を保持し、進捗 show 直前に flush（csv_mg と同様の外枠残留対策）。
-  - 1.4.32 (2026-04-08) csv_mg 進捗: ui_server 側の二重 ensure_front（0/120ms）を廃止。位置調整は ProgressDialog.showEvent に一本化。
-  - 1.4.31 (2026-04-05) csv_mg: 進捗表示直前に結合メイン参照で再 hide/flush（deleteLater 遅延で外枠が進捗と同居するのを防ぐ）。
 """
 
 import os

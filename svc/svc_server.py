@@ -18,19 +18,6 @@ History (latest 3):
   - 0.1.22 (2026-07-03): resolve_fresh_book_after_ui_wait — UI 待ち後は古い Book 参照を使わず HWND 再取得（COM_NG 根本対策）。
   - 0.1.21 (2026-07-03): attach_book — UI/長処理 action は cache 無効化＋HWND 再取得。com_error 後 PyErr_Clear・1 回リトライ。操作後キャッシュ破棄。
   - 0.1.20 (2026-06-16): com_monitor 掃除時に svc_last_com_hwnd.txt を同期。warmup リスト見直しと整合。
-  - 0.1.19 (2026-06-14): B+ — 成功時は常駐維持。COM 汚染時のみ com_recycle。HWND 監視はキャッシュ掃除のみ。
-  - 0.1.18 (2026-06-14): A+ — excel_com_session で COM recycle を全 Excel action に統一。
-  - 0.1.17 (2026-06-14): book_action 成功後に svc_server を自終了（1 操作 1 プロセス COM）。attach 失敗時も recycle。
-  - 0.1.15 (2026-06-14): attach_book に xlc 経路優先・COM アパートメント復旧・HWND 切替時の全リセット。
-  - 0.1.14 (2026-06-14): Excel 終了後の stale COM 検知・再バインド・RPC エラー時リトライ。
-  - 0.1.13 (2026-06-14): _attach_book マルチ Excel 対策（xw.apps 優先・他インスタンス COM 解放・HWND キャッシュ）。
-  - 0.1.12 (2026-06-13): _attach_book を HWND 直結＋短リトライ（マルチ Excel / 起動直後レース対策）。
-  - 0.1.11 (2026-04-13) `_process_one` finally: `SVC_ACTIONS_NOTIFY_WAITFORM_AFTER_HANDLER` と data_agg 失敗時に notify_wait_form_ready。
-  - 0.1.10 (2026-04-11) `SVC_SERVER_ACTION_KEYS` 公開（`core.ribbon_public_to_svc` との整合テスト用）。
-  - 0.1.9 (2026-04-10) mutex 取得成功直後に `core.ipc_cleanup.run_svc_server_startup_sweeps`（`svc_requests`/`svc_results` TTL・古い `*_starting.flag`）。`svc_shutdown` クリア前。
-  - 0.1.8 (2026-03-09) ウォームアップ: config/svc_warmup.json の warmup_actions で指定可能に。無い場合は従来どおり環境変数にフォールバック。
-  - 0.1.7 (2026-03-09) ウォームアップ: 環境変数 HC_SVC_WARMUP_ACTIONS で動的に対象 action を指定可能。_get_warmup_actions / _run_warmup 追加。
-  - 0.1.0 (2026-02-15) 初版。
 """
 
 import importlib

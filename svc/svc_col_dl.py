@@ -11,9 +11,6 @@ History (latest 3):
   - 1.2.2 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.2.1 (2026-05-05) 進捗→サブ画面順序を ACK 待ちで保証。progress_closed_path を進捗UIへ渡し、進捗クローズ後に preview/done を表示（sleep 依存を廃止）。
   - 1.2.0 (2026-04-10) ヘッダ行除外の空欄判定、進捗キャンセル、確認モーダル、Interactive・完了待機。
-  - 1.1.0 (2026-04-06) HC_LOG_PERF: [COL_DL_PERF] phase / cumulative_ms。診断: [COL_DL_TRACE]。
-  - 1.0.0 (2026-03-11) hc_col_dl から分離。core_xlc/get_excel_context_from_hwnd、進捗IPC、完了通知。
-  - 初出 (2026-03-06) 計画に基づく svc_col_dl + ui_col_dl 新規作成。
 """
 from __future__ import annotations
 

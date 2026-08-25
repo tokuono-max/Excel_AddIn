@@ -13,14 +13,6 @@ History (latest 3):
   - 2.5.0 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（sleep 依存廃止、csv_ld 同型）。
   - 2.4.9 (2026-06-06) ハング緩和: clear/autofit/DONE を suspend with 内に統一（indent 修正）。
   - 2.4.8 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
-  - 2.4.7 (2026-04-06) HC_LOG_PERF: [HD_NR_PERF] phase / cumulative_ms。診断: [HD_NR_TRACE]。
-  - 2.4.6 (2026-03-10) 不足セル背景: 範囲単位の range.color = (r,g,b) のみに簡略化（セル単位フォールバック削除）。
-  - 2.4.5 (2026-03-10) 不足セル: ジャンプと背景色を分離。ジャンプ失敗時も背景色を実行。
-  - 2.4.4 (2026-03-09) 不足セル背景: xlwings 基本形 range.color = (r,g,b) に変更。
-  - 2.4.3 (2026-03-09) 不足セル背景: 範囲単位で range.color = 整数 に統一。
-  - 2.4.2 (2026-03-09) 不足セル背景: Excel Interior.Color は BGR のため BGR 整数で設定。セル単位で COM Interior を設定。
-  - 2.4.0 (2026-03-09) ヘッダを選択先頭行に設置・データは次行から・以前の行は残す。枠固定は結合ヘッダ行。不足時は先頭不足セルにジャンプし不足セルのみ背景色。有効データ最終行を header_first_row+len(output_2d) に統一。JSON: SHORTAGE_CELL_BG_RGB。
-  - 2.3.6 (2026-03-09) 不足行背景色を config/ui_hd_nr.json の DATA_SHORTAGE.SHORTAGE_ROW_BG_RGB に移行。
 """
 from __future__ import annotations
 

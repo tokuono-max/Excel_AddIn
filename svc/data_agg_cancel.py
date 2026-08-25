@@ -522,7 +522,8 @@ def _iter_recent_event_rows(book: Any, *, lookback_rows: int = 20) -> list[list[
         if last_r < 2:
             return []
         start_r = max(2, last_r - max(1, int(lookback_rows)) + 1)
-        raw = ws.range((start_r, 1), (last_r, 8)).value
+        n_col = len(getattr(write_mod, "EVENT_LOG_HEADERS", []) or []) or 9
+        raw = ws.range((start_r, 1), (last_r, n_col)).value
         if raw is None:
             return []
         if isinstance(raw, (list, tuple)) and raw and not isinstance(raw[0], (list, tuple)):
@@ -534,22 +535,42 @@ def _iter_recent_event_rows(book: Any, *, lookback_rows: int = 20) -> list[list[
     return []
 
 
+def _event_log_row_kind_sid_path_detail(
+    row: list[Any],
+) -> tuple[str, str, str, str]:
+    """レポート行から区分・シナリオID・対象パス・詳細を取る（列追加前後両対応）。"""
+    n = len(row)
+    # 新: 記録日時, 処理時間, 出力行数, 区分, 書込み方式, 出力シート名, シナリオID, 対象パス, 詳細
+    if n >= 9:
+        return (
+            str(row[3] or "").strip(),
+            str(row[6] or "").strip(),
+            str(row[7] or "").strip(),
+            str(row[8] or ""),
+        )
+    # 旧（処理時間あり・出力行数なし）: …, 処理時間, 区分, …, 詳細
+    return (
+        str(row[2] if n >= 3 else "").strip(),
+        str(row[5] if n >= 6 else "").strip(),
+        str(row[6] if n >= 7 else "").strip(),
+        str(row[7] if n >= 8 else ""),
+    )
+
+
 def _has_recent_cancel_summary(book: Any, *, scenario_id: str, scenario_path: str) -> bool:
     sid = str(scenario_id or "").strip()
     sp = str(scenario_path or "").strip()
     for row in reversed(_iter_recent_event_rows(book)):
-        kind = str(row[2] if len(row) >= 3 else "").strip()
+        kind, row_sid, row_sp, detail_s = _event_log_row_kind_sid_path_detail(row)
         if kind != "一括実行・中止":
             continue
-        row_sid = str(row[5] if len(row) >= 6 else "").strip()
-        row_sp = str(row[6] if len(row) >= 7 else "").strip()
         if sid and row_sid and sid != row_sid:
             continue
         if sp and row_sp and sp != row_sp:
             continue
-        if len(row) >= 8:
+        if detail_s:
             try:
-                d = json.loads(str(row[7] or ""))
+                d = json.loads(detail_s)
                 if str(d.get("結果") or "").strip() == "中止":
                     return True
             except Exception:

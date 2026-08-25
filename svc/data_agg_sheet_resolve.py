@@ -12,6 +12,30 @@ SheetRuleKind = Literal["left", "exact", "contains", "not_contains"]
 SHEET_MISS_LABEL = "（該当なし）"
 
 
+def parse_comma_separated_patterns(raw: str | None) -> list[str]:
+    """
+    カンマ区切りのパターン入力をトークン化する（シート名・ファイル名で共通）。
+
+    - 先頭・末尾・連続カンマによる空要素は捨てる（例: ``,R_,実装,`` → ``["R_", "実装"]``）
+    - 各要素は strip（前後空白除去）。空白のみの要素も捨てる
+    - 全体が空／空白のみ → []
+    """
+    s = "" if raw is None else str(raw)
+    if s.strip() == "":
+        return []
+    out: list[str] = []
+    for part in s.split(","):
+        tok = str(part).strip()
+        if tok:
+            out.append(tok)
+    return out
+
+
+def parse_sheet_name_patterns(raw: str | None) -> list[str]:
+    """シート名入力をカンマ区切りトークン化する。``parse_comma_separated_patterns`` と同じ。"""
+    return parse_comma_separated_patterns(raw)
+
+
 def classify_sheet_rule(rule: str | None) -> SheetRuleKind:
     """UI 文言／英語エイリアスを正規化する。空・不明は left（左端）扱い。"""
     r = str(rule or "").strip()
@@ -40,10 +64,12 @@ def resolve_all_sheet_names_by_rule(
     """
     ブックのシート名一覧から、条件に合うシート名を左端から順にすべて返す。
 
-    - left: 先頭シートのみ（1 件）
-    - exact: 完全一致（0〜1 件）
-    - contains / not_contains: 一致するすべて（ブック上の左→右順）
-    - pattern が空の exact/contains/not_contains: 空リスト
+    - left: 先頭シートのみ（1 件）。pattern は無視
+    - exact: パターンのいずれかと完全一致（OR）。0 件以上
+    - contains: パターンのいずれかを含む（OR）
+    - not_contains: パターンのいずれも含まない（＝1つでも含めば除外）
+    - pattern が空（トークンなし）の exact/contains/not_contains: 空リスト
+    - 複数パターンはカンマ区切り（``parse_comma_separated_patterns``）
     """
     names = [str(x) for x in sheetnames if str(x).strip() != ""]
     if not names:
@@ -51,20 +77,21 @@ def resolve_all_sheet_names_by_rule(
     kind = classify_sheet_rule(rule)
     if kind == "left":
         return [names[0]]
-    sn = str(pattern or "").strip()
-    if not sn:
+    tokens = parse_comma_separated_patterns(pattern)
+    if not tokens:
         return []
 
     def _key(s: str) -> str:
         return s if case_sensitive else s.casefold()
 
-    sn_k = _key(sn)
+    toks_k = [_key(t) for t in tokens]
     if kind == "exact":
-        return [x for x in names if _key(x) == sn_k]
+        tok_set = set(toks_k)
+        return [x for x in names if _key(x) in tok_set]
     if kind == "contains":
-        return [x for x in names if sn_k in _key(x)]
+        return [x for x in names if any(t in _key(x) for t in toks_k)]
     if kind == "not_contains":
-        return [x for x in names if sn_k not in _key(x)]
+        return [x for x in names if all(t not in _key(x) for t in toks_k)]
     return [names[0]]
 
 

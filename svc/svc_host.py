@@ -16,29 +16,6 @@ History (latest 3):
   - 0.4.42 (2026-06-26): 常駐ホスト生存時のリボン fast path（spawn/prewarm/register_book COM 省略）。
   - 0.4.41 (2026-06-16): restart_svc_server ログを recovery restart に変更（救済用である旨を明示）。
   - 0.4.40 (2026-06-14): B+ — 常駐 svc_server を維持。事前 COM 再起動を廃止（汚染時のみ recycle）。
-  - 0.4.39 (2026-06-14): A+ — excel_com_session 経由で COM recycle を全 Excel action に統一。
-  - 0.4.38 (2026-06-14): 同一 HWND での 2 回目以降の操作前も svc_server を再起動（COM 使い回し防止）。
-  - 0.4.36 (2026-06-13): ensure_python_hosts_ready に register_book(hwnd) を追加（マルチ Excel 初回リボン対策）。
-  - 0.4.35 (2026-06-13): ensure_python_hosts_ready 追加。HWND 監視廃止（全 EXCEL.EXE 監視へ移行）。
-  - 0.4.34 (2026-06-13): persist_excel_hwnd を常駐 spawn 前へ移動。lifecycle monitor の bootstrap 待機を追加。
-  - 0.4.33 (2026-06-13): excel_startup で Excel HWND を IPC 保存。常駐プロセスのライフサイクル監視と連携（B+A）。
-  - 0.4.32 (2026-06-07): 起動短縮 — svc/ui/bridge 並列 spawn、xlwings 先行 import 連携。
-  - 0.4.31 (2026-06-07): excel_shutdown_workbook_close 追加（終了 RunPython 1 回化）。shutdown 待機をポーリング化（早期終了）。
-  - 0.4.30 (2026-06-03): shutdown_all_with_force_kill 追加（フラグ終了後に hc_main/svc_server/ui_server の pythonw を taskkill）。
-  - 0.4.29 (2026-04-19): Packaged EXE 配置を ``HC_INSTALL_ROOT\\app\\bin\\`` に統一。子プロセス PATH は ``app\\bin`` + インストールルート。
-  - 0.4.28 (2026-04-19): Packaged 子プロセスの env に ``app\\shared``・``app`` を PATH 先頭追加（python312.dll 等のローダ解決）。
-  - 0.4.26 (2026-04-11): 常駐ブリッジはルート `hc_main.py` のみ必須。`svc/bridge_runner.py` フォールバックを廃止。
-  - 0.4.25 (2026-04-11): Mutex `HC_MAIN_RUNNER` ＋ 旧 `HC_BRIDGE_RUNNER` 併用検知。`is_main_runner_running` 追加（`is_bridge_running` は互換別名）。
-  - 0.4.24 (2026-04-11): フェーズ E — ログラベル `[MAIN]`、ブートログ `hc_main_boot_*.log`、`hc_main` 起動時の project_root 修正（ルート配置時）。
-  - 0.4.23 (2026-04-11): 常駐ブリッジの起動先をプロジェクトルート hc_main.py に変更（互換で svc/bridge_runner.py も可）。
-  - 0.4.22 (2026-04-11): register_book を core.excel_session 経由に（VBA から hc_main 文字列除去と整合）。
-  - 0.4.21 (2026-04-06): excel_startup_workbook_open_full / excel_startup_after_excel_idle を共通ヘルパーに集約。
-  - 0.4.20 (2026-04-06): 起動は excel_startup_workbook_open_full で 1 回の RunPython に集約。mutex 待ち延長＋猶予後再試行で誤 WARNING 低減。
-  - 0.4.19 (2026-04-06): excel_startup_* ラッパー追加（HC_LOG_PERF 時 hc_csv_perf.log に起動区間を記録）。
-  - 0.4.18 (2026-03-11): ensure_bridge / spawn_bridge 追加。load_csv をブリッジ経由で依頼可能に。
-  - 0.4.17 (2026-03-09): ensure_ui_server の mutex 待機間隔を 0.05s→0.02s に短縮しリボン→画面表示のラグを短縮。
-  - 0.4.16 (2026-02-28): Fix: prevent duplicate svc_server spawn by adding in-process spawn guard (no external deps).
-  - 0.4.13 (2026-02-26): Fix: venv guard accepts script argv0 under project root; restore UI spawn while keeping diagnostics.
 """
 
   # bootstrap: allow direct script execution

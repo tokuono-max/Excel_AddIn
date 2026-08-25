@@ -5,6 +5,7 @@ Packaged deployment updater:
 - Apply config payload silently (failure only notifies)
 - Prompt user for bin update (Now/Later); 「今すぐ」で **bin.patch（差分）** または **bin.full（フル）**
   zip を検証し、Excel 終了後にバックグラウンドで反映（差分はファイルマージ、フルは従来どおり MIR）。
+- 旧版バックアップ／ロールバックは行わない（速度優先。差分失敗時はフルへフォールバック）。
 
 See docs\\インストールと運用（利用者・運用向け）.md §3.3, §4.2.
 """
@@ -31,6 +32,7 @@ from packaging.version import InvalidVersion, Version
 from core import core_env, runtime_layout
 from core.core_log import append_text_with_cap, get_logger
 from core.runtime_layout import packaged_spawn_requested
+from core.changever import changever_block_for_catalog
 from core.patch_manifest import materialize_manifest_patch_zip as _materialize_patch_zip_for_worker
 from core.update_state import build_paths, clear_pending, read_pending, write_pending
 try:
@@ -58,8 +60,6 @@ UPDATE_LOG_REL = Path("logs") / "hc_update.log"
 UPDATER_RESULT_REL = Path("update") / "locks" / "updater_last_result.json"
 BIN_APPLY_NOTIFY_MARKER_REL = Path("logs") / "bin_apply_success_marker.json"
 ADMIN_CATALOG_REL = Path("config") / "catalog_path.txt"
-BACKUP_ARCHIVE_FULL_REL = Path("update") / "archive" / "full"
-BACKUP_RETAIN_JSON_REL = BACKUP_ARCHIVE_FULL_REL / "retain.json"
 UNINSTALL_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
 UNINSTALL_WOW_SUBKEY = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B5E8C4A2-1D3F-4E6B-9C0D-1A2B3C4D5E6F}_is1"
 INSTALL_SCOPE_VALUE_NAME = "InstallScope"
@@ -98,6 +98,28 @@ def _um(key: str, default: str, **fmt: Any) -> str:
 
 def _update_check_title() -> str:
     return _um("UPDATE_CHECK_DIALOG_TITLE", "CSV Tool 更新")
+
+
+def _changever_block_for_status(st: dict[str, Any], *, kind: str) -> str:
+    cat_s = str(st.get("catalog_path") or "").strip()
+    cat_path = Path(cat_s) if cat_s else None
+    data = load_catalog(cat_path) if cat_path is not None and cat_path.is_file() else None
+    if kind == "bootstrap":
+        installed = str(st.get("installed_bootstrap_version") or "").strip()
+        latest = str(st.get("latest_bootstrap_version") or "").strip()
+    else:
+        installed = str(st.get("installed_bin") or "").strip()
+        latest = str(st.get("latest_bin_version") or "").strip()
+    block = changever_block_for_catalog(
+        cat_path,
+        data,
+        kind=kind,
+        installed=installed,
+        latest=latest,
+        header=_um("BIN_UPDATE_CHANGELOG_HEADER", "変更内容:"),
+        more=_um("BIN_UPDATE_CHANGELOG_MORE", "（続きは CHANGEVER.txt）"),
+    )
+    return ("\n\n" + block) if block else ""
 
 
 # Excel 終了待ち後に app\\bin を差し替えるワーカー（-File 用）。パラメータは JSON 1 ファイル経由。
@@ -1189,99 +1211,6 @@ def _read_version_file(path: Path) -> str | None:
         return v or None
     except OSError:
         return None
-
-
-def _load_backup_retain(install_root: Path) -> dict[str, Any] | None:
-    path = install_root / BACKUP_RETAIN_JSON_REL
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8-sig"))
-        return raw if isinstance(raw, dict) else None
-    except Exception:
-        return None
-
-
-def _resolve_latest_backup_zip(install_root: Path) -> tuple[Path | None, str]:
-    meta = _load_backup_retain(install_root)
-    if isinstance(meta, dict):
-        p = Path(str(meta.get("zip_path") or "").strip())
-        if p.is_file():
-            prev = str(meta.get("previous_version") or "").strip()
-            return p, prev
-    archive_dir = install_root / BACKUP_ARCHIVE_FULL_REL
-    if not archive_dir.is_dir():
-        return None, ""
-    cands = sorted(archive_dir.glob("full_prev_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not cands:
-        return None, ""
-    return cands[0], ""
-
-
-def _queue_pending_recovery_from_backup(install_root: Path, *, require_admin: bool) -> tuple[bool, str]:
-    backup_zip, prev_version = _resolve_latest_backup_zip(install_root)
-    if backup_zip is None:
-        return False, "backup zip not found"
-    paths = build_paths(install_root)
-    paths.update_root.mkdir(parents=True, exist_ok=True)
-    paths.payload_root.mkdir(parents=True, exist_ok=True)
-    placeholder_patch = paths.payload_root / "patch.zip"
-    try:
-        if not placeholder_patch.is_file():
-            placeholder_patch.write_bytes(b"")
-    except OSError:
-        pass
-    full_local = paths.payload_root / "full_recovery.zip"
-    try:
-        shutil.copy2(backup_zip, full_local)
-    except OSError as e:
-        return False, f"backup copy failed: {e}"
-    scope = _resolve_install_scope(install_root)
-    require_admin_final = bool(require_admin)
-    if scope == "all":
-        require_admin_final = True
-    elif scope == "current":
-        require_admin_final = False
-    pending: dict[str, Any] = {
-        "schema_version": 2,
-        "apply_scope": "bin_only",
-        "require_admin": require_admin_final,
-        "state": "downloaded",
-        "target_bin_version": prev_version or "",
-        "mode": "full",
-        "catalog_path": "",
-        "catalog_checked_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-        "patch": {
-            "relative_path": "",
-            "sha256": "",
-            "local_path": str(placeholder_patch),
-        },
-        "full": {
-            "relative_path": str(backup_zip),
-            "sha256": "",
-            "local_path": str(full_local),
-            "downloaded": True,
-        },
-        "bootstrap": {
-            "target_version": "",
-            "local_new_path": "",
-            "pending_swap": False,
-        },
-        "retry": {
-            "patch_retry_in_run": 0,
-            "bootstrap_retry_in_run": 0,
-            "patch_fail_total": 0,
-            "full_fail_total": 0,
-            "last_error_code": "",
-            "last_error_message": "",
-            "last_failed_at": "",
-        },
-        "timestamps": {
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-        },
-        "source": "auto_recovery",
-    }
-    write_pending(paths, pending)
-    return True, str(paths.pending_path)
 
 
 def read_installed_bin_version(install_root: Path) -> str | None:
@@ -2693,6 +2622,7 @@ def _show_bin_update_prompt(
             installed_bin=str(st.get("installed_bin") or "-"),
             latest_bin=str(st.get("latest_bin_version") or "-"),
         )
+        msg = str(msg).rstrip() + _changever_block_for_status(st, kind="bin")
         dlg_title = _um("BIN_UPDATE_SINGLE_CONFIRM_TITLE", "CSV Tool の更新")
         btn_yes = _um("BIN_UPDATE_SINGLE_BTN_APPLY_NOW", "すぐに更新")
         btn_no = _um("BIN_UPDATE_SINGLE_BTN_LATER", "後で")
@@ -2719,6 +2649,7 @@ def _show_bin_update_prompt(
             display_version=str(st.get("display_version") or "-"),
             apply_hint=apply_hint,
         )
+        msg = str(msg).rstrip() + _changever_block_for_status(st, kind="bin")
         dlg_title = _update_check_title()
         btn_yes = None
         btn_no = None
@@ -2830,6 +2761,7 @@ def _show_bootstrap_update_prompt(
         latest_bootstrap=str(st.get("latest_bootstrap_version") or "-"),
         display_version=str(st.get("display_version") or "-"),
     )
+    msg = str(msg).rstrip() + _changever_block_for_status(st, kind="bootstrap")
     rc = _message_box(
         msg,
         style=MB_YESNO | MB_ICONINFORMATION,
@@ -3187,52 +3119,23 @@ def maybe_apply_pending_bootstrap_update(*, owner_hwnd: int | None = None, sheet
                     f"bootstrap_apply applied=false err={err_detail} result={res!r}",
                 )
                 if str(pending.get("apply_scope") or "").strip() != "bootstrap_only":
-                    rc_recover = _message_box(
+                    # 旧版バックアップ／復元は廃止。差分失敗時は適用側でフルへ切替済み。
+                    # ここまで失敗した場合は再試行または再インストールを案内する。
+                    _message_box(
                         _um(
-                            "PENDING_APPLY_RECOVERY_CONFIRM_TEMPLATE",
+                            "PENDING_APPLY_FAILED_NO_ROLLBACK_TEMPLATE",
                             "更新の適用に失敗しました。\n\n"
                             "{error}\n\n"
-                            "復旧用バックアップ（full zip）から戻しますか？",
+                            "Excel をすべて終了し、リボンの「更新確認」から再度お試しください。"
+                            "解消しない場合は CSV Tool を再インストールしてください。\n\n"
+                            "ログ: {log_path}",
                             error=str(err_detail),
+                            log_path=str(root / UPDATE_LOG_REL),
                         ),
-                        style=MB_YESNO | MB_ICONWARNING,
+                        style=MB_OK | MB_ICONWARNING,
                         owner_hwnd=0,
                         sheet_id=sheet_id,
                     )
-                    if rc_recover == IDYES:
-                        ok_q, qmsg = _queue_pending_recovery_from_backup(root, require_admin=require_admin)
-                        _append_update_log(root, f"recovery queue result ok={ok_q} detail={qmsg}")
-                        if ok_q:
-                            _message_box(
-                                _um(
-                                    "PENDING_APPLY_RECOVERY_QUEUED_TEMPLATE",
-                                    "復旧を開始します。進捗ウィンドウが表示されます。",
-                                ),
-                                style=MB_OK | MB_ICONINFORMATION,
-                                owner_hwnd=0,
-                                sheet_id=sheet_id,
-                            )
-                            try:
-                                res_recover = _apply_pending_update_with_retry(
-                                    root, source="startup_recovery"
-                                )
-                                _append_update_log(root, f"recovery apply result={res_recover}")
-                            except Exception as e:
-                                _append_update_log(root, f"recovery apply failed err={type(e).__name__}: {e}")
-                        else:
-                            _message_box(
-                                _um(
-                                    "PENDING_APPLY_RECOVERY_PREP_FAILED_TEMPLATE",
-                                    "復旧用のバックアップ zip が見つかりません。\n\n"
-                                    "詳細: {detail}\n\n"
-                                    "update\\archive\\full\\ に full_prev_*.zip があるか、"
-                                    "または管理者に連絡のうえ再インストールを検討してください。",
-                                    detail=qmsg,
-                                ),
-                                style=MB_OK | MB_ICONWARNING,
-                                owner_hwnd=0,
-                                sheet_id=sheet_id,
-                            )
     except Exception as e:
         _suppress_startup_bin_prompt_after_pending_defer = False
         _append_update_log(root, f"bootstrap_apply failed err={type(e).__name__}: {e}")

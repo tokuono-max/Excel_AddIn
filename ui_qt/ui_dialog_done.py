@@ -20,17 +20,6 @@ History (latest 3):
   - 0.2.7 (2026-07-02) MSG_HEADER 空文字明示時は detail_text のみ表示（dt_ymd/dt_hm 等）。リスト枠を出さない。
   - 0.2.5 (2026-06-13) showEvent: done_dialog_show_event_on_excel に一本化（EXCEL_LOCK=false 時は Excel を先に前面化しない）。
   - 0.2.4 (2026-04-08) 名前列幅を実ファイル名長＋上限で算出（短い名前での過剰幅を抑制）。req.output_dir を MSG_OUTPUT_DIR_PREFIX で表示。
-  - 0.2.3 (2026-04-08) DEFAULT_WIDTH=0 時、一覧幅に合わせダイアログ幅を確保（行数・容量列の見切れ抑制）。items の rows/row_count・size_bytes フォールバック。
-  - 0.2.2 (2026-04-08) LIST_TRUNCATE_NAMES / LIST_HORIZONTAL_SCROLL: 一覧の横見切れ対策（省略解除・横スクロール可）。
-  - 0.2.1 (2026-04-08) LIST_STRETCH_BEFORE_BUTTONS: false で一覧と OK の間の縦余白を付けない（コンパクト完了通知）。
-  - 0.2.0 (2026-04-08) DONE 一覧の列表示を JSON 化（LIST_COLUMNS）。size_bytes を size 列で表示（LIST_SIZE_UNIT / LIST_SIZE_DECIMALS）。
-  - 0.1.9 (2026-04-05) 完了一覧高さ: QTextDocument 依存を廃止し行数×max(lineSpacing,height)+chrome で安定化。LIST_MAX_HEIGHT で上限・超過は縦スクロール。
-  - 0.1.8 (2026-04-05) 完了一覧の inner_h を QTextDocument レイアウト＋枠・ビューポート余白で算出（行数×lineSpacing だけだと1行分不足しやすい問題の改善）。
-  - 0.1.7 (2026-04-05) SCREENS.DONE の LIST_MIN_HEIGHT / LIST_MAX_HEIGHT: 一覧の最低・最高高さ（最小適用後に最大で再クランプ）。
-  - 0.1.6 (2026-04-05) WINDOW の 0 軸は apply_dialog_size_for_window_config で sizeHint 確定。一覧は内容幅・DEFAULT_HEIGHT=0 時は縦も行数に合わせる。情報アイコンは未取得時フォールバック。
-  - 0.1.5 (2026-04-08) show 前: adjustSize 後に WINDOW.DEFAULT_WIDTH/HEIGHT を再適用（JSON 既定サイズが adjustSize で潰れないように）。
-  - 0.1.4 (2026-04-05) SCREENS.DONE の BTN_OK で OK ボタンラベルを上書き。
-  - 0.1.3 (2026-04-05) 完了一覧を QPlainTextEdit に変更（行間を QListWidget より詰める）。_hc_show_taskbar 失敗時は非表示扱い・owner 遅延リトライ。showEvent で ensure_front 再実行。
 """
 
 from __future__ import annotations

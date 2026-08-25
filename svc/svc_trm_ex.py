@@ -8,17 +8,10 @@ Purpose:
   文頭・文末トリム（選択範囲の空白削除）。選択範囲または有効データ領域を走査し、
   文頭/文末の件数表示後に「文頭削除」「文末削除」「全削除」のいずれかを実行。Undo 対応。
   画面は ui_qt.ui_trm_ex + config/ui_trm_ex.json。
-History (latest 1):
+History (latest 3):
   - 1.3.1 (2026-07-02) 走査進捗を選択 UI 直前で 100% DONE クローズ（背面表示の解消）。適用フェーズで進捗を再表示。
   - 1.3.0 (2026-07-02) 速度: UsedRange 交差・チャンク読込・対象セルのみ適用/差分書込。region スナップショット。走査段階から進捗表示。
   - 1.2.6 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
-  - 1.2.5 (2026-06-29) 進捗クローズ ACK を共通モジュールへ統一（15秒+nudge）。3秒タイムアウトの独自待機を廃止。
-  - 1.2.4 (2026-05-05) progress n/m の定義を変更。m=前後空白ありセル数（choice に応じた変換対象数）、n=変換中セル数。
-  - 1.2.3 (2026-05-05) progress n/m をセル数ベースへ変更。更新頻度はセル進捗ステップ＋時間間引きで制御。
-  - 1.2.2 (2026-05-05) 選択範囲を Areas 対応（歯抜け選択対応）。進捗 done/total を常時送信し n/m 表示を 0/0 にならないよう修正。
-  - 1.2.1 (2026-05-05) トリム実行時に progress を表示。choice 確定後に進捗開始し、DONE 書込＋クローズ ACK 待ち後に完了通知を表示。
-  - 1.2.0 (2026-04-13) 選択ダイアログ表示中、文頭・文末検出セルを sidecar＋viewport 追従で着色（ui_dupli と同系）。閉じる／確定時に全矩形クリア。HIGHLIGHT_LEADING / HIGHLIGHT_TRAILING。
-  - 1.1.0 HC_LOG_PERF: [TRM_EX_PERF]。診断: [TRM_EX_TRACE]。
 """
 from __future__ import annotations
 

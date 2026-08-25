@@ -15,19 +15,6 @@ History (latest 3):
   - 0.3.31 (2026-06-29) 進捗 action: SCREENS.DONE を _done_cfg として ProgressDialog へ渡し、完了通知の TOPMOST/EXCEL_LOCK 等を JSON どおり反映。
   - 0.3.30 (2026-05-05) キャンセル時の Excel メニュー有効化を closeEvent 依存から分離。_do_close_cancel/done で teardown を先行実行し、解除漏れを防止。
   - 0.3.29 (2026-05-05) Excelロック判定を COMMON.EXCEL.LOCK_WHEN_OPEN まで含めて統一。closeEvent の excel_unlock は parent_hwnd 基準で実行し、キャンセル時の解除漏れを防止。
-  - 0.3.28 (2026-04-09) 結合キャンセル: done(0) の前に hide() で即非表示（空枠ゴースト低減。ui_server 側は finished を QueuedConnection に変更）。
-  - 0.3.27 (2026-04-09) 結合メインキャンセル: _do_close_cancel が hide() のみだと finished が飛ばず ui_server の QEventLoop が返らない。done(0) で終了（closeEvent でロック解除等は従来どおり）。
-  - 0.3.26 (2026-04-09) 結合メイン: CENTER_ON_EXCEL 時は setWindowOpacity(0)→50ms 後に Excel 中央寄せ→0/48ms 再センタ→不透明化（ui_hd_nr と同型。移動のチラつき抑制）。
-  - 0.3.25 (2026-04-09) 結合メイン: exec 直後の Qt 既定位置を打ち消すため、showEvent と QTimer(0/48ms) で center_on_excel を再適用（透明化なし）。IPC 矩形は _excel_rect_override に保持。
-  - 0.3.24 (2026-04-09) 結合メイン: CENTER_ON_EXCEL 時に ui_server が exec 直前で prepare を実行するための _hc_csv_mg_center_on_excel プロパティを設定。
-  - 0.3.23 (2026-04-09) 結合メイン: IPC の excel_rect を center_on_excel の rect_override に渡す。done_then_merge 完了通知へ excel_rect を引き継ぎ。
-  - 0.3.22 (2026-04-05) 重複確認テーブル: 重複行背景を薄い灰色 (236,236,236) に変更。
-  - 0.3.21 (2026-04-05) done_then_merge: _get_done_config で MAIN+DONE マージ。FOCUS.DEFAULT_BUTTON に table/radioN。重複 Win32 最小化除去は SHOW_* 省略時も実行。get_ui_config2 はルート WINDOW を合成。
-  - 0.3.20 (2026-04-05) 重複確認: WINDOW 0 軸は内容に合わせてリサイズ。重複行背景を薄ベージュに。apply_dialog_size_for_window_config 利用。
-  - 0.3.19 (2026-04-08) ファイル／フォルダ追加ダイアログの初期位置と選択後の更新を last_folder.txt（get_last_folder / set_last_folder）に連携。
-  - 0.3.18 (2026-04-05) 重複確認ダイアログ: DUPLICATE_CHECK の TOOLTIP、BTN_OK_TOOLTIP、BTN_CANCEL_TOOLTIP を適用。
-  - 0.3.17 (2026-04-05) JSON 未反映分: RIBBON.GROUPS 全グループ・title/key、TABLE.ALTERNATE/COLUMNS.key、FOCUS.TAB_ORDER。
-  - 0.3.16 (2026-04-05) 結合画面 showEvent で ensure_front を遅延再実行（TOPMOST/EXCEL_FRONT_FOLLOW と併用）。設定は ui_csv_mg.json の MAIN.WINDOW へ寄せる。
 """
 
 from __future__ import annotations

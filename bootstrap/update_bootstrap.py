@@ -230,155 +230,6 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest().lower()
 
 
-def _safe_version_for_filename(raw: str) -> str:
-    s = re.sub(r"[^0-9A-Za-z._-]+", "_", str(raw or "").strip())
-    return s or "unknown"
-
-
-def _read_installed_bin_version(install_root: Path) -> str:
-    try:
-        vfile = install_root / "VERSION.txt"
-        if not vfile.is_file():
-            return "unknown"
-        lines = vfile.read_text(encoding="utf-8-sig").splitlines()
-        if not lines:
-            return "unknown"
-        v = lines[0].strip()
-        return v or "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _backup_archive_dir(install_root: Path) -> Path:
-    return install_root / "update" / "archive" / "full"
-
-
-def _write_backup_retain_json(
-    install_root: Path,
-    *,
-    zip_path: Path,
-    previous_version: str,
-    target_version: str,
-) -> None:
-    retain = {
-        "schema_version": 1,
-        "zip_path": str(zip_path),
-        "previous_version": previous_version,
-        "target_version": target_version,
-        "created_at": _ts(),
-    }
-    retain_path = _backup_archive_dir(install_root) / "retain.json"
-    retain_path.parent.mkdir(parents=True, exist_ok=True)
-    retain_path.write_text(json.dumps(retain, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _create_full_recovery_backup(
-    install_root: Path,
-    *,
-    target_bin: str,
-    log_path: Path,
-) -> Path | None:
-    app_bin = install_root / "app" / "bin"
-    if not app_bin.is_dir():
-        _append(log_path, f"backup full skipped: app/bin not found path={app_bin}")
-        return None
-    previous_version = _read_installed_bin_version(install_root)
-    archive_dir = _backup_archive_dir(install_root)
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    backup_name = f"full_prev_{_safe_version_for_filename(previous_version)}.zip"
-    final_zip = archive_dir / backup_name
-    tmp_zip = archive_dir / (backup_name + ".new")
-    if tmp_zip.exists():
-        tmp_zip.unlink(missing_ok=True)
-    try:
-        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            vfile = install_root / "VERSION.txt"
-            if vfile.is_file():
-                zf.write(vfile, "VERSION.txt")
-            skipped_lock = 0
-            for root_name in ("app", "addin"):
-                src_root = install_root / root_name
-                if not src_root.is_dir():
-                    continue
-                skipped_other = 0
-                for fp in src_root.rglob("*"):
-                    if not fp.is_file():
-                        continue
-                    if fp.name.startswith("~$"):
-                        skipped_lock += 1
-                        continue
-                    try:
-                        zf.write(fp, fp.relative_to(install_root).as_posix())
-                    except OSError as e:
-                        skipped_other += 1
-                        _append(
-                            log_path,
-                            "backup full: skip_file path={p} err={t} errno={eno} winerror={wno} msg={m}".format(
-                                p=fp,
-                                t=type(e).__name__,
-                                eno=getattr(e, "errno", None),
-                                wno=getattr(e, "winerror", None),
-                                m=e,
-                            ),
-                        )
-                if skipped_other:
-                    _append(
-                        log_path,
-                        f"backup full: skipped {skipped_other} unreadable file(s) (best-effort archive)",
-                    )
-            if skipped_lock:
-                _append(
-                    log_path,
-                    f"backup full: skipped {skipped_lock} office lock file(s) (~$*)",
-                )
-        os.replace(tmp_zip, final_zip)
-        _write_backup_retain_json(
-            install_root,
-            zip_path=final_zip,
-            previous_version=previous_version,
-            target_version=str(target_bin or "").strip(),
-        )
-        _append(
-            log_path,
-            "backup full created: path={p} previous={pv} target={tv}".format(
-                p=final_zip,
-                pv=previous_version,
-                tv=(target_bin or "-"),
-            ),
-        )
-        return final_zip
-    except Exception as e:
-        _append(log_path, f"backup full failed: {type(e).__name__}: {e}")
-        try:
-            tmp_zip.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return None
-
-
-def _cleanup_old_full_backups_after_success(install_root: Path, *, keep_zip: Path | None, log_path: Path) -> None:
-    archive_dir = _backup_archive_dir(install_root)
-    if not archive_dir.is_dir():
-        return
-    keep: set[str] = set()
-    if keep_zip is not None:
-        keep.add(str(keep_zip.resolve()).lower())
-    removed = 0
-    for fp in archive_dir.glob("full_prev_*.zip"):
-        try:
-            key = str(fp.resolve()).lower()
-        except Exception:
-            key = str(fp).lower()
-        if key in keep:
-            continue
-        try:
-            fp.unlink(missing_ok=True)
-            removed += 1
-        except Exception as e:
-            _append(log_path, f"backup cleanup failed path={fp} err={type(e).__name__}: {e}")
-    _append(log_path, f"backup cleanup done removed={removed} keep={keep_zip or '-'}")
-
-
 def _phase(log_path: Path, ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
     _append(log_path, f"bootstrap phase={title} message={msg}")
     ui.set(title, msg, progress)
@@ -963,7 +814,6 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         retries = max(1, int(cfg.get("PATCH_RETRY_IN_RUN_MAX", 3)))
         wait1 = max(0, int(cfg.get("PATCH_RETRY_WAIT_SEC_1", 2)))
         wait2 = max(0, int(cfg.get("PATCH_RETRY_WAIT_SEC_2", 5)))
-        backup_zip_path: Path | None = None
 
         # bootstrap 自己更新は「1起動内のみ」で最大3回。起動またぎ累積はしない。
         p_retry = _as_dict(pending.get("retry"))
@@ -1031,42 +881,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         retry = _as_dict(pending.get("retry"))
         patch_total = int(retry.get("patch_fail_total", 0) or 0)
         full_total = int(retry.get("full_fail_total", 0) or 0)
-        if apply_scope in ("bin_only", "bin+bootstrap"):
-            _ui_pulse(
-                ui,
-                _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
-                _ui_update_message(
-                    install_root,
-                    "PROGRESS_PREPARE_MSG_BACKUP",
-                    "復旧用バックアップを作成しています。\nしばらくお待ちください。",
-                ),
-                6,
-            )
-            backup_zip_path = _create_full_recovery_backup(
-                install_root,
-                target_bin=target_bin,
-                log_path=paths.log_path,
-            )
-            if backup_zip_path is None or not backup_zip_path.is_file():
-                _append(
-                    paths.log_path,
-                    "apply_bin: aborted no_recovery_backup (bin apply requires full_prev backup zip)",
-                )
-                pending["state"] = "failed"
-                pending["retry"] = {
-                    "patch_retry_in_run": 0,
-                    "patch_fail_total": patch_total,
-                    "full_fail_total": full_total + 1,
-                    "last_error_code": "E_BACKUP_REQUIRED",
-                    "last_error_message": "復旧用バックアップを作成できませんでした。",
-                    "last_failed_at": _ts(),
-                }
-                write_pending(paths, pending)
-                return {
-                    "ok": False,
-                    "applied": False,
-                    "error": "復旧用バックアップを作成できませんでした。空き容量・アクセス権・セキュリティソフトを確認してください。",
-                }
+        # 速度優先: 旧版 full_prev バックアップは作らない（差分→フルで新版適用に一本化）。
 
         if mode not in ("patch", "full"):
             mode = "patch"
@@ -1389,13 +1204,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     ),
                 )
         if b_err:
-            _append(paths.log_path, "backup cleanup skipped: bootstrap swap not successful")
-        else:
-            _cleanup_old_full_backups_after_success(
-                install_root,
-                keep_zip=backup_zip_path,
-                log_path=paths.log_path,
-            )
+            _append(paths.log_path, "apply_bin: bootstrap swap not fully successful; pending cleared after bin apply")
         clear_pending(paths)
         try:
             shutil.rmtree(paths.payload_root, ignore_errors=True)

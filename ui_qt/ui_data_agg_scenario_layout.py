@@ -8,11 +8,10 @@ Purpose:
 文言・既定値の多くは config/ui_data_agg.json の SCREENS.SCENARIO_EDIT
 （DETAIL_CELL / DETAIL_NAME）およびダイアログ共通キーから供給する。
 保存キーとフォームの対応は ui_data_agg._ScenarioEditDialog が担う。
-History:
+History (latest 3):
   - 2026-04-14 CollapsibleSection の開閉矢印を QLabel で見出し行上寄せ。
   - 2026-04-14 CollapsibleSection に initial_expanded（初期折りたたみ）を追加。
   - 2026-04-13 コード側フォールバック文言を ui_data_agg.json の DETAIL_* 実体に整合。空の HINT_TOP／JOIN ヒントは行を出さない。名前取得の PATH_ITEM_EXTRA 既定を空配列に。
-  - 2026-04-13 詳細フォーム・折りたたみ見出し・連携／結合グループにツールチップ（JSON の TIP_* で上書き可、未設定時はコード既定）。
 """
 from __future__ import annotations
 
@@ -511,8 +510,8 @@ def apply_scenario_detail_cell_tooltips(
     _apply_cfg_tip_force(
         refs.get("file_pattern"),
         cfg,
-        "TIP_FILE_PATTERN",
-        "ファイル名の絞り込みパターンです。空欄はすべてのファイル名を対象にします。",
+        "TOOLTIP_FILE_NAME",
+        "検索条件が「完全一致／含む／含まない」のときのファイル名です。\n\n・カンマ区切りで複数可\n・空欄は全ファイル対象",
     )
     _apply_cfg_tip_force(
         refs.get("file_name_rule"),
@@ -537,8 +536,8 @@ def apply_scenario_detail_cell_tooltips(
     _apply_cfg_tip_force(
         refs.get("sheet_name"),
         cfg,
-        "TIP_SHEET_NAME",
-        "照合に使うシート名の文字列です。",
+        "TOOLTIP_SHEET_NAME",
+        "照合に使うシート名です。\n\n・カンマ区切りで複数可\n・空欄は該当なし",
     )
     scn = refs.get("sheet_csv_note")
     if isinstance(scn, QLabel) and scn.text().strip():
@@ -798,6 +797,9 @@ def build_scenario_detail_cell_scroll(
     ph_fn = _dcp(cfg, "FILE_NAME_PLACEHOLDER", "")
     if ph_fn:
         le_fn.setPlaceholderText(ph_fn)
+    tip_fn = _dcp(cfg, "TOOLTIP_FILE_NAME", "")
+    if tip_fn:
+        le_fn.setToolTip(tip_fn)
     f1.addRow(_field_lbl(_dcp(cfg, "LABEL_FILE_NAME", "ファイル名")), le_fn)
     refs["file_pattern"] = le_fn
 
@@ -871,6 +873,12 @@ def build_scenario_detail_cell_scroll(
     le_sheet = QLineEdit("")
     le_sheet.setMinimumWidth(0)
     le_sheet.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    ph_sheet = _dcp(cfg, "PLACEHOLDER_SHEET_NAME", "")
+    if ph_sheet:
+        le_sheet.setPlaceholderText(ph_sheet)
+    tip_sheet = _dcp(cfg, "TOOLTIP_SHEET_NAME", "")
+    if tip_sheet:
+        le_sheet.setToolTip(tip_sheet)
     f2.addRow(_field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")), le_sheet)
     _csv_note = QLabel(_dch(cfg, "SHEET_CSV_NOTE_HTML", ""))
     _csv_note.setWordWrap(True)

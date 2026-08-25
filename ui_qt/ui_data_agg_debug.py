@@ -3,18 +3,10 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg_debug.py
 Purpose: データ集約デバッグウィンドウ（要求定義 §3.1.3）。文言・列見出し・ツールチップは config/ui_data_agg.json の SCREENS.DEBUG（TIP_*）。
-History: 連続実行（シナリオ／マスタ一括）正常完了時に QMessageBox（SCREENS.DEBUG の MSG_RUN_ALL_*_DONE）。
-  本番コードに内蔵デモデータは含めない。live_items なし時は空状態プレースホルダ。抽出は svc_data_agg_extract。マスタプレビュー（mpv）は進捗行ベースの結合表示＋列マージバッファ（svc.data_agg_master_preview / run_preview_compute）。結合探索なし・複数シナリオ時は項目内一括 compute＋段階キャッシュ先読み／バックフィル（DATA_AGG_MASTER_ONE_SHOT=0 で無効）。単一シナリオ項目は n_pick=0 の二重 compute を抑止。結合項目でも凍結列を適用。シナリオモード: 連携／結合フェーズかつ検出ファイルが多いとき、svc_data_agg_debug_run の progress_hook で非モーダル進捗を表示。build_master_items_live / _mpv_extract_colvals はファイル単位で xlsx_workbook_scope を張り OpenXML Excel の load_workbook を再利用。
-  2026-04-14: デバッグ—シナリオ/マスタでウィンドウタイトル（TITLE_SCENARIO/TITLE_MASTER）と連続実行ボタン（BTN_RUN_ALL_*、TIP_RUN_ALL_*）をモード連動。
-  2026-04-14: 結果一覧: 列幅プログラム変更直後の遅延 sectionResized で user_resized が誤立ちしないよう、programmatic 解除を QTimer.singleShot(0) に遅延（世代で連続フィットに対応）。bump も同じセッション内で保護。
-  2026-04-14: 診断: 結果一覧列幅—_fit_value_grid_columns で復元／内容フィットの分岐・viewport・先頭列幅・代表列 lo/hi/raw/fin を DATA_AGG_DIAG に出力。
-  2026-04-14: 名前から取得—結果一覧で #n[項目] 列展開を抑止。COND_KEYS 等の「主キー」を「抜取り文字」に統一（JSON／既定）。
-  2026-04-14: 条件タブ—マスタ親行は要約1行のみ（全文はツールチップ）。editor_lines あり時は details 子行を付けず二重解消。初期は collapseAll。
-  2026-04-14: 条件タブ—要約（全文）Section 廃止（ツリーのみ）。ツリー開閉マーク上寄せ。結果サマリ／一覧ヘッダ省略抑止＋見出し幅で列拡張。シナリオ要約列はステップ単位・セル上寄せ。
-  2026-04-13: SCREENS.DEBUG.SCENARIO_PROGRESS_MIN_FILES でシナリオ連携/結合フェーズのファイル進捗閾値を JSON 化。
-  2026-04-13: SCREENS.DEBUG の TIP_* を全主要ウィジェットに反映。フォールバック文言を JSON 実体に整合。
-  2026-04-13: cond_tree / master_cond_tree は QTreeWidget のため列見出しツールチップは header()（horizontalHeader は QTableWidget 専用で AttributeError）。
-  結果一覧 value_grid: 全列 Interactive（最終列 Stretch なし）＋横スクロールで長文可読化。省略 … は delegate / TextElideMode で抑止。ユーザーが変えた列幅は同一ヘッダ構成のプレビュー更新で維持。縦横スクロールは AsNeeded＋ScrollPerPixel。WINDOW に VALUE_GRID_COL_* 等。
+History (latest 3):
+  - 2026-08-24 シナリオ結果一覧—フェーズ境界（_value_col_spans の先頭列）に太縦線（本体・列見出し）。行はフェーズ間で揃えない。
+  - 2026-08-24 シナリオ主キーは先に表示し裏で連携を読む。空主キーの連携は出さない。
+  - 2026-04-14 デバッグ—シナリオ/マスタでウィンドウタイトル（TITLE_SCENARIO/TITLE_MASTER）と連続実行ボタン（BTN_RUN_ALL_*、TIP_RUN_ALL_*）をモード連動。
 """
 from __future__ import annotations
 
@@ -26,9 +18,9 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
-from PySide6.QtCore import QEventLoop, Qt, QThread, QTimer
+from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
@@ -36,6 +28,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QPainter,
+    QPen,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -95,6 +88,11 @@ _NE_DETAIL_NAME_CACHE: dict[str, Any] | None = None
 _NE_DETAIL_CELL_CACHE: dict[str, Any] | None = None
 
 
+def _none_tips(n: int) -> list[str | None]:
+    out: list[str | None] = [None] * n
+    return out
+
+
 def _ne_detail_name_cfg() -> dict[str, Any]:
     """SCENARIO_EDIT.DETAIL_NAME（名前から取得フォームのラベル・列挙）。循環 import 回避のため JSON を直接読む。"""
     global _NE_DETAIL_NAME_CACHE
@@ -152,6 +150,45 @@ _DEBUG_SUMMARY_PHASE_COL_BG = QColor(232, 232, 232)
 _DEBUG_MASTER_REGISTERED_NAME_COLOR = QColor(0, 51, 153)  # 濃い青
 _DEBUG_MASTER_REGISTERED_ROW_BG = QColor(245, 240, 232)  # 薄ベージュ（登録行）
 _DEBUG_MASTER_ACTIVE_ROW_BG = QColor(228, 212, 188)  # 濃いベージュ（実行中・選択中）
+_VALUE_GRID_PHASE_LINE_COLOR = QColor(0, 51, 153)
+_VALUE_GRID_PHASE_LINE_WIDTH = 1
+
+
+def phase_start_columns_from_spans(
+    spans: list[tuple[int, int]],
+    ncols: int,
+    *,
+    scenario_mode: bool,
+) -> frozenset[int]:
+    """シナリオ結果一覧でフェーズ境界になる列（先頭列は除く）。"""
+    if not scenario_mode or ncols <= 1:
+        return frozenset()
+    starts: set[int] = set()
+    for start, _end in spans:
+        if start > 0:
+            starts.add(int(start))
+    if spans:
+        last_end = max(int(end) for _start, end in spans)
+        if last_end + 1 < ncols:
+            starts.add(last_end + 1)
+    return frozenset(c for c in starts if 0 < c < ncols)
+
+
+def _paint_value_grid_phase_divider(
+    painter: QPainter, rect, logical_col: int, starts: frozenset[int]
+) -> None:
+    if logical_col not in starts:
+        return
+    painter.save()
+    try:
+        pen = QPen(_VALUE_GRID_PHASE_LINE_COLOR)
+        pen.setWidth(_VALUE_GRID_PHASE_LINE_WIDTH)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(pen)
+        x = rect.left() + _VALUE_GRID_PHASE_LINE_WIDTH // 2
+        painter.drawLine(x, rect.top(), x, rect.bottom())
+    finally:
+        painter.restore()
 
 COND_KEYS_DEFAULT = [
     "ファイル検索",
@@ -367,8 +404,10 @@ def build_debug_scenarios_from_items(
             title = sn0 if sn0 else ("%s_シナリオ%d" % (base_title, si + 1))
             p = source_ui_block(s0) or {}
             typ = str(s0.get("type") or "cell").strip().lower()
-            join_defs = p.get("join_defs") if isinstance(p.get("join_defs"), list) else []
-            link_defs = p.get("link_defs") if isinstance(p.get("link_defs"), list) else []
+            raw_join = p.get("join_defs")
+            join_defs: list[Any] = raw_join if isinstance(raw_join, list) else []
+            raw_link = p.get("link_defs")
+            link_defs: list[Any] = raw_link if isinstance(raw_link, list) else []
             nj = len(join_defs)
             nl = len(link_defs)
             fp = str(p.get("file_pattern") or "")
@@ -574,7 +613,8 @@ def build_master_items_live(
                     continue
                 one = {**item, "sources": [copy.deepcopy(src)]}
                 rows = build_debug_scenarios_from_items([one], paths)
-                slots: list[Any] = rows[0].get("slots") if rows else []
+                raw_slots = rows[0].get("slots") if rows else []
+                slots: list[Any] = raw_slots if isinstance(raw_slots, list) else []
                 summary_vals = ["-", "-", "-", "-", "-"]
                 for j in range(4, -1, -1):
                     if j < len(slots) and slots[j] is not None:
@@ -750,9 +790,39 @@ def _scenario_progress_min_files_from_cfg(cfg: dict[str, Any]) -> int:
 class _ValueGridNoElideDelegate(QStyledItemDelegate):
     """結果一覧で長い主キー等が … 省略されないよう style option を固定する。"""
 
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.phase_start_cols: frozenset[int] = frozenset()
+
     def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:  # type: ignore[override]
         super().initStyleOption(option, index)
         option.textElideMode = Qt.TextElideMode.ElideNone
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+        _paint_value_grid_phase_divider(
+            painter, option.rect, index.column(), self.phase_start_cols
+        )
+
+
+class _ValueGridPhaseHeader(QHeaderView):
+    """シナリオ結果一覧の列見出しにフェーズ境界の太線を描く。"""
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self.phase_start_cols: frozenset[int] = frozenset()
+        self.setSectionsClickable(True)
+        self.setHighlightSections(True)
+
+    def paintSection(self, painter, rect, logicalIndex) -> None:  # type: ignore[override]
+        super().paintSection(painter, rect, logicalIndex)
+        _paint_value_grid_phase_divider(
+            painter, rect, int(logicalIndex), self.phase_start_cols
+        )
+
+
+class _ScenarioLinkPrefetchBridge(QObject):
+    finished = Signal(int, int)
 
 
 class _DebugCondTreeWidget(QTreeWidget):
@@ -800,6 +870,14 @@ class DataAggDebugDialog(QDialog):
         self._debug_scan_paths: list[str] = list(scan_paths or [])
         self._scan_root: str | None = (str(scan_root).strip() or None) if scan_root else None
         self._scenario_bundle_caches: dict[int, dict[str, dict[str, Any]]] = {}
+        self._scenario_link_prefetch_gen: int = 0
+        self._scenario_link_prefetch_thread: threading.Thread | None = None
+        self._scenario_link_prefetch_cancel = threading.Event()
+        self._scenario_link_prefetch_cancel.set()
+        self._scenario_link_prefetch_bridge = _ScenarioLinkPrefetchBridge(self)
+        self._scenario_link_prefetch_bridge.finished.connect(
+            self._on_scenario_link_prefetch_finished
+        )
         self._scenario_for_dry_run: dict[str, Any] | None = (
             copy.deepcopy(scenario_for_dry_run) if scenario_for_dry_run else None
         )
@@ -834,6 +912,9 @@ class DataAggDebugDialog(QDialog):
         self._master_progress_pct_floor: int = 0
         self._master_batch_hook_last_fi: int = 1
         self._master_batch_hook_last_nf: int = 1
+        # 項目ループ中もファイル開始時の [C]/[F] を 1 行目に残す
+        self._master_batch_hook_last_cache_mark: str = ""
+        self._master_batch_hook_mark_fi: int = 0
         # マスタプレビュー（シナリオ単位）で最後だけ確定表示を走らせるための一時フラグ
         self._master_force_finalize_preview: bool = False
         # mpv: 現在列のマージ値（gcell）を表示するか。進行中は False、最終反映時のみ True。
@@ -882,6 +963,11 @@ class DataAggDebugDialog(QDialog):
         )
         # single_slot warmup 投入済みで step キャッシュ未反映（先読み進行中）
         self._mpv_single_slot_prefetch_pending_sk: tuple[Any, ...] | None = None
+        # mpv: 項目単位の workbook 共有キャッシュ（スレッド横断で frame dict を bind）
+        self._mpv_item_wb_frame: dict[str, Any] | None = None
+        self._mpv_item_wb_mi: int | None = None
+        self._mpv_item_wb_pending_close: list[dict[str, Any]] = []
+        self._mpv_wb_worker_thread: threading.Thread | None = None
         # 進捗 hook の file_index 解決用（compute/extract 実パス。全 scan_paths とは限らない）
         self._mpv_progress_hook_paths: list[str] | None = None
         # mpv 描画: 項目ごとの progress 行キャッシュ（step_idx, rows）
@@ -1598,10 +1684,11 @@ class DataAggDebugDialog(QDialog):
         cur_key = self._value_grid_current_headers_key()
         if self._value_grid_structure_key is None and cur_key:
             self._value_grid_structure_key = cur_key
+        saved_w = self._value_grid_saved_widths
         restore = (
             self._value_grid_user_resized
-            and self._value_grid_saved_widths
-            and len(self._value_grid_saved_widths) == n
+            and saved_w is not None
+            and len(saved_w) == n
             and cur_key == self._value_grid_structure_key
         )
         try:
@@ -1612,12 +1699,12 @@ class DataAggDebugDialog(QDialog):
                 n,
                 restore,
                 bool(self._value_grid_user_resized),
-                len(self._value_grid_saved_widths or []),
+                len(saved_w or []),
                 cur_key == self._value_grid_structure_key,
             )
         except Exception:
             pass
-        if restore:
+        if restore and saved_w is not None:
             hdr = self.value_grid.horizontalHeader()
             floor = hdr.minimumSectionSize()
             self._value_grid_programmatic_gen += 1
@@ -1625,7 +1712,7 @@ class DataAggDebugDialog(QDialog):
             self._value_grid_header_programmatic = True
             try:
                 hdr.blockSignals(True)
-                for c, w in enumerate(self._value_grid_saved_widths):
+                for c, w in enumerate(saved_w):
                     if c < n:
                         self.value_grid.setColumnWidth(c, max(int(floor), int(w)))
             finally:
@@ -1704,6 +1791,10 @@ class DataAggDebugDialog(QDialog):
     def _master_debug_join_max_files(self) -> int:
         """結合項目のファイル読込上限。0 で無制限。"""
         return self._cfg_debug_int("MASTER_DEBUG_JOIN_MAX_FILES", 20)
+
+    def _master_debug_max_files(self) -> int:
+        """非結合項目のファイル読込上限。0 で無制限。"""
+        return self._cfg_debug_int("MASTER_DEBUG_MAX_FILES", 20)
 
     def _mpv_begin_join_compute(self) -> None:
         self._mpv_join_compute_busy = int(getattr(self, "_mpv_join_compute_busy", 0)) + 1
@@ -2309,43 +2400,60 @@ class DataAggDebugDialog(QDialog):
             daemon=True,
             name="master_dbg_compute",
         )
+        self._mpv_wb_worker_thread = t
         t.start()
         from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
 
         cancelled_early = False
-        while t.is_alive():
+        try:
+            while t.is_alive():
+                try:
+                    self._master_drain_progress_hook_queue(drain_q, progress_hook)
+                except DataAggCancelled:
+                    self._master_note_cancel_requested()
+                    cancelled_early = True
+                    break
+                self._process_events_for_master_cancel()
+                if self._master_cancel_pending():
+                    cancelled_early = True
+                    break
+                try:
+                    self._master_poll_cancel(force=True)
+                except DataAggCancelled:
+                    self._master_note_cancel_requested()
+                    cancelled_early = True
+                    break
+                time.sleep(0.005)
+            if cancelled_early or self._master_cancel_pending():
+                # 項目 workbook キャッシュ破棄前にワーカーが参照を手放すのを待つ
+                try:
+                    t.join(timeout=8.0)
+                except Exception:
+                    pass
+                raise DataAggCancelled()
             try:
                 self._master_drain_progress_hook_queue(drain_q, progress_hook)
             except DataAggCancelled:
                 self._master_note_cancel_requested()
-                cancelled_early = True
-                break
-            self._process_events_for_master_cancel()
+                try:
+                    t.join(timeout=8.0)
+                except Exception:
+                    pass
+                raise
             if self._master_cancel_pending():
-                cancelled_early = True
-                break
-            try:
-                self._master_poll_cancel(force=True)
-            except DataAggCancelled:
-                self._master_note_cancel_requested()
-                cancelled_early = True
-                break
-            time.sleep(0.005)
-        if cancelled_early or self._master_cancel_pending():
-            raise DataAggCancelled()
-        try:
-            self._master_drain_progress_hook_queue(drain_q, progress_hook)
-        except DataAggCancelled:
-            self._master_note_cancel_requested()
-            raise
-        if self._master_cancel_pending():
-            raise DataAggCancelled()
-        if exc_box:
-            exc = exc_box[0]
-            if isinstance(exc, DataAggCancelled):
-                self._master_note_cancel_requested()
-            raise exc
-        return result_box[0]
+                try:
+                    t.join(timeout=8.0)
+                except Exception:
+                    pass
+                raise DataAggCancelled()
+            if exc_box:
+                exc = exc_box[0]
+                if isinstance(exc, DataAggCancelled):
+                    self._master_note_cancel_requested()
+                raise exc
+            return result_box[0]
+        finally:
+            self._mpv_clear_wb_worker_if_done()
 
     def _master_note_cancel_requested(self) -> None:
         """協調キャンセル検知時: 連続実行も止める。"""
@@ -2401,7 +2509,7 @@ class DataAggDebugDialog(QDialog):
                 continuous=bool(getattr(self, "_continuous_busy", False))
             )
             try:
-                from core.hc_cursor import progress_dialog_wait_cursor_off  # noqa: WPS433
+                from core.core_cursor import progress_dialog_wait_cursor_off  # noqa: WPS433
 
                 progress_dialog_wait_cursor_off(cancel_reason="master_debug_cancel")
             except Exception:
@@ -2643,6 +2751,189 @@ class DataAggDebugDialog(QDialog):
             return list(hook)
         return list(self._debug_scan_paths or [])
 
+    def _mpv_clear_wb_worker_if_done(self) -> None:
+        t = getattr(self, "_mpv_wb_worker_thread", None)
+        if t is not None and not t.is_alive():
+            self._mpv_wb_worker_thread = None
+
+    def _mpv_wb_worker_alive(self) -> bool:
+        self._mpv_clear_wb_worker_if_done()
+        t = getattr(self, "_mpv_wb_worker_thread", None)
+        return t is not None and t.is_alive()
+
+    def _mpv_queue_wb_frame_pending(self, frame: dict[str, Any]) -> None:
+        pending = getattr(self, "_mpv_item_wb_pending_close", None)
+        if not isinstance(pending, list):
+            pending = []
+            self._mpv_item_wb_pending_close = pending
+        pending.append(frame)
+
+    def _mpv_close_item_wb_frame(self) -> None:
+        """項目 workbook 共有フレームを閉じる。compute 中は遅延破棄する。"""
+        frame = getattr(self, "_mpv_item_wb_frame", None)
+        self._mpv_item_wb_frame = None
+        self._mpv_item_wb_mi = None
+        if frame is None:
+            return
+        self._mpv_dispose_wb_frame(frame)
+
+    def _mpv_dispose_wb_frame(self, frame: dict[str, Any]) -> None:
+        """フレームを閉じる。ワーカー生存中または compute ロック中は pending。"""
+        # join タイムアウト後など、ロックは空でもワーカーが frame を参照し得る
+        if self._mpv_wb_worker_alive():
+            self._mpv_queue_wb_frame_pending(frame)
+            return
+        lock = getattr(self, "_mpv_prog_compute_lock", None)
+        if lock is not None:
+            got = False
+            try:
+                got = bool(lock.acquire(blocking=False))
+            except Exception:
+                got = False
+            if not got:
+                self._mpv_queue_wb_frame_pending(frame)
+                return
+            try:
+                self._mpv_close_wb_frame_obj(frame)
+                self._mpv_flush_pending_wb_frames_unlocked()
+            finally:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+            return
+        self._mpv_close_wb_frame_obj(frame)
+
+    def _mpv_close_wb_frame_obj(self, frame: dict[str, Any] | None) -> None:
+        if not frame:
+            return
+        try:
+            from svc.svc_data_agg_extract import close_workbook_cache_frame
+
+            close_workbook_cache_frame(frame)
+        except Exception:
+            pass
+
+    def _mpv_flush_pending_wb_frames_unlocked(self) -> None:
+        if self._mpv_wb_worker_alive():
+            return
+        pending = getattr(self, "_mpv_item_wb_pending_close", None)
+        if not pending:
+            return
+        self._mpv_item_wb_pending_close = []
+        for fr in list(pending):
+            self._mpv_close_wb_frame_obj(fr)
+
+    def _mpv_ensure_item_wb_frame(self, mi_idx: int) -> dict[str, Any]:
+        mi = int(mi_idx)
+        cur = getattr(self, "_mpv_item_wb_frame", None)
+        cur_mi = getattr(self, "_mpv_item_wb_mi", None)
+        if cur is not None and cur_mi is not None and int(cur_mi) == mi:
+            return cur
+        self._mpv_close_item_wb_frame()
+        from svc.svc_data_agg_extract import new_workbook_cache_frame
+
+        frame = new_workbook_cache_frame()
+        self._mpv_item_wb_frame = frame
+        self._mpv_item_wb_mi = mi
+        try:
+            _data_agg_probe_log.info(
+                "[DATA_AGG_DIAG] mpv_item_wb_cache open mi_idx=%s",
+                mi,
+            )
+        except Exception:
+            pass
+        return frame
+
+    def _mpv_try_flush_pending_wb_frames(self) -> None:
+        """キャンセル後などに残った pending frame を、ワーカー終了後に閉じる。"""
+        self._mpv_clear_wb_worker_if_done()
+        pending = getattr(self, "_mpv_item_wb_pending_close", None)
+        if not pending:
+            return
+        if self._mpv_wb_worker_alive():
+            try:
+                QTimer.singleShot(250, self._mpv_try_flush_pending_wb_frames)
+            except Exception:
+                pass
+            return
+        lock = getattr(self, "_mpv_prog_compute_lock", None)
+        if lock is not None:
+            got = False
+            try:
+                got = bool(lock.acquire(blocking=False))
+            except Exception:
+                got = False
+            if not got:
+                try:
+                    QTimer.singleShot(250, self._mpv_try_flush_pending_wb_frames)
+                except Exception:
+                    pass
+                return
+            try:
+                self._mpv_flush_pending_wb_frames_unlocked()
+            finally:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+            return
+        self._mpv_flush_pending_wb_frames_unlocked()
+
+    def _mpv_item_wb_bind(self, mi_idx: int):
+        """項目単位共有フレームを現在スレッドの TLS に載せる context manager。"""
+        from contextlib import nullcontext
+
+        from svc.svc_data_agg_extract import bind_workbook_cache_frame
+
+        frame = self._mpv_ensure_item_wb_frame(int(mi_idx))
+        if frame is None:
+            return nullcontext()
+        return bind_workbook_cache_frame(frame)
+
+    def _master_progress_cache_mark_prefix(self, detail_s: str) -> str:
+        """raw detail 先頭の [C]/[F] を取り出す（進捗 1 行目＝フェーズ用）。"""
+        s = str(detail_s or "").lstrip()
+        if s.startswith("[C]"):
+            return "[C] "
+        if s.startswith("[F]"):
+            return "[F] "
+        return ""
+
+    @staticmethod
+    def _master_progress_strip_cache_mark(text: str) -> str:
+        """詳細行から先頭の [C]/[F] を除く（フェーズ側へ移したあとの二重表示防止）。"""
+        s = str(text or "").lstrip()
+        for prefix in ("[C] ", "[F] ", "[C]", "[F]"):
+            if s.startswith(prefix):
+                return s[len(prefix) :].lstrip()
+        return s
+
+    def _master_progress_resolve_cache_mark(self, detail_s: str, file_index: int) -> str:
+        """detail のマーク、なければ同一ファイルの直近マークを返す。"""
+        mark = self._master_progress_cache_mark_prefix(detail_s)
+        fi = int(file_index or 0)
+        if mark:
+            self._master_batch_hook_last_cache_mark = mark
+            self._master_batch_hook_mark_fi = fi
+            return mark
+        if fi and fi == int(getattr(self, "_master_batch_hook_mark_fi", 0) or 0):
+            return str(getattr(self, "_master_batch_hook_last_cache_mark", "") or "")
+        return ""
+
+    def _master_progress_phase_with_file(
+        self, phase_head: str, *, mark: str, cur_file: str
+    ) -> str:
+        """1 行目: [C]/[F] + フェーズ + 現在ファイル名。"""
+        head = str(phase_head or "").strip() or "準備中"
+        m = str(mark or "")
+        if m:
+            head = "%s%s" % (m, head)
+        fn = str(cur_file or "").strip()
+        if fn:
+            head = "%s — %s" % (head, fn)
+        return head
+
     def _master_progress_pick_current_file(
         self, detail: str, file_index: int, n_files: int
     ) -> str:
@@ -2738,18 +3029,17 @@ class DataAggDebugDialog(QDialog):
         raw = str(detail_s or "").strip()
         eff_nf = max(1, int(nf))
         eff_fi = int(fi)
-        fn = str(cur_file or "").strip()
+        # ファイル名は 1 行目へ移すため、2 行目には載せない
+        _ = str(cur_file or "").strip()
         item_m = re.search(
             r"項目\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s*（|$)",
             raw,
         )
         if item_m:
-            label = item_m.group(3).strip()
-            base = "読込 %s/%s" % (eff_fi, eff_nf)
-            if fn:
-                base = "%s — %s" % (base, fn)
-            return "%s · 項目 %s/%s %s" % (
-                base,
+            label = self._master_progress_strip_cache_mark(item_m.group(3).strip())
+            return "読込 %s/%s · 項目 %s/%s %s" % (
+                eff_fi,
+                eff_nf,
                 item_m.group(1),
                 item_m.group(2),
                 label,
@@ -2759,11 +3049,9 @@ class DataAggDebugDialog(QDialog):
             raw,
         )
         if row_m:
-            rfn = row_m.group(3).strip()
-            return "読込 %s/%s — %s · 行 %s/%s" % (
+            return "読込 %s/%s · 行 %s/%s" % (
                 eff_fi,
                 eff_nf,
-                rfn,
                 row_m.group(1),
                 row_m.group(2),
             )
@@ -2772,21 +3060,18 @@ class DataAggDebugDialog(QDialog):
             raw,
         )
         if row_done:
-            return "読込完了 — %s" % row_done.group(3).strip()
+            return "読込完了 · 行 %s/%s" % (row_done.group(1), row_done.group(2))
         file_m = re.search(
             r"ファイル\s*(\d+)\s*/\s*(\d+)\s*:\s*(.+?)(?:\s+読込中|（完了）|$)",
             raw,
         )
         if file_m:
-            return "読込 %s/%s — %s" % (
+            return "読込 %s/%s" % (
                 file_m.group(1),
                 file_m.group(2),
-                file_m.group(3).strip(),
             )
-        if fn:
-            return "読込 %s/%s — %s" % (eff_fi, eff_nf, fn)
         if raw:
-            return raw
+            return self._master_progress_strip_cache_mark(raw)
         return "読込 %s/%s" % (eff_fi, eff_nf)
 
     def _master_progress_format_merge_detail(
@@ -2807,10 +3092,9 @@ class DataAggDebugDialog(QDialog):
                 eff_nf,
                 row_n.group(1),
             )
-        if cur_file:
-            return "ファイル %s/%s — %s" % (eff_fi, eff_nf, cur_file)
-        if raw:
-            return "ファイル %s/%s — %s" % (eff_fi, eff_nf, raw)
+        # ファイル名は 1 行目へ移す
+        if cur_file or raw:
+            return "ファイル %s/%s" % (eff_fi, eff_nf)
         return "ファイル %s/%s" % (eff_fi, eff_nf)
 
     def _master_progress_format_join_prep_detail(self, detail_s: str) -> str:
@@ -2973,6 +3257,12 @@ class DataAggDebugDialog(QDialog):
             show_detail = self._master_progress_format_assemble_detail(
                 detail_s, fi=fi, nf=nf, cur_file=cur_file
             )
+        # [C]/[F] + ファイル名は 1 行目。項目進捗でもマークを sticky 維持
+        mark = self._master_progress_resolve_cache_mark(detail_s, fi)
+        show_detail = self._master_progress_strip_cache_mark(show_detail)
+        phase_head = self._master_progress_phase_with_file(
+            phase_head, mark=mark, cur_file=cur_file if ui_done in (4, 5, 6) else ""
+        )
         self._show_run_progress(
             phase_head,
             ui_done,
@@ -3059,9 +3349,9 @@ class DataAggDebugDialog(QDialog):
         self, colvals: list[str], tips: list[str | None] | None
     ) -> tuple[list[str], list[str | None]]:
         """値列の上限適用とツールチップ行の整合（svc が省略行付きで返した場合はそのまま）。"""
-        tt = list(tips or [])
+        tt: list[str | None] = list(tips or [])
         if len(tt) != len(colvals):
-            tt = [None] * len(colvals)
+            tt = _none_tips(len(colvals))
         if any(re.match(r"^#\d+\[[^\]]*\]", str(x)) for x in colvals):
             return list(colvals), tt
         cap = self._max_value_rows()
@@ -3070,7 +3360,8 @@ class DataAggDebugDialog(QDialog):
         if len(colvals) <= cap:
             return list(colvals), tt
         out = _cap_list_capped(colvals, cap)
-        out_t = list(tt[:cap]) + [None]
+        out_t: list[str | None] = list(tt[:cap])
+        out_t.append(None)
         return out, out_t
 
     def _slot_summary_row(self, vals: list[str]) -> str:
@@ -3116,7 +3407,7 @@ class DataAggDebugDialog(QDialog):
             self._value_col_tooltips = copy.deepcopy(_vt_raw)
         else:
             self._value_col_tooltips = [
-                [None] * len(c) for c in self._value_cols
+                _none_tips(len(c)) for c in self._value_cols
             ]
         self._summary_phase_labels = list(st["summary_phase_labels"])
         self.log.setPlainText(str(st.get("log", "")))
@@ -3147,6 +3438,10 @@ class DataAggDebugDialog(QDialog):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._continuous_busy = False
         self._continuous_steps_left = 0
+        self._cancel_scenario_link_prefetch(join=False)
+        self._bump_mpv_prefetch_cancel()
+        self._mpv_close_item_wb_frame()
+        self._mpv_try_flush_pending_wb_frames()
         if self._mode == 0:
             self._persist_scenario_state()
         self._scenario_snapshots.clear()
@@ -3498,8 +3793,10 @@ class DataAggDebugDialog(QDialog):
         self.value_grid.setMinimumWidth(0)
         self.value_grid.setMinimumHeight(self._value_grid_min_height())
         self.value_grid.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.value_grid.setItemDelegate(_ValueGridNoElideDelegate(self.value_grid))
-        _vgh = self.value_grid.horizontalHeader()
+        self._value_grid_delegate = _ValueGridNoElideDelegate(self.value_grid)
+        self.value_grid.setItemDelegate(self._value_grid_delegate)
+        _vgh = _ValueGridPhaseHeader(Qt.Orientation.Horizontal, self.value_grid)
+        self.value_grid.setHorizontalHeader(_vgh)
         _vgh.setTextElideMode(Qt.TextElideMode.ElideNone)
         _vgh.sectionResized.connect(self._on_value_grid_section_resized)
         lay.addWidget(self.value_grid, 1)
@@ -3806,7 +4103,10 @@ class DataAggDebugDialog(QDialog):
         return {}
 
     def _full_reset(self, keep_selection: bool) -> None:
+        self._cancel_scenario_link_prefetch(join=False)
         self._bump_mpv_prefetch_cancel()
+        self._mpv_close_item_wb_frame()
+        self._mpv_try_flush_pending_wb_frames()
         self._mpv_invalidate_final_table_rows()
         self._scenario_bundle_caches.clear()
         self._master_sparse_notice_shown = False
@@ -4055,6 +4355,7 @@ class DataAggDebugDialog(QDialog):
             return
         if self._mode == 0:
             if r != self._sc_idx:
+                self._cancel_scenario_link_prefetch(join=False)
                 self._persist_scenario_state()
                 self._sc_idx = r
                 self._load_scenario_state(self._sc_idx)
@@ -4062,6 +4363,8 @@ class DataAggDebugDialog(QDialog):
             if r != self._mi_idx:
                 self._bump_mpv_prefetch_cancel()
                 self._mpv_deferred_value_grid_mi = None
+                # 項目切替時は workbook キャッシュも破棄（離脱キャプチャを経ない操作）
+                self._mpv_close_item_wb_frame()
                 self._mi_idx = r
                 self._master_sparse_notice_shown = False
                 # 選択マスタ項目の先頭シナリオ（アクティブスロットの先頭）へ。一覧の行番号ではない。
@@ -4230,6 +4533,11 @@ class DataAggDebugDialog(QDialog):
     def _capture_master_leave_item(self, completed_mi: int, *, empty: bool = False) -> None:
         if completed_mi < 0:
             return
+        # 項目単位 workbook キャッシュは離脱時に破棄（次項目へ持ち越さない）
+        wb_mi = getattr(self, "_mpv_item_wb_mi", None)
+        if wb_mi is not None and int(wb_mi) == int(completed_mi):
+            self._mpv_close_item_wb_frame()
+            self._mpv_try_flush_pending_wb_frames()
         if empty:
             self._master_item_snapshots[completed_mi] = {"empty": True}
         else:
@@ -4345,6 +4653,8 @@ class DataAggDebugDialog(QDialog):
     def _enter_master_snapshot_browse_after_cancel(self) -> None:
         if self._mode != 1:
             return
+        self._mpv_close_item_wb_frame()
+        self._mpv_try_flush_pending_wb_frames()
         if not (self._master_item_snapshots or self._master_step_snapshots):
             return
         self._master_cancel_mi = int(self._mi_idx)
@@ -4589,7 +4899,8 @@ class DataAggDebugDialog(QDialog):
         if not isinstance(s0, dict):
             return []
         p = source_ui_block(s0) or {}
-        jdefs = p.get("join_defs") if isinstance(p.get("join_defs"), list) else []
+        raw_jdefs = p.get("join_defs")
+        jdefs: list[Any] = raw_jdefs if isinstance(raw_jdefs, list) else []
         seen: set[str] = set()
         out: list[str] = []
         for jd in jdefs:
@@ -4806,6 +5117,28 @@ class DataAggDebugDialog(QDialog):
                     it0.setBackground(_phase_br)
 
         self._style_results_table_header_rows()
+        self._sync_value_grid_phase_dividers()
+
+    def _value_grid_phase_start_columns(self) -> frozenset[int]:
+        return phase_start_columns_from_spans(
+            list(self._value_col_spans),
+            int(self.value_grid.columnCount()),
+            scenario_mode=self._mode == 0,
+        )
+
+    def _sync_value_grid_phase_dividers(self) -> None:
+        starts = self._value_grid_phase_start_columns()
+        dele = getattr(self, "_value_grid_delegate", None)
+        if isinstance(dele, _ValueGridNoElideDelegate):
+            dele.phase_start_cols = starts
+        hdr = self.value_grid.horizontalHeader()
+        if isinstance(hdr, _ValueGridPhaseHeader):
+            hdr.phase_start_cols = starts
+        try:
+            self.value_grid.viewport().update()
+            hdr.viewport().update()
+        except Exception:
+            pass
 
     def _tree_paint_parent_item_column(self, top: QTreeWidgetItem, col: int = 1) -> None:
         """親行の項目名列に背景色は付けない。"""
@@ -5007,8 +5340,8 @@ class DataAggDebugDialog(QDialog):
     def _mpv_anchor_file_path_for_seed(self, mi_idx: int) -> str:
         """seed pool 用: 横断 join の side（錨）ファイルパスを scan_paths から解決。"""
         from svc.svc_data_agg import (  # noqa: WPS433
-            _file_path_matches_patterns,
-            _join_comparison_side_file_patterns,
+            _file_path_matches_filter_specs,
+            _join_comparison_side_file_filter_specs,
         )
 
         scen = self._scenario_for_dry_run or {}
@@ -5019,11 +5352,11 @@ class DataAggDebugDialog(QDialog):
         if not isinstance(host, dict):
             return ""
         headers = self._mpv_preview_headers()
-        side = _join_comparison_side_file_patterns(host, items, headers)
-        if not side:
+        side_specs = _join_comparison_side_file_filter_specs(host, items, headers)
+        if not side_specs:
             return ""
         for p in self._debug_scan_paths or []:
-            if _file_path_matches_patterns(str(p), side):
+            if _file_path_matches_filter_specs(str(p), side_specs):
                 return str(p)
         return ""
 
@@ -5545,6 +5878,14 @@ class DataAggDebugDialog(QDialog):
             time.sleep(0.01)
 
     def _master_mpv_compute_lock_release_ui(self) -> None:
+        self._mpv_prog_compute_lock_release()
+
+    def _mpv_prog_compute_lock_release(self) -> None:
+        try:
+            self._mpv_clear_wb_worker_if_done()
+            self._mpv_flush_pending_wb_frames_unlocked()
+        except Exception:
+            pass
         self._mpv_prog_compute_lock.release()
 
     def _mpv_ensure_step_n_pick_cached(
@@ -5693,7 +6034,8 @@ class DataAggDebugDialog(QDialog):
     def _mpv_resolve_master_step_colvals(self, si: int) -> list[str]:
         """
         マスタステップの取得値列。結合項目はキャッシュ or 同期 compute（進捗付き）。
-        結合なしは先読みキャッシュ / extract。途中シナリオの段階表示を維持する。
+        非 join の step0 は compute_then_colvals（extract_first による二重走査を避ける）。
+        それ以外の非 join は先読み／progress キャッシュ、だめなら extract。
         """
         from svc.data_agg_master_preview_perf import (  # noqa: WPS433
             master_preview_colvals_should_call_progress_batch,
@@ -5851,17 +6193,35 @@ class DataAggDebugDialog(QDialog):
         except Exception:
             pass
 
-        if step_idx == 0 and not has_join:
+        # #4: step0 非 join は extract_first せず、先に progress compute → 列はキャッシュから
+        if step_idx == 0 and not has_join and n_pick_after > 0:
+            hook0 = self._mpv_master_dbg_progress_hook_or_none()
             try:
                 _data_agg_probe_log.info(
-                    "[DATA_AGG_DIAG] mpv_colvals strategy=extract_first "
-                    "mi_idx=%s step_idx=%s si=%s",
+                    "[DATA_AGG_DIAG] mpv_colvals strategy=compute_then_colvals "
+                    "mi_idx=%s step_idx=%s si=%s n_pick=%s",
                     self._mi_idx,
                     step_idx,
                     si,
+                    n_pick_after,
                 )
             except Exception:
                 pass
+            self._master_raise_if_cancelled()
+            self._mpv_ensure_step_n_pick_cached(
+                n_pick=n_pick_after,
+                progress_hook=hook0,
+                wait_async_ms=0,
+                probe_caller="mpv_step0_compute_then_colvals",
+            )
+            self._master_raise_if_cancelled()
+            self._mpv_sync_progress_cache_from_step_n_pick(n_pick_after)
+            hit = self._mpv_try_colvals_from_step_cache(
+                mi_idx=int(self._mi_idx), n_pick=n_pick_after
+            )
+            if hit is not None:
+                return self._icap(hit)
+
         t_extract = time.perf_counter()
         try:
             _data_agg_probe_log.info(
@@ -6071,9 +6431,12 @@ class DataAggDebugDialog(QDialog):
         by_mi: dict[int, tuple[int, list[list[Any]]]] | None = None,
     ) -> list[list[Any]] | None:
         """前項目 mi の全スロット完了相当 table_rows。呼び出し側 n_pick は使わない。"""
-        by_mi = by_mi if by_mi is not None else (
-            getattr(self, "_mpv_progress_rows_by_mi", {}) or {}
-        )
+        rows_by_mi: dict[int, tuple[int, list[list[Any]]]]
+        if by_mi is not None:
+            rows_by_mi = by_mi
+        else:
+            raw_by = getattr(self, "_mpv_progress_rows_by_mi", None)
+            rows_by_mi = raw_by if isinstance(raw_by, dict) else {}
         mi_saved = int(self._mi_idx)
         step_saved = int(self._master_step_idx)
         try:
@@ -6081,7 +6444,7 @@ class DataAggDebugDialog(QDialog):
             self._rebuild_active_slots()
             n_act = len(self._active_slot_indices or [])
             if n_act > 0:
-                prev = by_mi.get(int(prior_mi))
+                prev = rows_by_mi.get(int(prior_mi))
                 if prev is not None and prev[1]:
                     po = int(prev[0])
                     if po >= n_act:
@@ -6089,7 +6452,7 @@ class DataAggDebugDialog(QDialog):
                 rows = self._mpv_rows_from_step_cache_n_pick(n_act)
                 if rows:
                     return [list(r) for r in rows]
-            ent = by_mi.get(int(prior_mi))
+            ent = rows_by_mi.get(int(prior_mi))
             if ent and ent[1]:
                 return [list(r) for r in ent[1]]
             return None
@@ -6576,6 +6939,8 @@ class DataAggDebugDialog(QDialog):
         probe_caller: str,
         frozen_capture_out: dict[str, Any] | None = None,
     ) -> list[list[Any]]:
+        from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
         frozen_prior, frozen_through = self._mpv_frozen_context_for_mi(int(mi_idx))
         cap_acc: list[dict[str, Any]] | None = (
             [] if frozen_capture_out is not None else None
@@ -6603,6 +6968,9 @@ class DataAggDebugDialog(QDialog):
             cap_jf = self._master_debug_join_max_files()
             if cap_jf > 0:
                 dd["master_preview_join_max_files"] = int(cap_jf)
+            cap_mf = self._master_debug_max_files()
+            if cap_mf > 0:
+                dd["master_preview_max_files"] = int(cap_mf)
             base_items = list((scenario_base or {}).get("items") or [])
             if base_items:
                 dd["preview_join_topology_items"] = copy.deepcopy(base_items)
@@ -6670,16 +7038,17 @@ class DataAggDebugDialog(QDialog):
                 list[str], list[list[Any]], list[list[Any]], int
             ]:
                 iter_ctx: list[dict[str, Any]] = []
-                result = run_preview_compute(
-                    scen,
-                    scan_paths,
-                    max_primary_rows=self._master_preview_display_rows(),
-                    max_table_rows=self._master_preview_display_rows(),
-                    progress_hook=eff_hook,
-                    probe_caller=probe_caller,
-                    cancel_check=self._master_run_cancel_check(),
-                    iteration_contexts_out=iter_ctx,
-                )
+                with self._mpv_item_wb_bind(int(mi_idx)):
+                    result = run_preview_compute(
+                        scen,
+                        scan_paths,
+                        max_primary_rows=self._master_preview_display_rows(),
+                        max_table_rows=self._master_preview_display_rows(),
+                        progress_hook=eff_hook,
+                        probe_caller=probe_caller,
+                        cancel_check=self._master_run_cancel_check(),
+                        iteration_contexts_out=iter_ctx,
+                    )
                 if iter_ctx:
                     dd_local = scen.get("__debug_diag")
                     if isinstance(dd_local, dict):
@@ -6932,7 +7301,7 @@ class DataAggDebugDialog(QDialog):
                     _logger.exception("mpv progress backfill failed n_pick=%s", k)
                     continue
                 finally:
-                    self._mpv_prog_compute_lock.release()
+                    self._mpv_prog_compute_lock_release()
                 dlg = self
                 QTimer.singleShot(
                     0,
@@ -7129,7 +7498,7 @@ class DataAggDebugDialog(QDialog):
             except Exception:
                 _logger.exception("mpv progress prefetch failed")
             finally:
-                dlg._mpv_prog_compute_lock.release()
+                dlg._mpv_prog_compute_lock_release()
             if apply_after:
                 dlg = self
                 QTimer.singleShot(
@@ -7199,8 +7568,9 @@ class DataAggDebugDialog(QDialog):
             return
         tail = sk[-1] if isinstance(sk, tuple) and sk else ()
         n_act = len(tail) if isinstance(tail, tuple) else 0
+        sk_parts: Sequence[Any] = sk
         try:
-            done_np = int(sk[1])
+            done_np = int(sk_parts[1]) if len(sk_parts) > 1 else 0
         except (TypeError, ValueError, IndexError):
             done_np = 0
         if n_act > 0 and 0 < done_np < n_act:
@@ -7381,7 +7751,7 @@ class DataAggDebugDialog(QDialog):
         fb = getattr(self, "_last_master_completed_mi_idx", None)
         best_mi: int | None = None
 
-        def _mi_usable(mi: int, ent: tuple[int, list[list[Any]]]) -> bool:
+        def _mi_usable(mi: int, ent: tuple[int, list[list[Any]]] | None) -> bool:
             if not ent or not ent[1]:
                 return False
             prior_peak = self._mpv_prior_peak_rows_before_mi(int(mi))
@@ -8078,16 +8448,22 @@ class DataAggDebugDialog(QDialog):
         cancel_check: Callable[..., None] | None,
     ) -> list[str]:
         """extract ループ本体（ワーカー可。Qt は progress_hook ブリッジ経由のみ）。"""
+        from contextlib import nullcontext
+
         from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
 
         try:
             from svc.svc_data_agg_extract import (
                 extract_item_bundle,
+                xlsx_progress_cache_mark,
                 xlsx_workbook_scope,
+                xlsx_workbook_scope_active,
             )
         except Exception:
             extract_item_bundle = None  # type: ignore[misc, assignment]
+            xlsx_progress_cache_mark = None  # type: ignore[misc, assignment]
             xlsx_workbook_scope = None  # type: ignore[misc, assignment]
+            xlsx_workbook_scope_active = None  # type: ignore[misc, assignment]
         if extract_item_bundle is None or xlsx_workbook_scope is None:
             return ["（svc_data_agg_extract を読み込めませんでした）"]
         t0 = time.perf_counter()
@@ -8098,67 +8474,86 @@ class DataAggDebugDialog(QDialog):
         hook_paths_prev = getattr(self, "_mpv_progress_hook_paths", None)
         self._mpv_progress_hook_paths = list(paths_list)
         try:
-            for i, fp in enumerate(paths_list, start=1):
-                try:
-                    self._mpv_poll_extract_cancel(cancel_check)
-                except DataAggCancelled:
-                    raise
-                if len(col_vals) >= max_rows:
-                    break
-                fname = Path(str(fp)).name
-                row_prog = min(len(col_vals) + 1, max_rows)
-                if extract_hook is not None:
+            with self._mpv_item_wb_bind(int(mi_idx)):
+                for i, fp in enumerate(paths_list, start=1):
                     try:
-                        extract_hook(
-                            4,
-                            "行 %s/%s: %s 読込中" % (row_prog, max_rows, fname),
-                            i,
-                            len(paths_list),
-                        )
+                        self._mpv_poll_extract_cancel(cancel_check)
                     except DataAggCancelled:
                         raise
-                    except Exception:
-                        pass
-                with xlsx_workbook_scope():  # type: ignore[misc]
-                    try:
-                        _precache_csv_for_master_debug_extract(
-                            fp,
-                            progress_hook=_csv_prog,
+                    if len(col_vals) >= max_rows:
+                        break
+                    fname = Path(str(fp)).name
+                    row_prog = min(len(col_vals) + 1, max_rows)
+                    mark = ""
+                    if xlsx_progress_cache_mark is not None:
+                        try:
+                            mark = str(xlsx_progress_cache_mark(fp) or "")
+                        except Exception:
+                            mark = "[F] "
+                    if extract_hook is not None:
+                        try:
+                            extract_hook(
+                                4,
+                                "%s行 %s/%s: %s 読込中"
+                                % (mark, row_prog, max_rows, fname),
+                                i,
+                                len(paths_list),
+                            )
+                        except DataAggCancelled:
+                            raise
+                        except Exception:
+                            pass
+                    # 項目フレーム bind 済みならファイル単位 scope は張らない（閉じで共有を壊さない）
+                    _file_cm = (
+                        nullcontext()
+                        if (
+                            xlsx_workbook_scope_active is not None
+                            and xlsx_workbook_scope_active()
                         )
-                        jp_hdr = str(one.get("name") or one.get("id") or "").strip()
-                        b = extract_item_bundle(
-                            fp,
-                            one,
-                            item_id=item_id or None,
-                            cell_positions={},
-                            join_path_header=jp_hdr or None,
-                            cancel_check=cancel_check,
-                        )
-                    except DataAggCancelled:
-                        raise
-                    except Exception:
-                        b = {"primary_values": []}
-                _append_extract_primaries_to_col(
-                    col_vals,
-                    b.get("primary_values"),
-                    max_rows=max_rows,
-                )
-                if extract_hook is not None:
-                    try:
-                        extract_hook(
-                            4,
-                            "行 %s/%s: %s（完了）" % (
-                                min(len(col_vals), max_rows),
-                                max_rows,
-                                fname,
-                            ),
-                            i,
-                            len(paths_list),
-                        )
-                    except DataAggCancelled:
-                        raise
-                    except Exception:
-                        pass
+                        else xlsx_workbook_scope()
+                    )
+                    with _file_cm:  # type: ignore[misc]
+                        try:
+                            _precache_csv_for_master_debug_extract(
+                                fp,
+                                progress_hook=_csv_prog,
+                            )
+                            jp_hdr = str(one.get("name") or one.get("id") or "").strip()
+                            b = extract_item_bundle(
+                                fp,
+                                one,
+                                item_id=item_id or None,
+                                cell_positions={},
+                                join_path_header=jp_hdr or None,
+                                cancel_check=cancel_check,
+                            )
+                        except DataAggCancelled:
+                            raise
+                        except Exception:
+                            b = {"primary_values": []}
+                    _append_extract_primaries_to_col(
+                        col_vals,
+                        b.get("primary_values"),
+                        max_rows=max_rows,
+                    )
+                    if extract_hook is not None:
+                        try:
+                            extract_hook(
+                                4,
+                                "%s行 %s/%s: %s（完了）"
+                                % (
+                                    mark,
+                                    min(len(col_vals), max_rows),
+                                    max_rows,
+                                    fname,
+                                ),
+                                i,
+                                len(paths_list),
+                            )
+                        except DataAggCancelled:
+                            raise
+                        except Exception:
+                            pass
         finally:
             self._mpv_progress_hook_paths = hook_paths_prev
         if not col_vals:
@@ -8231,6 +8626,14 @@ class DataAggDebugDialog(QDialog):
             paths_list = file_paths_for_source_extract(paths, src)
         else:
             paths_list = list(paths)
+        join_item = self._mpv_current_item_has_join_defs(int(mi_idx))
+        cap_files = (
+            self._master_debug_join_max_files()
+            if join_item
+            else self._master_debug_max_files()
+        )
+        if cap_files > 0 and len(paths_list) > cap_files:
+            paths_list = list(paths_list[: int(cap_files)])
         n_paths_after = len(paths_list)
         if not paths_list:
             out = ["（該当する主値がありません）"]
@@ -8702,7 +9105,11 @@ class DataAggDebugDialog(QDialog):
             pass
 
         if self._mode == 0:
+            n_before = len(expanded)
             expanded = self._append_scenario_join_columns_if_needed(expanded)
+            n_after = len(expanded)
+            if n_after > n_before:
+                self._value_col_spans.append((n_before, n_after - 1))
 
         ncols = len(expanded)
         if ncols == 0:
@@ -8771,9 +9178,9 @@ class DataAggDebugDialog(QDialog):
     ) -> None:
         """シナリオモード: 周回時は同一サマリ／取得列スロットを上書きする。"""
         idx = self._phase_idx
-        ct = list(col_tooltips or [])
+        ct: list[str | None] = list(col_tooltips or [])
         if len(ct) != len(colvals):
-            ct = [None] * len(colvals)
+            ct = _none_tips(len(colvals))
         row = [plab] + self._summary_vals_for_display(list(vals))
         try:
             if idx < len(self._summary_rows):
@@ -9038,9 +9445,9 @@ class DataAggDebugDialog(QDialog):
         colvals: list[str],
         tips: list[str | None] | None,
     ) -> None:
-        ct = list(tips or [])
+        ct: list[str | None] = list(tips or [])
         if len(ct) != len(colvals):
-            ct = [None] * len(colvals)
+            ct = _none_tips(len(colvals))
         while len(self._value_cols) <= idx:
             self._value_cols.append([])
             self._value_col_tooltips.append([])
@@ -9291,7 +9698,95 @@ class DataAggDebugDialog(QDialog):
             return self._selected_item_name()
         return label
 
+    def _cancel_scenario_link_prefetch(self, *, join: bool = False) -> None:
+        self._scenario_link_prefetch_gen += 1
+        try:
+            self._scenario_link_prefetch_cancel.set()
+        except Exception:
+            pass
+        th = getattr(self, "_scenario_link_prefetch_thread", None)
+        if (
+            join
+            and th is not None
+            and th.is_alive()
+            and th is not threading.current_thread()
+        ):
+            th.join(timeout=180.0)
+        if join or th is None or not th.is_alive():
+            self._scenario_link_prefetch_thread = None
+
+    def _on_scenario_link_prefetch_finished(self, gen: int, sc_idx: int) -> None:
+        if gen != int(getattr(self, "_scenario_link_prefetch_gen", 0)):
+            return
+        if sc_idx != int(self._sc_idx):
+            return
+        try:
+            _diag_logger.info(
+                "[DATA_AGG_DEBUG] scenario_link_prefetch_done sc_idx=%s gen=%s",
+                sc_idx,
+                gen,
+            )
+        except Exception:
+            pass
+
+    def _schedule_scenario_link_prefetch(self) -> None:
+        """主キー表示後、裏で連携・結合を読む。連続実行では呼ばない。"""
+        if self._mode != 0 or getattr(self, "_continuous_busy", False):
+            return
+        item_live = self._live_item_for_scenario_index(self._sc_idx)
+        if not item_live.get("sources"):
+            return
+        self._cancel_scenario_link_prefetch(join=True)
+        self._scenario_link_prefetch_cancel = threading.Event()
+        gen = int(self._scenario_link_prefetch_gen)
+        sc_idx = int(self._sc_idx)
+        item = copy.deepcopy(item_live)
+        paths = list(self._debug_scan_paths or [])
+        cache = self._scenario_bundle_caches.setdefault(sc_idx, {})
+        item_id = str(item.get("id") or "item")
+        cancel_ev = self._scenario_link_prefetch_cancel
+        bridge = self._scenario_link_prefetch_bridge
+
+        def _cancel_check(*, force: bool = False) -> None:
+            from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+            if cancel_ev.is_set():
+                raise DataAggCancelled()
+
+        def _work() -> None:
+            from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
+
+            try:
+                from svc.svc_data_agg_debug_run import (  # noqa: WPS433
+                    fill_scenario_link_join_after_primary,
+                )
+
+                fill_scenario_link_join_after_primary(
+                    item,
+                    paths,
+                    cache,
+                    item_id,
+                    cancel_check=_cancel_check,
+                )
+            except DataAggCancelled:
+                pass
+            except Exception:
+                _logger.exception("scenario link prefetch failed")
+            try:
+                bridge.finished.emit(gen, sc_idx)
+            except Exception:
+                pass
+
+        th = threading.Thread(
+            target=_work,
+            daemon=True,
+            name="scenario_link_prefetch",
+        )
+        self._scenario_link_prefetch_thread = th
+        th.start()
+
     def _clear_current_scenario_results_only(self) -> None:
+        self._cancel_scenario_link_prefetch(join=False)
         self._scenario_bundle_caches.pop(self._sc_idx, None)
         self._phase_idx = 0
         self._summary_rows.clear()
@@ -9396,6 +9891,9 @@ class DataAggDebugDialog(QDialog):
                     prog_hook = self._scenario_make_file_progress_hook(
                         self._scenario_file_progress_phase_message(gi)
                     )
+                continuous = bool(getattr(self, "_continuous_busy", False))
+                if gi >= 3:
+                    self._cancel_scenario_link_prefetch(join=True)
                 try:
                     vals, colvals, events, col_tips = scenario_debug_phase_result(
                         item_live,
@@ -9406,9 +9904,12 @@ class DataAggDebugDialog(QDialog):
                         scan_root=self._scan_root,
                         name_extract_debug_labels=self._cfg.get("NAME_EXTRACT_DEBUG"),
                         progress_hook=prog_hook,
+                        phase2_primary_only=not continuous,
                     )
                 finally:
                     self._close_run_progress()
+                if gi == 2 and not continuous:
+                    self._schedule_scenario_link_prefetch()
                 colvals, col_tips = self._icap_with_tips(colvals, col_tips)
                 sid = str(item_live.get("id") or "")
                 for ln in format_synthetic_events_for_log(events, sid):
@@ -9416,7 +9917,7 @@ class DataAggDebugDialog(QDialog):
             else:
                 vals = list(slot["summary_vals"])
                 colvals = self._icap(list(slot["values_column"]))
-                col_tips = [None] * len(colvals)
+                col_tips = _none_tips(len(colvals))
                 self._show_run_progress(
                     "結果を反映中",
                     1,
@@ -9699,7 +10200,7 @@ class DataAggDebugDialog(QDialog):
         aborted = self._master_return_if_step_cancelled()
         if aborted is not None:
             return aborted
-        self._upsert_value_cols_at(gr, colvals, [None] * len(colvals))
+        self._upsert_value_cols_at(gr, colvals, _none_tips(len(colvals)))
         if (
             self._scenario_for_dry_run
             and self._debug_scan_paths

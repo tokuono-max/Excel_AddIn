@@ -13,7 +13,6 @@ History (latest 3):
   - 2.5.1 (2026-04-16) `resolve_config_file_path`: `HC_INSTALL_ROOT` 配下の config を優先（配布の単一正本）。無ければ従来の core 親＝プロジェクト／EXE バンドルルートの config。
   - 2.5.0 (2026-03-09) 未使用定義を削除。APP_VERSION/BUILD_TAG, フォントサイズBOLD/SUB, Excel/VBA/Win32未使用定数, IPC, QT_PROGRESS_POLL_MS 等を整理。
   - 2.4.2 (2026-03-09) 古い画面設定を削除。_CSV_MG ブロックと UI_SCREENS 実体を廃止し、UI_SCREENS={} に。画面設定は config/ui_*.json に統一。
-  - 2.4.1 (2026-03-09) オートフィット行数上限 AUTOFIT_MAX_ROWS を追加。全モジュールで行数基準に統一するため core に集約。
 """
 
 # ==============================================================================

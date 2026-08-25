@@ -10,8 +10,6 @@ History (latest 3):
   - 1.2.1 (2026-07-02) CHOICE: アイコンと文言を横並びにし、固定高さによる余白を解消。
   - 1.2.0 (2026-07-02) CHOICE: デフォルトボタンを全削除に。viewport 着色の ScreenUpdating 固定でちらつき抑制。
   - 1.1.2 (2026-05-05) progress action を追加。svc_trm_ex の実行中進捗を共通 ProgressDialog で表示。
-  - 1.1.1 (2026-04-13) CHOICE: prepare 後に遅延 _set_owner_hwnd 再試行（apply_window_config の CHOICE スキップ分の補強）。JSON は EXCEL_KEEP_FOREGROUND 既定オフ・VIEWPORT POLL_MS 緩めは設定側。
-  - 1.1.0 (2026-04-13) 選択ダイアログ表示中、文頭・文末検出セルを viewport 追従で着色（ui_dupli と同系）。閉じる／ボタン確定時に全解除＋sidecar 削除。
 """
 from __future__ import annotations
 

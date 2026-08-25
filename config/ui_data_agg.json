@@ -334,7 +334,8 @@
       "_doc_DEBUG_LIMITS": [
         "SCENARIO_DEBUG_VALUE_ROWS … シナリオデバッグの値プレビュー行数上限（検出パス列・フェーズ取得など）。",
         "MASTER_DEBUG_DISPLAY_ROWS … マスタデバッグの結果一覧グリッド表示行数上限。",
-        "MASTER_DEBUG_JOIN_MAX_FILES … マスタデバッグの結合項目で読み込むファイル数上限。0 または省略で無制限。",
+        "MASTER_DEBUG_MAX_FILES … マスタデバッグの非結合項目で読み込むファイル数上限。0 または省略で無制限。同系ファイル群の連携シナリオに適用。結合項目は MASTER_DEBUG_JOIN_MAX_FILES。",
+        "MASTER_DEBUG_JOIN_MAX_FILES … マスタデバッグの結合項目で読み込むファイル数上限。0 または省略で無制限。別系ファイルは全走査から再抽出し、この上限を掛ける。",
         "VALUES_TITLE_MASTER_ROWS_BUSY … 結果一覧見出しに結合 compute 中と出す文言。",
         "VALUES_TITLE_MASTER_ROWS_FMT … 結果一覧見出し文末の3指標書式（表示N, 表示M, ファイル数, 読込行数）。",
         "VALUES_TITLE_MASTER_SCAN_CAP_SUFFIX … 走査安全弁到達時の見出し suffix。",
@@ -343,7 +344,8 @@
       ],
       "SCENARIO_DEBUG_VALUE_ROWS": 50,
       "MASTER_DEBUG_DISPLAY_ROWS": 200,
-      "MASTER_DEBUG_JOIN_MAX_FILES": 200,
+      "MASTER_DEBUG_MAX_FILES": 20,
+      "MASTER_DEBUG_JOIN_MAX_FILES": 20,
       "MAX_PHASE_SLOTS": 16,
       "SCENARIO_PROGRESS_MIN_FILES": 5,
       "NAME_EXTRACT_DEBUG": {
@@ -694,7 +696,8 @@
         ],
         "FILE_NAME_RULE_DEFAULT_INDEX": 1,
         "LABEL_FILE_NAME": "ファイル名",
-        "FILE_NAME_PLACEHOLDER": "空欄で全ファイル対象",
+        "FILE_NAME_PLACEHOLDER": "例: 光特性,紐づけ  （空欄で全ファイル／カンマ区切りで複数可）",
+        "TOOLTIP_FILE_NAME": "検索条件が「完全一致／含む／含まない」のときのファイル名（拡張子除く）です。\n\n・カンマ区切りで複数指定可（例: 光特性,紐づけ）\n・先頭・末尾のカンマや空要素は無視\n・含む／完全一致: いずれかに該当\n・含まない: いずれも含まない\n・空欄: フィルタなし（全ファイル対象）",
         "DEFAULT_FILE_PATTERN": "",
         "LABEL_FILE_EXT": "ファイル種別",
         "EXT_OPTIONS": [
@@ -722,6 +725,8 @@
         "SEC_SHEET_TITLE": "2. シート名",
         "LABEL_SHEET_RULE": "シート名条件",
         "LABEL_SHEET_NAME": "シート名",
+        "PLACEHOLDER_SHEET_NAME": "例: R_,実装  （空欄は該当なし／カンマ区切りで複数可）",
+        "TOOLTIP_SHEET_NAME": "シート名条件が「完全一致／含む／含まない」のときの検索文字です。\n\n・カンマ区切りで複数指定可（例: R_,実装）\n・先頭・末尾のカンマや空要素は無視\n・含む／完全一致: いずれかに該当\n・含まない: いずれも含まない\n・空欄: 該当なし（左端シート時は入力無効）",
         "SHEET_RULE_ITEMS": [
           "左端シート",
           "完全一致",

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Update staging cleanup: payload dir, single-generation full_prev archives, stale gate locks."""
+"""Update staging cleanup: payload dir, legacy full_prev archives, stale gate locks."""
 
 from __future__ import annotations
 
@@ -33,50 +33,54 @@ def cleanup_update_payload_dir(install_root: Path, log: Callable[[str], None] | 
             log(f"update_housekeeping: payload rmtree err={type(e).__name__}: {e}")
 
 
-def sweep_full_prev_to_single_generation(install_root: Path, log: Callable[[str], None] | None = None) -> None:
-    """Keep retain.json zip_path if valid, else newest full_prev_*.zip; remove other full_prev_*.zip."""
+def remove_legacy_full_prev_archives(
+    install_root: Path, log: Callable[[str], None] | None = None
+) -> None:
+    """
+    旧方針の復旧用 full_prev_*.zip / retain.json を削除する。
+
+    現行は旧版バックアップを作らない。既存端末に残ったアーカイブの掃除用。
+    """
     archive_dir = install_root / _ARCHIVE_FULL_REL
     if not archive_dir.is_dir():
         return
-    retain_path = archive_dir / "retain.json"
-    keep_key: str | None = None
-    try:
-        if retain_path.is_file():
-            meta = json.loads(retain_path.read_text(encoding="utf-8-sig"))
-            if isinstance(meta, dict):
-                zp = str(meta.get("zip_path") or "").strip()
-                if zp:
-                    p = Path(zp)
-                    if p.is_file():
-                        keep_key = str(p.resolve()).lower()
-    except Exception:
-        pass
-    if keep_key is None:
-        cands = sorted(archive_dir.glob("full_prev_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not cands:
-            if log:
-                log("update_housekeeping: sweep_full_prev no candidates")
-            return
-        try:
-            keep_key = str(cands[0].resolve()).lower()
-        except Exception:
-            keep_key = str(cands[0]).lower()
     removed = 0
-    for fp in archive_dir.glob("full_prev_*.zip"):
-        try:
-            key = str(fp.resolve()).lower()
-        except Exception:
-            key = str(fp).lower()
-        if key == keep_key:
-            continue
+    for fp in list(archive_dir.glob("full_prev_*.zip")) + list(archive_dir.glob("full_prev_*.zip.new")):
         try:
             fp.unlink(missing_ok=True)
             removed += 1
         except OSError as e:
             if log:
-                log(f"update_housekeeping: sweep unlink failed path={fp} err={type(e).__name__}: {e}")
+                log(
+                    "update_housekeeping: remove_legacy_full_prev unlink failed "
+                    f"path={fp} err={type(e).__name__}: {e}"
+                )
+    retain = archive_dir / "retain.json"
+    try:
+        if retain.is_file():
+            retain.unlink(missing_ok=True)
+            removed += 1
+    except OSError as e:
+        if log:
+            log(
+                "update_housekeeping: remove_legacy_full_prev retain unlink failed "
+                f"err={type(e).__name__}: {e}"
+            )
+    # 空なら archive/full も落とす（親 update/archive は他用途の余地があるので触らない）
+    try:
+        if archive_dir.is_dir() and not any(archive_dir.iterdir()):
+            archive_dir.rmdir()
+    except OSError:
+        pass
     if log:
-        log(f"update_housekeeping: sweep_full_prev removed={removed}")
+        log(f"update_housekeeping: remove_legacy_full_prev removed={removed}")
+
+
+def sweep_full_prev_to_single_generation(
+    install_root: Path, log: Callable[[str], None] | None = None
+) -> None:
+    """後方互換エイリアス。現行は全世代削除（旧版バックアップ廃止）。"""
+    remove_legacy_full_prev_archives(install_root, log)
 
 
 def _startup_gate_lock_stale(
@@ -157,7 +161,7 @@ def run_startup_housekeeping(
     *,
     keep_gate_hwnd: int | None = None,
 ) -> None:
-    """Startup path when no pending update: stale gate locks + single full_prev generation."""
+    """Startup path when no pending update: stale gate locks + legacy full_prev cleanup."""
     if not install_root.is_dir():
         return
     sweep_stale_startup_excel_gate_locks(
@@ -165,7 +169,7 @@ def run_startup_housekeeping(
         log,
         keep_hwnd=keep_gate_hwnd,
     )
-    sweep_full_prev_to_single_generation(install_root, log)
+    remove_legacy_full_prev_archives(install_root, log)
 
 
 def post_deferred_bin_success_housekeeping(
@@ -173,9 +177,9 @@ def post_deferred_bin_success_housekeeping(
     *,
     log: Callable[[str], None] | None = None,
 ) -> None:
-    """After hc_updater successfully applied bin (defer path): clear payload + single full_prev."""
+    """After hc_updater successfully applied bin (defer path): clear payload + legacy archives."""
     if not install_root.is_dir():
         return
     cleanup_update_payload_dir(install_root, log)
     sweep_stale_startup_excel_gate_locks(install_root, log)
-    sweep_full_prev_to_single_generation(install_root, log)
+    remove_legacy_full_prev_archives(install_root, log)

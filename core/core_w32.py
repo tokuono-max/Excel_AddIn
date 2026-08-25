@@ -19,13 +19,6 @@ History (latest 3):
   - 2.2.0 (2026-06-29) win32_get_open_file_name / win32_get_save_file_name: comdlg32 直叩き（hwndOwner=Excel）。qt_name_filter_to_win32。
   - 2.1.9 (2026-06-29) enum_visible_top_level_windows_for_pid: ネイティブファイルダイアログ前面化の HWND 探索用。
   - 2.1.8 (2026-05-03) get_process_image_path_for_diag: PID から QueryFullProcessImageNameW で exe パス短縮（EXCEL_FRONT_FOLLOW 診断の前景 PID 特定用）。
-  - 2.1.7 (2026-04-13) WS_EX_TOOLWINDOW は既定で付与しない（タイトルバー min/max 表示のため）。付与は HC_USE_WS_EX_TOOLWINDOW_FOR_TASKBAR=1 またはウィジェット属性。get_window_exstyle_toolwindow 追加。set_owner から拡張スタイル適用を除去（_set_owner_hwnd の遅延経路のみ widget 付きで判定）。
-  - 2.1.6 (2026-04-13) get_window_caption_style_summary（GWL_STYLE・最小化/最大化ボックス bit、HC_UI_WINDOW_CAPTION_DIAG 用）。
-  - 2.1.5 (2026-04-12) set_foreground_window_attach_input / nudge_top_level_to_foreground（モーダル終了後の CMD 前面化対策）。
-  - 2.1.4 (2026-04-10) 診断用: get_window_class_name / get_owner_hwnd / is_window_visible / set_foreground_window_result / format_ui_fg_diag_line（HC_UI_FG_DIAG）。
-  - 2.1.3 (2026-04-08) set_owner 後に apply_taskbar_hiding_extended_style: WS_EX_TOOLWINDOW + WS_EX_APPWINDOW 解除でタスクバー非表示を強化。HC_SKIP_WS_EX_TOOLWINDOW=1 で無効化。
-  - 2.1.2 (2026-03-01) 追加: set_window_style_remove_min_max（最小化・最大化ボタンをタイトルバーから削除）。
-  - 2.1.1 (2026-03-01) set_owner から WS_EX_TOOLWINDOW を削除。Windows11 タイトルバー×赤表示を解消。
 """
 
 from __future__ import annotations

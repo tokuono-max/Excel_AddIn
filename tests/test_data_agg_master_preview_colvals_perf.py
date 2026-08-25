@@ -275,8 +275,8 @@ def test_prior_step_table_seed_prefers_stage_cache_over_polluted_pool() -> None:
     )
 
 
-def test_join_pool_row_cap_scales_with_file_count() -> None:
-    assert master_preview_join_pool_row_cap(read_rows_limit=5000, file_count=5) == 25000
+def test_join_pool_row_cap_uses_display_limit() -> None:
+    assert master_preview_join_pool_row_cap(read_rows_limit=5000, file_count=5) == 5000
     assert master_preview_per_file_pool_row_cap(read_rows_limit=5000) == 5000
 
 
@@ -343,12 +343,12 @@ def test_master_debug_format_row_count_uses_thousands_sep() -> None:
     assert master_debug_format_row_count(25000) == "25,000"
 
 
-def test_read_pool_display_cap_scales_with_file_count() -> None:
+def test_read_pool_display_cap_uses_display_limit() -> None:
     from svc.data_agg_master_preview_perf import master_preview_read_pool_display_cap
 
     assert master_preview_read_pool_display_cap(
         read_rows_limit=5000, file_count=5
-    ) == 25000
+    ) == 5000
 
 
 def test_join_step0_should_skip_progress_compute_without_cache() -> None:

@@ -14,11 +14,6 @@ History (latest 3):
   - 0.1.7 (2026-07-05) freeze: SplitRow を全 Window で試行・xlwings は後回し・BaseException/PyErr_Clear で Nuitka COM 例外を抑止。
   - 0.1.6 (2026-07-05) freeze_sheet_below_header_row: SplitRow 優先・Window/FreezePanes 検証・Select 廃止・bool 戻り値。
   - 0.1.5 (2026-06-03) read_master: .xlsm を OpenXML Excel として .xlsx と同経路で読込。
-  - 0.1.4 (2026-06-06) suspend_sheet_updates を restore_on_exit=False に（DONE 前の ScreenUpdating 復帰を呼び出し側に委譲）。
-  - 0.1.3 (2026-04-14) write_scenario_export_table: 列幅・行の AutoFit をやめ、データ・ヘッダは折り返しなし（シナリオ定義の多列エクスポート向け）。
-  - 0.1.2 (2026-04-07) データ集約レポート: 記録日時の右に「処理時間」列。一括サマリ行に wall 秒を表示。
-  - 0.1.1 (2026-04-04) write_master_to_sheet に replace_full_block（Excel 上書き／指定セルのブロック置換）。
-  - 0.1.0 (2026-03-18) 新規作成。read_master / write_master / apply_rows。
 """
 from __future__ import annotations
 
@@ -136,6 +131,7 @@ EVENT_LOG_SHEET_LEGACY = "DataAgg_EventLog"
 EVENT_LOG_HEADERS = [
     "記録日時",
     "処理時間",
+    "出力行数",
     "区分",
     "書込み方式",
     "出力シート名",
@@ -222,7 +218,9 @@ def format_path_trace_for_event_log(
         },
         ensure_ascii=False,
     )
-    return [[ts, "", _event_log_reason_ja(str(reason_code)), "", "", sid, fp, detail]]
+    return [
+        [ts, "", "", _event_log_reason_ja(str(reason_code)), "", "", sid, fp, detail]
+    ]
 
 
 def format_join_events_for_event_log(
@@ -239,6 +237,7 @@ def format_join_events_for_event_log(
     return [
         [
             ts,
+            "",
             "",
             _event_log_reason_ja(str(ev.get("reason_code") or "")),
             "",
@@ -302,6 +301,7 @@ def format_batch_run_summary_row(
     return [
         ts,
         elapsed_cell,
+        int(output_rows),
         _event_log_reason_ja(code_en),
         str(excel_write_summary or ""),
         str(output_sheet_name or ""),

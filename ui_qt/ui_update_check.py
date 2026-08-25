@@ -9,9 +9,10 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtGui import QTextOption
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def _get_cfg() -> dict[str, Any]:
@@ -87,15 +88,33 @@ class UpdateCheckDialog(QDialog):
             except Exception:
                 pass
 
-        msg_lbl = QLabel(_normalize_message_newlines(msg))
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setMinimumWidth(360)
-        try:
-            msg_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        except Exception:
-            pass
-        lay.addWidget(msg_lbl)
-        lay.addStretch(1)
+        msg_text = _normalize_message_newlines(msg)
+        if self._is_confirm:
+            body = QPlainTextEdit(self)
+            body.setReadOnly(True)
+            body.setFrameShape(QFrame.Shape.NoFrame)
+            try:
+                body.setUndoRedoEnabled(False)
+            except Exception:
+                pass
+            try:
+                body.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            except Exception:
+                pass
+            body.setPlainText(msg_text)
+            body.setMinimumWidth(520)
+            body.setMinimumHeight(180)
+            lay.addWidget(body, 1)
+        else:
+            msg_lbl = QLabel(msg_text)
+            msg_lbl.setWordWrap(True)
+            msg_lbl.setMinimumWidth(360)
+            try:
+                msg_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            except Exception:
+                pass
+            lay.addWidget(msg_lbl)
+            lay.addStretch(1)
 
         row = QHBoxLayout()
         row.addStretch(1)

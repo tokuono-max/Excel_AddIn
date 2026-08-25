@@ -28,15 +28,13 @@ write_master() / write_master_to_sheet() の mode 分岐に duplicate_append を
 現状「無い」根拠
 svc/svc_data_agg_scenario.py の WRITE_MODES には duplicate_append が含まれる
 しかし svc/svc_data_agg_write.py にあるモード定数は MODE_APPEND/OVERWRITE/FILL_IN のみで、duplicate_append の分岐が 存在しない（検索ヒットなし）
-4) file_name_rule / file_pattern による “シナリオ単位ファイル絞り込み” が未実装
-要求: §10.3.3（UI保存）＋「抽出エンジンでの適用は §10.9」
-実装が必要な場所（本来）
-svc/svc_data_agg.py の _run_batch() / _run_step()：
-scan_folder() で得た候補 file_paths を、各 item/source の UI ブロック（ui_scenario_source_v1／旧キー互換）の file_name_rule と file_pattern で さらに絞る
-もしくは svc/svc_data_agg_scan.py に “ルール付きフィルタ” API を追加して呼ぶ
-現状「無い」根拠
-svc/svc_data_agg.py 内に file_name_rule / file_pattern の参照が 存在しない（検索ヒットなし）
-ui_qt/ui_data_agg.py 側は ui_scenario_source_v1 に保存するが、svc 側へ適用されていない（当該メモの時点の記述）
+4) file_name_rule / file_pattern による “シナリオ単位ファイル絞り込み” 【実装済み・本メモは旧記述】
+要求: §10.3.3（UI保存）＋抽出エンジン適用
+実装場所（現状）
+svc/svc_data_agg_extract.py の source_passes_file_name_filter（stem・大小無視・カンマ複数）
+svc/svc_data_agg.py の filter_file_paths_by_item_file_patterns / _file_path_matches_filter_specs（結合・出力行も同ルール）
+svc/data_agg_sheet_resolve.py の parse_comma_separated_patterns（シート名条件と共用）
+旧メモ「svc 側へ未適用」は現状と矛盾するため無効。詳細は要求定義書 §10.3.3 を正とする。
 5) 「対象ファイル一覧（別画面）」要件（並び替え・実行中ハイライト等）が未達
 要求: §3.2 / 画面一覧 No.2
 別画面でパス一覧、並び順編集、実行中の項目/参照ファイルが分かる表示（ハイライト等）

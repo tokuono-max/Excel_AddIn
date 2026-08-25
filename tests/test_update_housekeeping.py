@@ -74,6 +74,22 @@ def test_sweep_respects_keep_hwnd(tmp_path: Path) -> None:
     assert keep.is_file()
 
 
+def test_remove_legacy_full_prev_archives(tmp_path: Path) -> None:
+    root = tmp_path / "app"
+    archive = root / "update" / "archive" / "full"
+    archive.mkdir(parents=True)
+    z1 = archive / "full_prev_1.0.0.0.zip"
+    z2 = archive / "full_prev_1.0.1.0.zip"
+    z1.write_bytes(b"a")
+    z2.write_bytes(b"b")
+    (archive / "retain.json").write_text("{}", encoding="utf-8")
+    uh.remove_legacy_full_prev_archives(root)
+    assert not z1.is_file()
+    assert not z2.is_file()
+    assert not (archive / "retain.json").is_file()
+    assert not archive.is_dir()
+
+
 def test_sweep_does_not_remove_apply_lock_or_updater_result(tmp_path: Path) -> None:
     root = tmp_path / "app"
     locks = root / "update" / "locks"

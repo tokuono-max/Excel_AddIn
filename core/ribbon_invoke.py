@@ -14,8 +14,6 @@ History (latest 3):
   - 1.12.2 (2026-06-13): _ensure_book を HWND 直結（apps.active 廃止）。マルチ Excel 対応。
   - 1.12.1 (2026-06-07): xlwings 先行 import（起動時スレッド prewarm）を追加。
   - 1.12.0 (2026-04-11) `hc_invoke.py` から `core/ribbon_invoke.py` へ移設。診断ロガー `hc_csv_tool.diag.ribbon_invoke`。
-  - 1.11.9 (2026-04-11) ルート hc_invoke.py。_invoke_simple_svc / _invoke_csv_family 集約。
-  - 1.11.8 (2026-04-11) invoke finally の WaitForm 通知対象を ribbon_public_to_svc に集約。
 """
 
 from __future__ import annotations

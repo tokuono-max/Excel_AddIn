@@ -11,12 +11,6 @@ History (latest 3):
   - 1.1.7 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.1.6 (2026-07-02) Undo 部分スナップショット: 選択外接矩形のみ save_undo_snapshot に渡す。
   - 1.1.5 (2026-07-02) 完了通知 UX: progress DONE に done_delay_ms、ACK 待ち中 ScreenUpdating 維持、完了 UI 送出後は bring_to_front スキップ。
-  - 1.1.4 (2026-07-02) 解析ベクトル化・COM 読込チャンク拡大・ほぼ全行変化時の一括書込 fast path。
-  - 1.1.3 (2026-07-02) 選択範囲を UsedRange 交差に縮小、変更行のみ書込、書込中 ScreenUpdating 停止。
-  - 1.1.2 (2026-06-13) Version / __version__ / History 番号を同期。
-  - 1.1.0 (2026-04-06) HC_LOG_PERF: [DT_YMD_PERF]。診断: [DT_YMD_TRACE]。
-  - 1.0.0 (2026-03-18) hc_dt_ymd から分離。core_xlc/get_excel_context_from_hwnd、進捗IPC、完了通知。
-  - 初出 (2026-03-06) 計画に基づく svc_dt_ymd + ui_dt_ymd 新規作成。
 """
 from __future__ import annotations
 

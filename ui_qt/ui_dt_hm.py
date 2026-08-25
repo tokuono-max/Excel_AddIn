@@ -11,8 +11,6 @@ History (latest 3):
   - 1.2.4 (2026-07-02) 完了通知: col_dl 同型（opacity reveal 廃止・prepare で位置確定・opacity=1）。
   - 1.2.3 (2026-07-02) 完了通知: prepare から ensure_front を除去し reveal を同期化（空枠一瞬表示の抑制）。
   - 1.2.2 (2026-07-02) 完了通知を dt 専用ダイアログ共通化（リスト枠なし + opacity reveal）。
-  - 1.2.1 (2026-07-02) 完了通知: detail_text のみ表示（CSV 結合用リスト枠を出さない）。
-  - 1.2.0 (2026-07-02) 完了／警告を共通 DoneDialog（opacity reveal）に統合。上部黒塗りを抑制。
 """
 from __future__ import annotations
 

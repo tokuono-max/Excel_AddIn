@@ -14,34 +14,6 @@ History (latest 3):
   - 1.3.38 (2026-07-03) UI 待ち後は resolve_fresh_book_after_ui_wait で Book を先に再取得（COM_NG 根本対策）。book_reattached 経路を整理。
   - 1.3.37 (2026-07-02) 進捗 pickle を core.progress_pickle_write に統一。DONE 検証・失敗ログ・ERROR fallback。
   - 1.3.36 (2026-06-30) （未コミット系の版上げを含む）
-  - 1.3.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
-  - 1.3.34 (2026-06-29) 工程3進捗に AutoFit/AutoFilter の実行・省略を明示。ACK タイムアウト時に ui_server へ nudge。
-  - 1.3.33 (2026-06-29) 展開後 AutoFit/AutoFilter を ui_csv_ld.json（AUTOFIT_MAX_ROWS / AUTOFILTER）に統一。環境変数 HC_CSV_LD_AUTOFIT_* / SKIP_AUTOFIT 廃止。
-  - 1.3.32 (2026-06-22) _resolve_book_and_sheet に ptr_s 引数を追加（csv_sp 等との後方互換。挙動は従来どおり）。
-  - 1.3.30 (2026-06-13) 進捗 UI 共通設定を core.csv_tool_progress_ui に委譲（保存・結合・分割と共有）。
-  - 1.3.29 (2026-06-13) ファイル確定直後に progress_dialog_wait_cursor_on（Excel 砂時計の即時反映）。
-  - 1.3.28 (2026-06-13) UI責務整理: progress_closed_path ACK 待ち後に restore。bring_to_front 廃止。DONE 後 sleep を ACK に置換。
-  - 1.3.25 (2026-06-06) 進捗表示中は excel_lock=True（読込中 Excel 操作無効）。完了時 teardown で解除。
-  - 1.3.24 (2026-06-04) 読込終了時に EnableEvents=True を保証（core.excel_perf_mode / restore_excel_host_after_operation）。シート切替でステータスバー復帰。
-  - 1.3.23 (2026-06-04) シート名: ファイル名を Excel 最大 31 文字・禁止文字除去に整形。分割時は -N 分を確保して切り詰め。
-  - 1.3.22 (2026-06-04) 進捗更新を細かく: 書込み notify 5k 行・stride/間隔/poll/creep 既定を強化。HC_CSV_LD_PROGRESS_WRITE_NOTIFY_ROWS。
-  - 1.3.21 (2026-06-04) 進捗比率: バー用 total をデータ行数（ファイル行−ヘッダ）に統一。pct は done/total と一致。
-  - 1.3.20 (2026-06-04) ファイル選択後の COM 切れ対策: book 再取得・HWND からシート解決。失敗時は進捗 ERROR（即 DONE 閉じを避ける）。
-  - 1.3.19 (2026-06-03) 砂時計: ファイル確定後〜処理完了まで ON＋再武装。進捗: poll 60ms / creep 5 / 書込み中は時間ベース IPC。
-  - 1.3.18 (2026-06-03) 大容量: read chunk / write_step 既定強化。文字列書込は範囲 @ + 素の値（' 全セル変換省略）。csv_read_wait_ms 計測修正。読込中砂時計。
-  - 1.3.17 (2026-06-03) jit_breakdown 計測ログ（pandas_read / matrix_tolist / excel_write / sheet_boundary / finalize / autofit ms）。
-  - 1.3.16 (2026-05-29) 進捗滑らか化: Excel 書込み 50k 刻み + 時間ベース IPC・UI バー補間・poll 100ms。
-  - 1.3.15 (2026-05-29) 進捗 IPC 既定間隔を 50k 行に戻し UI 更新を高頻度化（Excel 書込み最適化は維持）。
-  - 1.3.14 (2026-05-29) Excel 書込み高速化: チャンク 100k 既定・書式 @ をシート単位一括・進捗 IPC 間引き・EnableEvents 抑止・ループ内 yield 削減。
-  - 1.3.13 (2026-04-10) 計測: `pick_to_done_ms`（ファイル確定〜`load_csv_flow_done`）。`phase=pick_confirmed` で区間 B 始点。docs/csv_ld_perf_measurement.md 参照。
-  - 1.3.12 (2026-04-07) ファイル選択後・処理完了後に core_w32.bring_to_front で Excel 前面復帰（背面に回る事象の緩和）。ui_csv_ld のダイアログ終了時も同対応。
-  - 1.3.11 (2026-04-06) 環境変数: HC_PROGRESS_WINDOW_STARTUP_WAIT_SEC / HC_EXCEL_HWND を core.core_env 経由に統一。
-  - 1.3.10 (2026-04-06) 運用ログ・診断ログ: load_csv / READY_UI / 結果待ち / do_load の phase と経過 ms、req 相関。book=None 時は notify_wait_form_ready。
-  - 1.3.9 (2026-03-13) 無表示1秒未満化: _watch_result からは progress_ui_already_shown=True で呼び出し、準備中ブロックをスキップ。ui_server が即表示する前提。
-  - 1.3.8 (2026-03-13) 進捗をファイル選択直後に表示（準備中）。find_sheet_by_guid/行数取得の前に進捗UI依頼し体感遅延を短縮。早期return時はDONEで閉じる。
-  - 1.3.7 (2026-03-11) 進捗まわり: 表示待ちを HC_PROGRESS_WINDOW_STARTUP_WAIT_SEC で環境変数化（既定1.0秒）。進捗に seq を付与して順序保証。
-  - 1.3.6 (2026-03-09) オートフィットをセル数→行数基準に変更。定数は core_cst.AUTOFIT_MAX_ROWS に統一。
-  - 1.3.5 (2026-03-09) 一括書込みを表示停止で高速化。書込み後は有効領域外を clear_used_range_overflow でクリア。
 """
 from __future__ import annotations
 

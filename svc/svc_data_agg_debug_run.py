@@ -6,6 +6,8 @@ Purpose:
   データ集約デバッグ UI 向けの抽出指標・§10.8 形式ログ行・一括ドライラン。
   本番ロジックは svc_data_agg.compute_batch_table_rows / svc_data_agg_extract に委譲する。
   fill_bundles_for_scenario_phase に任意の progress_hook(done,total) があり、デバッグ UI の長時間ステップ向け。
+  フェーズ2は主キーのみ（連続実行は一括）。空主キーの連携は結果に出さない。
+  表示上限（SCENARIO_DEBUG_VALUE_ROWS）に達した主キー件数で以降のファイルを開かない。
   ファイル単位で xlsx_workbook_scope を張り、連携・結合フェーズのセル読取で load_workbook を再利用する。
   _name_extract_association_matches も同様（名前取得デバッグの照合カウント）。
 """
@@ -116,8 +118,7 @@ def debug_event_lines_from_sheet_rows(event_log_rows: list[list[Any]]) -> list[s
     for row in event_log_rows:
         if len(row) >= 5:
             lines.append(
-                "EVENT\t%s\t%s\t%s\t%s\t%s"
-                % (row[0], row[1], row[2], row[3], row[4])
+                "EVENT\t%s\t%s\t%s\t%s\t%s" % (row[0], row[1], row[2], row[3], row[4])
             )
         else:
             lines.append("EVENT\t" + json.dumps(row, ensure_ascii=False))
@@ -189,11 +190,16 @@ def fill_bundles_for_scenario_phase(
     phase_slot_index: int,
     paths_to_process: list[str] | None = None,
     progress_hook: Callable[[int, int], None] | None = None,
+    phase2_primary_only: bool = True,
+    max_primary_rows: int | None = None,
 ) -> None:
     """
     デバッグのシナリオフェーズに応じてキャッシュを更新する。
-    2=主キーのみ、3=連携のみ（既存バンドル必須）、4+=結合のみ（既存バンドル必須）。
-    本番一括用の全件一括抽出は extract_item_bundle(debug_step_scope=None) を別途使う。
+    2=主キー表示。既定は主キーのみ（phase2_primary_only）。
+      連続実行では False にして主キー＋連携＋結合を一括抽出する。
+    3/4=連携・結合表示（フル抽出済みなら再利用。未完了なら再抽出）。
+      フェーズ2で表示上限に達して開いていないファイルは開かない。
+    max_primary_rows: フェーズ2で残った主キー件数がこの件数に達したら以降のファイルを開かない。
     progress_hook: 処理ファイル進捗 (done, total)。done は 1 始まり。省略時は呼ばない。
     """
     from svc.svc_data_agg_extract import xlsx_workbook_scope
@@ -216,8 +222,25 @@ def fill_bundles_for_scenario_phase(
     jp_hdr = str(item.get("name") or item.get("id") or "").strip()
     n_proc = len(process_paths)
     stride = 5 if n_proc >= 10 else 1
+    try:
+        max_pr = int(max_primary_rows) if max_primary_rows is not None else 0
+    except (TypeError, ValueError):
+        max_pr = 0
+    if max_pr < 0:
+        max_pr = 0
+    kept_total = 0
 
     for idx, fp in enumerate(process_paths, start=1):
+        if phase_slot_index >= 3:
+            if fp not in cache:
+                continue
+        elif phase_slot_index == 2 and max_pr > 0 and kept_total >= max_pr:
+            break
+        remain: int | None = None
+        if phase_slot_index == 2 and max_pr > 0:
+            remain = max_pr - kept_total
+            if remain <= 0:
+                break
         with xlsx_workbook_scope():
             try:
                 cache[fp] = _extract_bundles_for_matched_sheets(
@@ -227,13 +250,77 @@ def fill_bundles_for_scenario_phase(
                     jp_hdr=jp_hdr,
                     phase_slot_index=phase_slot_index,
                     existing=cache.get(fp),
+                    phase2_primary_only=phase2_primary_only,
+                    max_primary_rows=remain,
                 )
             except Exception:
                 cache[fp] = _bundle_error_stub()
+        if phase_slot_index == 2:
+            kept_total += len((cache.get(fp) or {}).get("primary_values") or [])
 
         if progress_hook is not None and n_proc > 0:
             if idx == 1 or idx % stride == 0 or idx == n_proc:
                 progress_hook(idx, n_proc)
+
+
+def fill_scenario_link_join_after_primary(
+    item: dict[str, Any],
+    paths: list[str],
+    cache: dict[str, dict[str, Any]],
+    item_id: str,
+    *,
+    cancel_check: Callable[..., None] | None = None,
+    progress_hook: Callable[[int, int], None] | None = None,
+) -> None:
+    """主キー抽出済みキャッシュへ、連携・結合を追記する（空主キーファイルは開かない）。"""
+    from svc.data_agg_cancel import DataAggCancelled
+    from svc.svc_data_agg_extract import xlsx_workbook_scope
+
+    allowed = _allowed_paths_after_file_filter(item, paths)
+    jp_hdr = str(item.get("name") or item.get("id") or "").strip()
+    todo = [
+        fp
+        for fp in allowed
+        if fp in cache and not (cache.get(fp) or {}).get(_DBG_FULL_EXTRACT)
+    ]
+    n_todo = len(todo)
+    for idx, fp in enumerate(todo, start=1):
+        if cancel_check is not None:
+            cancel_check()
+        b = cache.get(fp)
+        if not isinstance(b, dict):
+            continue
+        if not (b.get("primary_values") or []):
+            cache[fp] = _mark_dbg_full_extract(b)
+            if progress_hook is not None and n_todo > 0:
+                progress_hook(idx, n_todo)
+            continue
+        with xlsx_workbook_scope():
+            try:
+                b3 = _extract_bundles_for_matched_sheets(
+                    item,
+                    fp,
+                    item_id=item_id,
+                    jp_hdr=jp_hdr,
+                    phase_slot_index=3,
+                    existing=b,
+                )
+                b4 = _extract_bundles_for_matched_sheets(
+                    item,
+                    fp,
+                    item_id=item_id,
+                    jp_hdr=jp_hdr,
+                    phase_slot_index=4,
+                    existing=b3,
+                )
+                cache[fp] = _mark_dbg_full_extract(b4)
+            except DataAggCancelled:
+                raise
+            except Exception:
+                cache[fp] = b if isinstance(b, dict) else _bundle_error_stub()
+        if progress_hook is not None and n_todo > 0:
+            if idx == 1 or idx % 5 == 0 or idx == n_todo:
+                progress_hook(idx, n_todo)
 
 
 def _name_extract_association_matches(
@@ -419,7 +506,9 @@ def _name_extract_debug_phase_result(
     n_allowed = len(allowed)
     n_hit = len(hit_files)
 
-    def _cap_with_tips(vals: list[str], tips: list[str | None]) -> tuple[list[str], list[str | None]]:
+    def _cap_with_tips(
+        vals: list[str], tips: list[str | None]
+    ) -> tuple[list[str], list[str | None]]:
         if len(vals) <= max_rows:
             return vals, tips
         return (
@@ -453,7 +542,13 @@ def _name_extract_debug_phase_result(
 
     if phase_slot_index == 1:
         fill_bundles_for_scenario_phase(
-            item, paths, item_id, cache, 2, paths_to_process=hit_files
+            item,
+            paths,
+            item_id,
+            cache,
+            2,
+            paths_to_process=hit_files,
+            max_primary_rows=max_rows,
         )
         seen_prim: set[str] = set()
         ordered_unique: list[str] = []
@@ -482,7 +577,13 @@ def _name_extract_debug_phase_result(
 
     if phase_slot_index == 2:
         fill_bundles_for_scenario_phase(
-            item, paths, item_id, cache, 2, paths_to_process=hit_files
+            item,
+            paths,
+            item_id,
+            cache,
+            2,
+            paths_to_process=hit_files,
+            max_primary_rows=max_rows,
         )
         seen_u: set[str] = set()
         for fp in hit_files:
@@ -511,12 +612,14 @@ def scenario_debug_phase_result(
     scan_root: str | None = None,
     name_extract_debug_labels: dict[str, Any] | None = None,
     progress_hook: Callable[[int, int], None] | None = None,
+    phase2_primary_only: bool = True,
 ) -> tuple[list[str], list[str], list[dict[str, Any]], list[str | None]]:
     """
     シナリオフェーズ用のサマリ 5 列・値列・イベント（結合失敗等はフェーズ実行では空、抽出失敗のみ補足可）。
     phase_slot_index: 0=ファイルフィルタ … 4=結合キー（COND_KEYS 順）。
     フェーズ 0 はファイル名のみ。フェーズ 1 はシート名解決のみ（各ファイルでブックを短時間開く）。
     フェーズ 2 以降で extract_item_bundle をキャッシュに積む。
+    phase2_primary_only: フェーズ2は主キーのみ（既定）。連続実行は False で一括抽出。
     戻り値第4要素は値列と同長のツールチップ（同一列インデックス）。不要時は None。
     progress_hook: セル座標系で phase_slot_index>=2 の抽出ループ進捗 (done, total)。名前取得系では未使用。
     """
@@ -581,6 +684,8 @@ def scenario_debug_phase_result(
         cache,
         phase_slot_index,
         progress_hook=progress_hook,
+        phase2_primary_only=phase2_primary_only,
+        max_primary_rows=max_rows,
     )
 
     filtered_paths = [fp for fp in paths if fp in cache]
@@ -593,7 +698,7 @@ def scenario_debug_phase_result(
         if fp not in cache:
             continue
         b = cache[fp]
-        for v in b.get("primary_values") or [None]:
+        for v in b.get("primary_values") or []:
             prim.append("" if v is None else str(v))
     p = source_ui_block(s0) or {}
     link_defs = p.get("link_defs") if isinstance(p.get("link_defs"), list) else []
@@ -665,6 +770,10 @@ def scenario_debug_phase_result(
     if phase_slot_index == 2:
         summary = [nfs, na, npv, "-", "-"]
         colvals = _cap_list_capped(prim, max_rows) if prim else ["（主値 0 件）"]
+        if prim and len(allowed) > len(filtered_paths):
+            omit = "…（以降省略・上限%d件）" % max_rows
+            if not colvals or colvals[-1] != omit:
+                colvals = list(colvals) + [omit]
     elif phase_slot_index == 3:
         summary = [nfs, na, npv, link_v, "-"]
         colvals = _flatten_map_values_by_defs(
@@ -702,35 +811,6 @@ def _merge_primary_sheet_bundles(
     return _merge_ex(parts, file_path)
 
 
-def _append_rule_maps_with_offset(
-    dest: dict[str, Any],
-    src_bundle: dict[str, Any],
-    *,
-    values_key: str,
-    contexts_key: str,
-    g_off: int,
-    file_path: str,
-) -> None:
-    svm = src_bundle.get(values_key) or {}
-    scm = src_bundle.get(contexts_key) or {}
-    if not isinstance(svm, dict):
-        return
-    for target, vals in svm.items():
-        if not isinstance(vals, list):
-            continue
-        dest.setdefault(values_key, {}).setdefault(target, []).extend(vals)
-        ctxs = scm.get(target) if isinstance(scm, dict) else None
-        out_ctx = dest.setdefault(contexts_key, {}).setdefault(target, [])
-        for i, _v in enumerate(vals):
-            if isinstance(ctxs, list) and i < len(ctxs) and isinstance(ctxs[i], dict):
-                c = dict(ctxs[i])
-            else:
-                c = {"file_path": str(file_path), "base_cell": None}
-            c["file_path"] = str(c.get("file_path") or file_path)
-            c["iter_index"] = int(g_off + i)
-            out_ctx.append(c)
-
-
 def _extract_link_join_across_sheets(
     file_path: str,
     item: dict[str, Any],
@@ -743,6 +823,8 @@ def _extract_link_join_across_sheets(
     """既存 primary の _sheet_parts に沿って link/join をシート順に再計算する。"""
     from svc.data_agg_sheet_resolve import list_workbook_sheet_names
     from svc.svc_data_agg_extract import (
+        _align_link_join_series_to_primary,
+        _append_rule_maps_with_offset,
         _mini_iter_contexts_for_sheet_part,
         _mini_spans_from_local,
         extract_item_bundle,
@@ -821,7 +903,55 @@ def _extract_link_join_across_sheets(
             g_off=g_off,
             file_path=file_path,
         )
+    _align_link_join_series_to_primary(out)
     return out
+
+
+_DBG_FULL_EXTRACT = "_dbg_full_extract"
+_DBG_PRIMARY_ONLY = "_dbg_primary_only"
+
+
+def _mark_dbg_full_extract(bundle: dict[str, Any]) -> dict[str, Any]:
+    bundle[_DBG_FULL_EXTRACT] = True
+    return bundle
+
+
+def _extract_phase2_item_bundle(
+    file_path: str,
+    item: dict[str, Any],
+    *,
+    item_id: str,
+    jp_hdr: str,
+    primary_only: bool,
+    max_primary_rows: int | None = None,
+) -> dict[str, Any]:
+    from svc.svc_data_agg_extract import extract_item_bundle
+
+    extra: dict[str, Any] = {}
+    if max_primary_rows is not None:
+        extra["max_primary_rows"] = max_primary_rows
+    if primary_only:
+        b = extract_item_bundle(
+            file_path,
+            item,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            debug_step_scope="primary",
+            **extra,
+        )
+        b[_DBG_PRIMARY_ONLY] = True
+        return b
+    return _mark_dbg_full_extract(
+        extract_item_bundle(
+            file_path,
+            item,
+            item_id=item_id,
+            cell_positions={},
+            join_path_header=jp_hdr or None,
+            **extra,
+        )
+    )
 
 
 def _extract_bundles_for_matched_sheets(
@@ -832,24 +962,33 @@ def _extract_bundles_for_matched_sheets(
     jp_hdr: str,
     phase_slot_index: int,
     existing: dict[str, Any] | None,
+    phase2_primary_only: bool = True,
+    max_primary_rows: int | None = None,
 ) -> dict[str, Any]:
-    """一致シートを左→右の順に読み、primary は連結、link/join はシート単位で再計算する。"""
+    """一致シートを左→右の順に読む。フェーズ2は主キーのみ（または一括）。3/4はキャッシュ再利用。"""
     from svc.svc_data_agg_extract import (
         extract_item_bundle,
         matching_sheets_and_names_for_item,
     )
 
+    if (
+        phase_slot_index >= 3
+        and isinstance(existing, dict)
+        and existing.get(_DBG_FULL_EXTRACT)
+    ):
+        return existing
+
     sources = item.get("sources") or []
     s0 = sources[0] if sources and isinstance(sources[0], dict) else None
     if not isinstance(s0, dict) or _is_name_extract_source(s0):
         if phase_slot_index == 2:
-            return extract_item_bundle(
+            return _extract_phase2_item_bundle(
                 file_path,
                 item,
                 item_id=item_id,
-                cell_positions={},
-                join_path_header=jp_hdr or None,
-                debug_step_scope="primary",
+                jp_hdr=jp_hdr,
+                primary_only=phase2_primary_only,
+                max_primary_rows=max_primary_rows,
             )
         base = existing if isinstance(existing, dict) else _empty_bundle_shell()
         if phase_slot_index == 3:
@@ -878,13 +1017,13 @@ def _extract_bundles_for_matched_sheets(
         if item_one is None:
             return _empty_bundle_shell()
         if phase_slot_index == 2:
-            return extract_item_bundle(
+            return _extract_phase2_item_bundle(
                 file_path,
                 item_one,
                 item_id=item_id,
-                cell_positions={},
-                join_path_header=jp_hdr or None,
-                debug_step_scope="primary",
+                jp_hdr=jp_hdr,
+                primary_only=phase2_primary_only,
+                max_primary_rows=max_primary_rows,
             )
         base = existing if isinstance(existing, dict) else _empty_bundle_shell()
         return extract_item_bundle(
@@ -900,18 +1039,14 @@ def _extract_bundles_for_matched_sheets(
         return _empty_bundle_shell()
 
     if phase_slot_index == 2:
-        parts: list[tuple[str, dict[str, Any]]] = []
-        for sh in sheets:
-            b = extract_item_bundle(
-                file_path,
-                _patch_item_sheet_exact(item, sh, workbook_sheet_names=wb_names),
-                item_id=item_id,
-                cell_positions={},
-                join_path_header=jp_hdr or None,
-                debug_step_scope="primary",
-            )
-            parts.append((sh, b))
-        return _merge_primary_sheet_bundles(parts, file_path)
+        return _extract_phase2_item_bundle(
+            file_path,
+            item,
+            item_id=item_id,
+            jp_hdr=jp_hdr,
+            primary_only=phase2_primary_only,
+            max_primary_rows=max_primary_rows,
+        )
 
     base = existing if isinstance(existing, dict) else _empty_bundle_shell()
     scope = "link" if phase_slot_index == 3 else "join"
@@ -938,7 +1073,10 @@ def _list_matching_sheet_names(
     if suffix == ".csv":
         return None
     if suffix == ".xls":
-        from svc.data_agg_xls_io import list_xls_sheet_names, xls_reader_unavailable_message
+        from svc.data_agg_xls_io import (
+            list_xls_sheet_names,
+            xls_reader_unavailable_message,
+        )
 
         if xls_reader_unavailable_message():
             return []
@@ -1084,6 +1222,28 @@ def _flatten_map_values(
     return _cap_list_capped(flat, max_rows) if flat else ["（値なし）"]
 
 
+def _kept_primary_aligned_series(
+    bundle: dict[str, Any],
+    map_key: str,
+    target: str,
+) -> list[str]:
+    """主キーが残った反復だけ連携／結合を返す。主キー 0 件のファイルは出さない。"""
+    prim = bundle.get("primary_values") or []
+    if not prim:
+        return []
+    mp = bundle.get(map_key)
+    vals = mp.get(target) if isinstance(mp, dict) else None
+    if not isinstance(vals, list):
+        vals = []
+    out: list[str] = []
+    for i in range(len(prim)):
+        if i < len(vals) and vals[i] is not None:
+            out.append(str(vals[i]))
+        else:
+            out.append("")
+    return out
+
+
 def _flatten_map_values_by_defs(
     cache: dict[str, dict[str, Any]],
     key: str,
@@ -1093,34 +1253,6 @@ def _flatten_map_values_by_defs(
 ) -> list[str]:
     if not defs:
         return ["（定義なし）"]
-    pl_mod = _get_polars()
-    if pl_mod is not None:
-        try:
-            rows: list[dict[str, Any]] = []
-            for b in cache.values():
-                mp = b.get(key) or {}
-                if not isinstance(mp, dict):
-                    continue
-                for tgt, vals in mp.items():
-                    for v in vals or [None]:
-                        rows.append({"target": str(tgt), "val": "" if v is None else str(v)})
-            if rows:
-                df = pl_mod.DataFrame(rows)
-                flat_fast: list[str] = []
-                for i, d in enumerate(defs):
-                    if not isinstance(d, dict):
-                        continue
-                    tgt = str(d.get("item") or "").strip() or (selected_item_name or "未指定")
-                    one = df.filter(pl_mod.col("target") == tgt).get_column("val").to_list()
-                    vals = [str(x) for x in one] if one else ["（値なし）"]
-                    per_key_vals = vals[:max_rows]
-                    for v in per_key_vals:
-                        flat_fast.append("#%d[%s] %s" % (i + 1, tgt, v))
-                    if len(vals) > max_rows:
-                        flat_fast.append("#%d[%s] …（省略・上限%d件）" % (i + 1, tgt, max_rows))
-                return flat_fast if flat_fast else ["（値なし）"]
-        except Exception:
-            pass
     flat: list[str] = []
     for i, d in enumerate(defs):
         if not isinstance(d, dict):
@@ -1128,10 +1260,9 @@ def _flatten_map_values_by_defs(
         tgt = str(d.get("item") or "").strip() or (selected_item_name or "未指定")
         vals: list[str] = []
         for b in cache.values():
-            mp = b.get(key) or {}
-            if isinstance(mp, dict):
-                for v in mp.get(tgt) or []:
-                    vals.append("" if v is None else str(v))
+            if not isinstance(b, dict):
+                continue
+            vals.extend(_kept_primary_aligned_series(b, key, tgt))
         if not vals:
             vals = ["（値なし）"]
         per_key_vals = vals[:max_rows]

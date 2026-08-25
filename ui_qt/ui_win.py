@@ -20,7 +20,6 @@ History (latest 3):
   - 0.4.1 (2026-06-29) set_excel_root_enabled: ネイティブファイル選択中のみ Excel トップ HWND を EnableWindow（ルート有効のままだと OS ダイアログが背後に残ることがある）。
   - 0.4.0 (2026-05-03) 前景追従（start_front_follow / WinEvent）を削除。Excel 子 HWND ロックのみ本モジュールに残す。
   - 0.3.3 (2026-03-09) enable_excel_window: 有効化時にルートHWNDも含め、リボンのみ有効でシート操作が効かない事象を解消。
-  - 0.3.2 (2026-02-28) Add lightweight foreground follow (raise only, no ping-pong)。
 """
 
 from __future__ import annotations

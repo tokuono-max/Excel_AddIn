@@ -13,30 +13,6 @@ History (latest 3):
   - 2.5.11 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（sleep 依存廃止、csv_ld 同型）。
   - 2.5.10 (2026-06-22) csv_ld._resolve_book_and_sheet の ptr_s 引数と整合（TypeError 修正）。
   - 2.5.9 (2026-06-22) 分割保存直前に Book/Sheet を再取得（UI 待ち後の COM 切れ緩和。csv_sv/csv_ld 同経路）。
-  - 2.5.8 (2026-06-13) 進捗表示: 保存中→分割保存中。同名確認「分割実施」後に保存されない不具合を修正。
-  - 2.5.7 (2026-06-13) 進捗 UI 共通設定（poll/creep）と分割保存開始直前の砂時計 ON。
-  - 2.5.6 (2026-06-06) 分割保存ループを suspend(restore_on_exit=False) 内で実行。DONE+wait も suspend 内。
-  - 2.5.3 (2026-06-04) 保存: 通常 CSV 保存と同様、既定で表示文字列（Copy→クリップボード）でヘッダ・分割範囲を読込。HC_CSV_SV_USE_VALUE_READ=1 で .value 経路。
-  - 2.5.2 (2026-06-04) 分割保存処理中の砂時計 ON（出力先確定後〜完了）。保存ループで tick 再武装。
-  - 2.5.1 (2026-04-09) 重複キャンセル後の分割再表示で、再フォルダ選択まで split_csv が結果 pickle を監視し続ける（再オープン後の無処理を修正）。
-  - 2.5.0 (2026-04-09) 分割→重複→進捗: 進捗 UI は重複解決後に IPC のみ。重複キャンセルで分割再表示 IPC。progress pickle 書込リトライ（WinError 5 等）。
-  - 2.4.8 (2026-04-08) 完了 pickle に output_dir を付与。重複キャンセル時の診断ログ。
-  - 2.4.7 (2026-04-08) rename_map 参照をキー正規化＋大文字小文字無視で重複名解決。手動リネームが確実に反映されるよう修正。
-  - 2.4.6 (2026-04-08) 重複確認キャンセル時に進捗 pickle を CANCEL 化し進捗を閉じる（UI が分割に戻れるように）。
-  - 2.4.5 (2026-04-08) 重複解決で連番リネームを廃止。指定名のまま保存し既存・同名は上書き。
-  - 2.4.4 (2026-04-08) 未使用の _submit_progress_ui / _submit_done_ui を削除（進捗・完了は VBA 起動＋Pickle 経路に統一済みのため）。
-  - 2.4.3 (2026-04-08) rename_map を重複一覧 index（sorted(dup_names)）で参照。done_items の name は実保存パス基準。
-  - 2.4.2 (2026-04-08) 進捗 DONE pickle に show_done_dialog: True を付与（完了通知を ProgressDialog 経路に統一）。
-  - 2.4.1 (2026-04-08) 完了ログの範囲文字列を実保存 plans 基準へ修正（削除後件数と不一致にならないよう調整）。
-  - 2.4.0 (2026-04-08) 重複確認の返却を行インデックス管理へ変更（drop_rows / rename_map）。選択削除行は分割対象から除外し、1行も残らない場合は中止。
-  - 2.3.1 (2026-04-08) 重複候補一覧を問い合わせメッセージへ付与（JSON: SHOW_DUPLICATE_LIST/MAX_LIST_ITEMS）。UI から rename_map を受け取り手動改名を優先。
-  - 2.3.0 (2026-04-08) JSON 駆動の重複保存ポリシー（ask/overwrite/rename/cancel）を追加。完了通知 done_items に size_bytes を付与。重複判定・解決ログを追加。
-  - 2.2.3 (2026-04-08) 分割結果 ranges の file_name を保存名に反映。進捗 pickle 書込失敗を warning ログ化（準備中で停止する診断を容易化）。
-  - 2.2.2 (2026-04-06) _watch_ready に t_load0 渡し（csv_ld シグネチャ整合）。警告 UI に ready_path＋監視スレッド。運用・診断ログ、book=None で notify_wait_form_ready。
-  - 2.2.1 (2026-04-06) READY_UI 監視スレッド追加（砂時計・VBA WaitForm と同タイミングで解除）。
-  - 2.2.0 (2026-03-09) 進捗が 0/0 で止まらないよう、ループ前に初期 RUN（0/phase_total）を 1 回書き込み。
-  - 2.1.0 (2026-03-06) データ不足・使用範囲取得失敗などで Excel 中央にワーニング通知。Excel 親子・前面・表示中無効・戻るとき有効。
-  - 2.0.0 (2026-03-06) 仕様変更: キー列分割→選択行範囲分割。分割画面・進捗・終了通知フロー。core_log 使用。
 """
 from __future__ import annotations
 

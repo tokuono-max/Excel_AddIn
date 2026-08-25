@@ -43,12 +43,12 @@ def test_reorder_paths_interleaves_side_and_host(tmp_path: Path) -> None:
     assert dd.get("master_preview_join_host_patterns")
 
 
-def test_master_preview_per_file_pool_cap_is_read_limit() -> None:
+def test_master_preview_per_file_pool_cap_reserves_cross_file_room() -> None:
     data, _paths = _cross_join_mini_scenario(Path("."))
     host = data["items"][2]
     headers = [str(it.get("name") or "") for it in data["items"]]
     cap = _master_preview_per_file_pool_cap(200, host, data["items"], headers)
-    assert cap == 200
+    assert cap == 100
 
 
 def test_master_preview_join_priority_fills_link_columns(
@@ -121,7 +121,7 @@ def test_master_preview_per_file_cap_allows_second_file_type(
     assert seq_vals, "製番が空"
     assert len(rows) <= 4
     assert len(rows) >= 1
-    assert int(dd.get("master_preview_pool_row_cap") or 0) == 8
+    assert int(dd.get("master_preview_pool_row_cap") or 0) == 4
 
 
 def test_master_preview_interleave_reads_host_after_side_cap(
@@ -168,7 +168,7 @@ def test_master_preview_interleave_reads_host_after_side_cap(
     assert seq_vals, "製番が空（link が効いていない）"
     assert len(rows) >= 1
     pool_cap = int(dd.get("master_preview_pool_row_cap") or 0)
-    assert pool_cap == 800
+    assert pool_cap == 200
 
 
 def test_master_preview_anchor_rows_keep_prior_row_identity(
@@ -290,6 +290,43 @@ def test_record_join_host_patterns_for_non_cross_chain() -> None:
     dd: dict = {}
     _master_preview_record_join_host_patterns_only(dd, host=host, topo=[host])
     assert dd.get("master_preview_join_host_patterns") == ["梱包"]
+    assert dd.get("master_preview_join_host_specs") == [
+        {"file_pattern": "梱包", "file_name_rule": "含む"}
+    ]
+
+
+def test_reorder_non_cross_records_host_eff_not_empty_stepped() -> None:
+    """非横断時の host 記録は host_eff（topology）を使う。"""
+    from svc.svc_data_agg import reorder_paths_for_master_preview_join_priority
+
+    stepped_host = {"name": "ホスト", "sources": []}
+    topo_host = {
+        "name": "ホスト",
+        "sources": [
+            {
+                "type": "cell",
+                "cell_ref": "A1",
+                "ui_scenario_source_v1": {
+                    "file_pattern": "梱包",
+                    "file_name_rule": "含む",
+                    "join_defs": [{"item": "側", "cell_ref": "B1"}],
+                },
+            }
+        ],
+    }
+    items = [stepped_host]
+    headers = ["ホスト"]
+    dd = {
+        "mi_idx": 0,
+        "preview_join_topology_items": [topo_host],
+    }
+    paths = ["C:/data/梱包一覧.xlsx", "C:/data/other.xlsx"]
+    out = reorder_paths_for_master_preview_join_priority(paths, items, headers, dd)
+    assert out == paths  # 非横断は順序維持
+    assert dd.get("master_preview_join_host_patterns") == ["梱包"]
+    assert dd.get("master_preview_join_host_specs") == [
+        {"file_pattern": "梱包", "file_name_rule": "含む"}
+    ]
 
 
 def test_seed_pool_prefers_anchor_file_path_over_synthetic() -> None:
@@ -987,6 +1024,50 @@ def test_apply_master_preview_join_max_files_skips_non_join_item(
     assert "master_preview_join_file_cap_hit" not in dd
 
 
+def test_apply_master_preview_max_files_caps_non_join_item(
+    tmp_path: Path,
+) -> None:
+    """非結合項目は MASTER_DEBUG_MAX_FILES 相当で打切り、結合項目は触らない。"""
+    from svc.data_agg_master_preview_perf import (  # noqa: WPS433
+        apply_master_preview_join_max_files,
+        apply_master_preview_max_files,
+        master_preview_max_files_cap,
+    )
+
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    paths_many = [paths[0]] * 15 + [paths[1]] * 15
+    dd_non: dict = {
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 0,
+        "master_preview_max_files": 20,
+        "master_preview_join_max_files": 20,
+    }
+    assert master_preview_max_files_cap(dd_non) == 20
+    after_join = apply_master_preview_join_max_files(
+        paths_many, data["items"], dd_non
+    )
+    assert len(after_join) == len(paths_many)
+    capped = apply_master_preview_max_files(after_join, data["items"], dd_non)
+    assert len(capped) == 20
+    assert dd_non["master_preview_max_file_cap_hit"] is True
+    assert dd_non["master_preview_max_files_detected"] == 30
+    assert dd_non["master_preview_max_files_read"] == 20
+
+    dd_join: dict = {
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "master_preview_max_files": 5,
+        "master_preview_join_max_files": 20,
+    }
+    join_capped = apply_master_preview_join_max_files(
+        paths_many, data["items"], dd_join
+    )
+    assert len(join_capped) == 20
+    skipped = apply_master_preview_max_files(join_capped, data["items"], dd_join)
+    assert skipped == join_capped
+    assert "master_preview_max_file_cap_hit" not in dd_join
+
+
 def test_master_preview_join_file_cap_limits_compute_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1013,6 +1094,60 @@ def test_master_preview_join_file_cap_limits_compute_files(
     assert dd.get("master_preview_join_file_cap_hit") is True
     assert int(dd.get("master_preview_join_files_read") or 0) == 1
     assert int(dd.get("master_preview_stats_files_read") or 0) <= 1
+
+
+def test_master_preview_max_files_limits_non_join_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非結合 compute は MASTER_DEBUG_MAX_FILES で打切り、結合 compute は全走査から JOIN cap。"""
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    extra = []
+    for i in range(8):
+        p = tmp_path / ("光特性履歴_cap_%s.xlsx" % i)
+        p.write_bytes(Path(paths[0]).read_bytes())
+        extra.append(str(p))
+    paths_many = extra + [str(paths[1])]
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 0,
+        "master_preview_max_files": 3,
+        "master_preview_join_max_files": 20,
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    compute_batch_table_rows(
+        data,
+        paths_many,
+        max_primary_rows=200,
+        max_table_rows=200,
+        probe_caller="test_non_join_file_cap",
+    )
+    dd = data.get("__debug_diag") or {}
+    assert dd.get("master_preview_max_file_cap_hit") is True
+    assert int(dd.get("master_preview_max_files_read") or 0) == 3
+    assert int(dd.get("master_preview_stats_files_read") or 0) <= 3
+
+    data_join = dict(data)
+    data_join["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "master_preview_max_files": 3,
+        "master_preview_join_max_files": 2,
+        "join_search_skip_seed": True,
+    }
+    compute_batch_table_rows(
+        data_join,
+        paths_many,
+        max_primary_rows=4,
+        max_table_rows=4,
+        probe_caller="test_join_reextract_cap",
+    )
+    ddj = data_join.get("__debug_diag") or {}
+    assert ddj.get("master_preview_join_file_cap_hit") is True
+    assert int(ddj.get("master_preview_join_files_read") or 0) == 2
+    assert "master_preview_max_file_cap_hit" not in ddj
 
 
 def test_stacked_seed_join_targets_fill_ratio() -> None:
@@ -1335,3 +1470,76 @@ def test_stacked_join_mac_loc_preserves_distinct_device_ids() -> None:
     assert join_compare_display_key(pool[0].get("MAC LOC")) == ""
     assert join_compare_display_key(pool[1].get("MAC LOC")) == "D8:4A:87:FF:C3:57"
     assert join_compare_display_key(pool[2].get("MAC LOC")) == ""
+
+
+def test_or_cutoff_stops_file_loop_at_display_row_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """結合プレビュー: 表示行上限でファイルループを打ち切る（全ファイルは開かない）。"""
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    anchor = Path(paths[0])
+    extra_paths = [str(paths[0]), str(paths[1])]
+    for i in range(12):
+        p = tmp_path / ("光特性履歴_extra_%s.xlsx" % i)
+        p.write_bytes(anchor.read_bytes())
+        extra_paths.append(str(p))
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "join_search_skip_seed": True,
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    _h, rows, _ev, _je = compute_batch_table_rows(
+        data,
+        extra_paths,
+        max_primary_rows=4,
+        max_table_rows=4,
+        probe_caller="test_or_cutoff_rows",
+    )
+    dd = data.get("__debug_diag") or {}
+    detected = int(dd.get("master_preview_files_detected") or len(extra_paths))
+    processed = int(dd.get("master_preview_files_processed") or 0)
+    assert dd.get("master_preview_read_truncated") is True
+    assert int(dd.get("master_preview_pool_row_cap") or 0) == 4
+    assert processed > 0
+    assert processed < detected
+    assert len(rows) <= 4
+
+
+def test_workbook_once_read_reuses_same_path_in_one_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一 compute 内では同じ xlsx を load_workbook し直さない。"""
+    from svc import svc_data_agg_extract as extract_mod  # noqa: WPS433
+
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    same = str(paths[0])
+    dup_paths = [same, same, same, str(paths[1])]
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "join_search_skip_seed": True,
+    }
+    real_load = extract_mod._load_workbook_readonly
+    load_keys: list[str] = []
+
+    def _spy(path: Path):
+        load_keys.append(str(Path(path).resolve()))
+        return real_load(path)
+
+    monkeypatch.setattr(extract_mod, "_load_workbook_readonly", _spy)
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    compute_batch_table_rows(
+        data,
+        dup_paths,
+        max_primary_rows=4,
+        max_table_rows=4,
+        probe_caller="test_once_read",
+    )
+    same_key = str(Path(same).resolve())
+    assert load_keys.count(same_key) == 1, load_keys
+    assert len(set(load_keys)) == len(load_keys)

@@ -11,35 +11,6 @@ History (latest 3):
   - 1.3.18 (2026-05-05) モードA: 外枠幅は JSON（REPORT.WINDOW.DEFAULT/MIN/MAX）を優先。列の強制縮小を抑止し、長文は横スクロールで閲覧可能に調整。
   - 1.3.17 (2026-05-05) 重複一覧の横スクロールバーを常時表示に変更（非表示に見える環境対策）。
   - 1.3.16 (2026-05-05) 重複一覧セルの省略表示（...）を無効化。値はそのまま表示し、横スクロールで全文確認できるよう調整。
-  - 1.3.15 (2026-05-03) モード A 3列目（重複内容）: ヘッダ文字列の最小表示幅を確保。外枠幅は維持し、他列から再配分して見切れを抑止。
-  - 1.3.14 (2026-05-03) モード A 外枠: 一覧幅 tw_body に、メインレイアウトの contentsMargins 左右＋DIALOG_WIDTH_FUDGE のみを加算（実マージン＋必要最小限）。旧 OUTER_WIDTH_BEYOND_TABLE は外枠幅に使わない。
-  - 1.3.13 (2026-05-03) 右余白: Qt の horizontalHeader().length() はビュー幅に連動して過大になり得るため廃止。外枠＝列幅合計＋TABLE_CHROME_WIDTH＋OUTER_WIDTH_BEYOND_TABLE のみ（一覧の合計幅＋固定値）。
-  - 1.3.12 (2026-05-03) 右余白: 列確定後に horizontalHeader().length()＋行ヘッダで表実幅 tw_body を算出し外枠＝tw_body＋OUTER_WIDTH_BEYOND_TABLE。prepare は sizeHint に頼らず _mode_a_target_width を DEFAULT_WIDTH で渡す。非 Stretch 時は表を tw_body に固定。
-  - 1.3.11 (2026-05-03) モード A 外枠幅: 説明・件数行の文字幅で outer_extra を増やさない。主因は列合計＋TABLE_CHROME_WIDTH＋OUTER_WIDTH_BEYOND_TABLE のみ。説明は resize 後に clamp で折り返し幅に合わせる。
-  - 1.3.10 (2026-05-03) モード A: 列幅計算をラベル・表を載せた後に実行。長文説明 QLabel が sizeHint で外枠を MAX 近くまで押し広げるのを、ラベル max 幅で抑止。
-  - 1.3.9 (2026-05-03) モード A: prepare が DEFAULT_WIDTH で幅を戻さないよう create_dialog で DEFAULT_WIDTH=0 を渡す。最終列 Stretch は5列以上のみ。prepare 後に singleShot でレイアウト再適用。非 Stretch 時は表を Fixed 横＋最大幅で内容に追従。
-  - 1.3.7 (2026-05-03) モード A レポート: 先頭列はセル表示幅＋余白。外枠は WINDOW.MAX_WIDTH 上限・MIN_WIDTH 下限の範囲で列合計＋余白に合わせ可変。列が上限を超えるときは列幅を比例縮小。REPORT.SUMMARY_COL_MAX_WIDTH 等。
-  - 1.3.5 (2026-05-03) 重複レポート: Excel 前景 PID ポーリングを廃止（セル編集時に ensure_front が繰り返し奪うのを解消）。showEvent で子 HWND 再有効化＋COM Interactive を短遅延で複数回パルス。レポートをクリックしたときの積み上げは changeEvent のみ。
-  - 1.3.4 (2026-05-03) 重複レポート: REPORT.WINDOW の TOPMOST を false（一般的な Z 順）。Excel プロセスが前景のときだけ ensure_front を間引きポーリング＋ActivationChange でレポートを Excel 手前に戻す。_goto_excel_cell の二重 steal_focus を削除。
-  - 1.3.3 (2026-05-03) セルジャンプ後の ensure_front 遅延は config/ui_window_timing.json（DUPLI_REPORT_AFTER_CELL_GOTO）から読込。
-  - 1.3.2 (2026-05-03) セルジャンプ（_goto_row）後: _goto_excel_cell が Excel を前面にしたあと ensure_front を 0/120ms で再適用（REPORT が TOPMOST でも EXCEL_FRONT_FOLLOW 未付与のため）。リポジトリ内の類似: xlwings で Excel 前面化する UI は本モジュールの _goto_excel_cell のみ。
-  - 1.3.1 (2026-05-02) レポート表: ヘッダ左寄せ。モード A は最終列 Stretch・他 ResizeToContents。closeEvent 先頭で stop_front_follow（機能間 EXCEL_FRONT_FOLLOW 残留対策）。
-  - 1.3.0 (2026-04-12) 重複着色: svc は hl_rects を sidecar のみ渡す。レポート表示中 QTimer で ActiveWindow.VisibleRange±余白と交差して着色。対象ブック・シートがアクティブでないときは付与分をクリア。閉じるとき sidecar 削除。
-  - 1.2.10 (2026-04-10) hlclr 進捗: pickle 更新を件数ストライド＋時間間隔で細かくし 62% 付近の停滞見えを低減。遅延閉鎖時は hide 後に不透過化でゴースト枠を抑える。
-  - 1.2.9 (2026-04-10) レポート閉鎖: rects 解除は QTimer で遅延し ui_server が先に進捗 req を処理してから COM 解除（closeEvent 同期ブロックによる進捗非表示を解消）。WA_DeleteOnClose 一時解除＋解除後 deleteLater。
-  - 1.2.8 (2026-04-10) レポート閉鎖時、rects がある場合は専用 progress_dupli_hlclr_* で「解除中」進捗表示。COM クリア中は ScreenUpdating/Calculation 抑止。
-  - 1.2.7 (2026-04-11) レポート「閉じる」: accept ではなく setResult(Accepted)+close() で × と同じ closeEvent 経路（highlight_clear 実行）。
-  - 1.2.6 (2026-04-11) 診断強化: レポート closeEvent／highlight_clear 解除の経過時間・ループ進捗、goto 行、svc レポート投入の rects 件数（diag）。
-  - 1.2.5 (2026-04-11) 診断: hc_csv_tool.diag.ui_dupli に highlight_clear／goto の詳細ログ。
-  - 1.2.4 (2026-04-10) 着色解除: book_name でブック特定。ジャンプ: 同一＋表示内なら Goto スクロール省略、Excel 前面化。Interior.TintAndShade クリア。
-  - 1.2.3 (2026-04-11) 着色解除: sheet_name で対象シート固定、rects はレンジ単位でクリア（失敗時 runs フォールバック）。ジャンプ: Goto スクロール＋前面化。
-  - 1.2.2 (2026-04-11) 完了通知（DONE）: WA_DeleteOnClose、OK 後 processEvents＋次ティックで accept（csv_sp 系ゴースト枠対策）。closeEvent に前面化・processEvents。
-  - 1.2.1 (2026-04-11) レポート閉鎖: Excel 有効化・前面化・WA_DeleteOnClose／hide／deleteLater。ジャンプは Select のみ（セル Borders の COM 操作を廃止）。
-  - 1.2.0 (2026-04-11) highlight_clear.rects 対応。セルジャンプ後に枠線を一時的に太くして視認性を上げる。
-  - 1.1.1 (2026-04-11) 着色クリアはレポート閉鎖時のみ。完了ダイアログでは消さない。
-  - 1.1.0 (2026-04-11) レポート: 説明・総数ラベル、列幅0=内容に合わせる、ツールチップ、DONE/REPORT 前面化強化。
-  - 1.0.0 (2026-03-11) 完了通知を QDialog 化、SCREENS.DONE でアイコン・中央表示。ui_common の部品を利用。
-  - 初出 (2026-03-06) hc_dupli から分離。進捗・レポートは ui_dupli で完結。
 """
 from __future__ import annotations
 

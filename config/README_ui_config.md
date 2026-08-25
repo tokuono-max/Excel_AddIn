@@ -17,11 +17,12 @@
 - **CSV保存**: `ui_csv_sv.json`（必須・ダイアログタイトル・フィルタ）
 - **CSV分割**: `ui_csv_sp.json`（必須・分割画面・進捗・完了・ワーニング）
 - **ウィンドウ遅延（全機能共通）**: `ui_window_timing.json`（任意。無い・不正時は `core.ui_window_timing` のコード既定。各キーに `_comment` で意味・既定を記載）
+- **出荷履歴項目追加**: `hd_in.json`（必須・config zip で配る。`LABELS` と `OVERRIDE_FILE`。画面なしのため `ui_` 接頭辞は付けない）。現場上書きは `{app}` 直下の `出荷履歴項目.json`（任意。**config zip には入れない**）
 - 将来の機能: `ui_<機能キー小文字>.json`
 
 ## 配置場所
 
-- プロジェクトルートの `config/` フォルダ  
+- プロジェクトルートの `config/` フォルダ
   例: `C:\Project\Python\Excel_AddIn\config\ui_csv_mg.json`
 
 ## ファイルヘッダ（任意）
@@ -38,7 +39,7 @@
 
 ## 画面定義（WINDOW）
 
-各機能の JSON で **WINDOW** を指定すると、ダイアログのサイズ・位置・タスクバー表示などを制御できます。  
+各機能の JSON で **WINDOW** を指定すると、ダイアログのサイズ・位置・タスクバー表示などを制御できます。
 （CSV結合は MAIN / COMMON と WINDOW をマージして適用。CSV読込・CSV保存は WINDOW をそのまま参照。）
 
 | キー | 説明 | 例 |

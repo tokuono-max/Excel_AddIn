@@ -16,17 +16,6 @@ History (latest 3):
   - 1.3.14 (2026-07-03) UI 待ち後は resolve_fresh_book_after_ui_wait で Book を先に再取得（COM_NG 根本対策）。
   - 1.3.13 (2026-06-30) 進捗 pickle: 書込失敗ログ・リトライ・seq 同期・DONE read-back 検証。SaveBlock はメインスレッド書込既定。
   - 1.3.12 (2026-06-30) 進捗クローズ ACK 待ち＋nudge（csv_ld/mg 同型）。即時進捗・submit 双方で progress_closed_path を渡す。
-  - 1.3.11 (2026-06-22) 保存ダイアログ待ち後に Book/Sheet を再取得（COM 切れ緩和。csv_ld と同経路）。
-  - 1.3.8 (2026-06-04) 性能: 保存前チェックを先頭行サンプルのみに変更（全 UsedRange 読込廃止）。大容量は日付正規化スキップ。保存計測ログ分割。
-  - 1.3.6 (2026-06-04) 保存終了時に EnableEvents=True を保証（restore_excel_host_after_operation）。シート切替イベント復帰。
-  - 1.3.5 (2026-06-04) 保存処理中の砂時計 ON（保存先確定後〜完了）。長いシート読込中は tick で再武装。
-  - 1.3.4 (2026-04-09) 進捗 IPC に excel_rect（Excel HWND の GetWindowRect）を付与。svc_csv_ld / svc_csv_sp / svc_csv_mg と同様の中央寄せ基準に統一。
-  - 1.3.3 (2026-04-07) 保存ダイアログ後・警告 UI 後・処理完了後に bring_to_front で Excel 前面復帰。ui_csv_sv ネイティブダイアログ終了時も同対応。
-  - 1.3.2 (2026-04-06) `dialog_wait_ms`（ui_ipc 確定〜result_ok/cancel）。`HC_EXCEL_HWND` を core.core_env 経由に統一。
-  - 1.3.1 (2026-04-06) 運用・診断ログ（phase / ms / req 相関）。WaitForm: book・シートなしで notify_wait_form_ready。無データ警告に ready_path＋_watch_ready。ScreenUpdating を csv_ld と同じ抑止意味に修正。
-  - 1.3.0 (2026-03-09) 完了通知を表示。表示内容は csv_ld と同様（シート名・ファイル名・容量・データ/総数行）。
-  - 1.2.0 (2026-03-05) 基準フォルダ・進捗分母を総数に・excel_lock で閉じ時に操作有効。
-  - 1.1.0 (2026-03-05) 同上。
 """
 from __future__ import annotations
 

@@ -54,3 +54,6 @@ Thumbs.db
 
 # Dev: local packaged install root (tools/dev/packaged_root.local.bat.example is committed)
 tools/dev/packaged_root.local.bat
+
+# 現場用（インストール先直下）。リポジトリには置かない
+/出荷履歴項目.json

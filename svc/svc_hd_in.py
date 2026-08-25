@@ -3,22 +3,25 @@
 Python: 3.10+
 Module: svc/svc_hd_in
 Created: 2026-03-05
-Updated: 2026-04-06
-Version: 1.2.0
+Updated: 2026-08-20
+Version: 1.3.0
 Purpose:
-  出荷履歴用定型ヘッダ（9項目）をシート先頭へ挿入する（新方式: svc_server + book 渡し）。
-  hc_hd_in を新方式へ改造。UI なし・core_xlc / core_stat / core_w32 使用。
+  出荷履歴用定型ヘッダをシート先頭へ挿入する（新方式: svc_server + book 渡し）。
+  項目名は JSON（config/hd_in.json、任意で {app}/出荷履歴項目.json）から読む。
+  UI なし・core_xlc / core_stat / core_w32 使用。
 
 History (latest 3):
+  - 1.3.0 (2026-08-20) 項目名を JSON から読む。py 直書きの LABELS は廃止。
   - 1.2.0 (2026-05-01) 破壊的処理直前に Undo スナップショットを保存（元に戻す対応）。
   - 1.1.0 (2026-04-06) HC_LOG_PERF: [HD_IN_PERF]。診断: [HD_IN_TRACE]。
-  - 1.0.0 新規作成（hc_hd_in のロジックを book/sheet_id 受け取りに変更）。
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 _path_here = os.path.abspath(os.path.dirname(__file__))
@@ -31,7 +34,7 @@ from core.core_log import get_diag_logger, get_logger, get_perf_logger
 logger = get_logger(__name__)
 _hd_in_diag = get_diag_logger("hc_csv_tool.diag.hd_in")
 _perf = get_perf_logger("svc.svc_hd_in.perf")
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 def _elapsed_ms(since: float) -> int:
@@ -48,7 +51,9 @@ def _hd_in_trace(phase: str, t0: float, **kv: object) -> None:
                 " ".join("%s=%s" % (k, v) for k, v in kv.items()),
             )
         else:
-            _hd_in_diag.info("[HD_IN_TRACE] phase=%s cumulative_ms=%d", phase, _elapsed_ms(t0))
+            _hd_in_diag.info(
+                "[HD_IN_TRACE] phase=%s cumulative_ms=%d", phase, _elapsed_ms(t0)
+            )
     except Exception:
         pass
 
@@ -67,6 +72,7 @@ def _perf_hd_in(phase: str, t0: float, **kv: object) -> None:
     except Exception:
         pass
 
+
 try:
     from core import core_xlc as xlc
     from core import core_stat
@@ -76,18 +82,131 @@ except ImportError:
     core_stat = None  # type: ignore[assignment]
     w32 = None  # type: ignore[assignment]
 
-# 定型ヘッダ 9 項目（出荷履歴用）
-_DEF_LABELS = [
-    "出荷予定日",
-    "伝票番号",
-    "顧客コード",
-    "顧客名",
-    "商品コード",
-    "商品名",
-    "数量",
-    "単位",
-    "備考",
-]
+_DEFAULT_CONFIG_FILE = "hd_in.json"
+_DEFAULT_OVERRIDE_FILE = "出荷履歴項目.json"
+
+
+class HdInConfigError(Exception):
+    """出荷履歴項目の JSON が無い・壊れている・LABELS が空。"""
+
+
+def _override_basename(name: object) -> str | None:
+    """OVERRIDE_FILE はベース名のみ。パスや '..' は無効。"""
+    if not isinstance(name, str):
+        return None
+    raw = name.strip()
+    if not raw:
+        return None
+    fn = raw.replace("\\", "/").split("/")[-1]
+    if not fn or fn != raw or ".." in fn:
+        return None
+    return fn
+
+
+def _labels_from_obj(obj: Any) -> list[str]:
+    if not isinstance(obj, dict):
+        return []
+    raw = obj.get("LABELS")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for x in raw:
+        s = str(x).strip() if x is not None else ""
+        if s:
+            out.append(s)
+    return out
+
+
+def _read_json_obj(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as e:
+        raise HdInConfigError(
+            f"ERROR: 出荷履歴項目の設定ファイルを読めません。({path})"
+        ) from e
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise HdInConfigError(
+            f"ERROR: 出荷履歴項目の設定ファイルの形式が正しくありません。({path})"
+        ) from e
+    if not isinstance(data, dict):
+        raise HdInConfigError(
+            f"ERROR: 出荷履歴項目の設定ファイルの形式が正しくありません。({path})"
+        )
+    return data
+
+
+def load_hd_in_labels(
+    *,
+    default_path: Path | None = None,
+    override_dir: Path | None = None,
+) -> list[str]:
+    """
+    出荷履歴ヘッダの LABELS を返す。
+
+    使える LABELS を次の順で探す（片方だけ壊れていても、もう片方が使えれば進む）。
+
+    1. ``{override_dir}/{OVERRIDE_FILE}`` に非空の LABELS があればそれを使う。
+    2. 無ければ（ファイル無し・壊れている・LABELS 空）``default_path``
+       （既定: ``config/hd_in.json``）の非空 LABELS。
+    3. どちらも無い／壊れている／空なら ``HdInConfigError``（挿入しない）。
+
+    ``OVERRIDE_FILE`` は既定 JSON の値（ファイル名のみ）。無ければ ``出荷履歴項目.json``。
+    """
+    if default_path is None:
+        from core.core_cst import resolve_config_file_path
+
+        default_path = resolve_config_file_path(_DEFAULT_CONFIG_FILE)
+    if override_dir is None:
+        from core import runtime_layout
+
+        override_dir = runtime_layout.runtime_project_root(__file__)
+
+    default_obj: dict[str, Any] | None = None
+    default_err: HdInConfigError | None = None
+    if default_path.is_file():
+        try:
+            default_obj = _read_json_obj(default_path)
+        except HdInConfigError as e:
+            default_err = e
+
+    override_name = _DEFAULT_OVERRIDE_FILE
+    if default_obj is not None:
+        bn = _override_basename(default_obj.get("OVERRIDE_FILE"))
+        if bn:
+            override_name = bn
+
+    op = override_dir / override_name
+    if op.is_file():
+        try:
+            labels = _labels_from_obj(_read_json_obj(op))
+            if labels:
+                logger.info(
+                    "[HD_IN] labels source=override path=%s n=%d", op, len(labels)
+                )
+                return labels
+            logger.warning("[HD_IN] override LABELS empty path=%s; fallback default", op)
+        except HdInConfigError as e:
+            logger.warning(
+                "[HD_IN] override unreadable path=%s err=%s; fallback default", op, e
+            )
+
+    if default_obj is not None:
+        labels = _labels_from_obj(default_obj)
+        if labels:
+            logger.info(
+                "[HD_IN] labels source=default path=%s n=%d", default_path, len(labels)
+            )
+            return labels
+        raise HdInConfigError(
+            f"ERROR: 出荷履歴項目の LABELS が空です。({default_path})"
+        )
+    if default_err is not None:
+        raise default_err
+    raise HdInConfigError(
+        f"ERROR: 出荷履歴項目の設定ファイルが見つかりません。({default_path})"
+    )
 
 
 def _get_sheet(book: Any, sheet_id: str) -> Any:
@@ -130,7 +249,9 @@ def insert_header(
         _hd_in_trace("abort_no_sheet", t_flow, sheet_id=sheet_id or "")
         if core_stat:
             try:
-                core_stat.set_status_info(book.sheets.active, "ERROR: シートを特定できませんでした。")
+                core_stat.set_status_info(
+                    book.sheets.active, "ERROR: シートを特定できませんでした。"
+                )
             except Exception:
                 pass
         return
@@ -145,6 +266,21 @@ def insert_header(
     logger.info("[HD_IN] 開始 sheet_id=%s", sheet_id or "")
     _perf_hd_in("after_resolve", t_flow, sheet_id=sheet_id or "")
     _hd_in_trace("after_resolve", t_flow, sheet_id=sheet_id or "")
+
+    try:
+        labels = load_hd_in_labels()
+    except HdInConfigError as e:
+        err_msg = str(e)
+        logger.warning("[HD_IN] %s", err_msg)
+        _perf_hd_in("abort_no_labels", t_flow)
+        _hd_in_trace("abort_no_labels", t_flow)
+        if core_stat:
+            try:
+                core_stat.set_status_info(ptr_s, err_msg)
+            except Exception:
+                pass
+        return
+
     # 共通仕様: 破壊的処理の直前で Undo 用スナップショットを保存（元に戻すで復元可能にする）
     try:
         from svc.svc_undo import save_undo_snapshot
@@ -182,8 +318,8 @@ def insert_header(
         if api_target:
             api_target.Insert()
 
-        # ヘッダ書き込み
-        ptr_s.range((1, 1)).value = [_DEF_LABELS]
+        # ヘッダ書き込み（列数は LABELS の件数に追随）
+        ptr_s.range((1, 1)).value = [labels]
 
         # スタイル復元
         try:
@@ -203,7 +339,9 @@ def insert_header(
             if ur is not None:
                 cols = getattr(ur, "columns", None)
                 if cols is not None:
-                    af = getattr(cols, "autofit", None) or getattr(cols, "AutoFit", None)
+                    af = getattr(cols, "autofit", None) or getattr(
+                        cols, "AutoFit", None
+                    )
                     if callable(af):
                         af()
         except Exception:

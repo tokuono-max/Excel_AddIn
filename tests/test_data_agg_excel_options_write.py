@@ -330,6 +330,8 @@ def test_write_master_replace_full_block_writes_headers_and_rows_at_anchor() -> 
 def test_event_log_headers_include_elapsed_after_timestamp() -> None:
     assert EVENT_LOG_HEADERS[0] == "記録日時"
     assert EVENT_LOG_HEADERS[1] == "処理時間"
+    assert EVENT_LOG_HEADERS[2] == "出力行数"
+    assert EVENT_LOG_HEADERS[3] == "区分"
 
 
 def test_format_elapsed_ms_ja() -> None:
@@ -343,10 +345,13 @@ def test_format_batch_run_summary_row_processing_time_column() -> None:
         r"C:\scen.json",
         ok=True,
         files=2,
+        output_rows=42,
         total_ms=12345,
     )
     assert len(row) == len(EVENT_LOG_HEADERS)
     assert "秒" in str(row[1]) or "分" in str(row[1])
+    assert row[2] == 42
+    assert row[3] == "一括実行・完了"
 
 
 def test_format_batch_run_summary_row_cancelled() -> None:
@@ -358,8 +363,73 @@ def test_format_batch_run_summary_row_cancelled() -> None:
         files=3,
         total_ms=500,
     )
-    assert row[2] == "一括実行・中止"
+    assert row[3] == "一括実行・中止"
     import json
 
-    detail = json.loads(str(row[7]))
+    detail = json.loads(str(row[8]))
     assert detail.get("結果") == "中止"
+
+
+def test_format_path_trace_and_join_include_output_rows_column() -> None:
+    from svc.svc_data_agg_write import (
+        format_join_events_for_event_log,
+        format_path_trace_for_event_log,
+    )
+
+    pt = format_path_trace_for_event_log(
+        "sid",
+        r"C:\a.xlsx",
+        "PATH_TRACE_PRE_NAME",
+        "path",
+        ["a"],
+        [{"a": 1}],
+    )
+    assert len(pt) == 1
+    assert len(pt[0]) == len(EVENT_LOG_HEADERS)
+    assert pt[0][2] == ""
+    assert "パス追跡" in str(pt[0][3])
+
+    je = format_join_events_for_event_log(
+        "sid",
+        r"C:\a.xlsx",
+        [{"reason_code": "JOIN_MISS", "k": 1}],
+    )
+    assert len(je[0]) == len(EVENT_LOG_HEADERS)
+    assert je[0][2] == ""
+    assert je[0][3] == "JOIN_MISS"
+
+
+def test_event_log_row_kind_sid_path_detail_old_and_new() -> None:
+    from svc.data_agg_cancel import _event_log_row_kind_sid_path_detail
+
+    old = [
+        "t",
+        "1 秒",
+        "一括実行・中止",
+        "追加",
+        "Sheet1",
+        "sid",
+        r"C:\s.json",
+        '{"結果":"中止"}',
+    ]
+    kind, sid, sp, detail = _event_log_row_kind_sid_path_detail(old)
+    assert kind == "一括実行・中止"
+    assert sid == "sid"
+    assert sp == r"C:\s.json"
+    assert "中止" in detail
+
+    new = [
+        "t",
+        "1 秒",
+        10,
+        "一括実行・中止",
+        "追加",
+        "Sheet1",
+        "sid",
+        r"C:\s.json",
+        '{"結果":"中止"}',
+    ]
+    kind2, sid2, sp2, detail2 = _event_log_row_kind_sid_path_detail(new)
+    assert (kind2, sid2, sp2) == (kind, sid, sp)
+    assert detail2 == detail
+

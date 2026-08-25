@@ -14,15 +14,6 @@ History (latest 3):
   - 1.3.17 (2026-06-30) 進捗 show 直後に ensure_progress_dialog_front を同期呼び出し（2巡目 ld 進捗 Z順）。
   - 1.3.16 (2026-06-29) ファイル選択: ui_fil v0.4.0（comdlg32 直叩き。QFileDialog ホスト廃止）。
   - 1.3.15 (2026-06-29) ファイル選択: ui_fil.show_open_file_dialog_for_excel（QFileDialog.exec＋FG監視。不可視 QWidget 廃止）。
-  - 1.3.14 (2026-06-29) ネイティブファイル選択: ui_fil.prepare_native_file_dialog_excel に集約（ロック後再前面化＋Excel ルート無効化。他機能連続後の背後表示対策）。
-  - 1.3.13 (2026-06-29) ネイティブファイル選択: ensure_front を bring_excel_first=true に戻し processEvents（Excel 背後に開く事象の修正）。
-  - 1.3.12 (2026-06-29) ファイル選択: 確定後の Excel 前面化を廃止。表示前 ensure_front(bring_excel_first=false)。
-  - 1.3.11 (2026-06-06) ネイティブファイル選択直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
-  - 1.3.10 (2026-04-10) 計測: ネイティブファイル選択直前に `[CSV_LD_UI] phase=native_file_dialog_open`（区間 A 終点の目安）。docs/csv_ld_perf_measurement.md 参照。
-  - 1.3.9 (2026-04-07) ファイル選択終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
-  - 1.3.8 (2026-03-05) ファイル選択表示中は Excel 操作を無効化し、OK/キャンセル後に有効化。進捗は close/closeEvent で deleteLater を追加（枠だけ残る対策）。
-  - 1.3.7 (2026-03-05) ファイル選択を常にネイティブのみに統一（Qt 描画分岐を削除）。サイズ指定は使用しない。
-  - 1.3.5 (2026-03-05) ファイル選択で Excel を親にした QWidget を渡す方式に変更（_set_owner_hwnd）。アイコン・モーダルを csv_mg と同等に。
 """
 from __future__ import annotations
 

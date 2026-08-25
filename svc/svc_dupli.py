@@ -11,28 +11,6 @@ History (latest 3):
   - 1.5.3 (2026-07-02) 進捗 pickle を verified 書込（DONE 検証、csv_ld 同型）。
   - 1.5.2 (2026-05-05) 進捗→結果の順序保証: progress_closed_ack を追加。進捗画面クローズACKを待ってから done/report を投入し、重なり・ちらつきを抑制。
   - 1.5.1 (2026-04-10) PHASE_ANALYZE 中の進捗: モード A/B の長いループで間引き _upd（45〜92%）。pickle 負荷は時間＋ストライドで抑制。
-  - 1.5.0 (2026-04-12) 重複着色: svc 一括 Interior は廃止。hl_rects を sidecar pickle に書き、レポート表示中は UI が VisibleRange±余白で追従着色。重複開始時に古い dupli_hl_rects_*.pkl を掃除。
-  - 1.4.4 (2026-04-10) キャンセル: 時間ゲート疑似割り込み（約60ms毎に pickle 確認・force で即確認）。未着色キャンセルは DONE に短い done_delay_ms。groupby/COM/ハイライト矩形化のループにもチェック。
-  - 1.4.3 (2026-04-10) 進捗キャンセル: cancel_request_path 経由の中止、着色済み矩形の部分クリアと PHASE_CLEAR 進捗。読込チャンク・解析・着色ループで協力的中止。
-  - 1.4.2 (2026-04-11) 診断: レポート投入時に highlight_clear の rects 件数・キー・book/sheet 有無を hc_csv_tool.diag.dupli へ。
-  - 1.4.1 (2026-04-11) 重複ハイライト COM ループ中: ScreenUpdating=False・Calculation=xlCalculationManual、finally で計算→画面→Interactive の順に復元。
-  - 1.4.0 (2026-04-11) bridge: VBA の selection_count_large / sheet_cells_count_large で全シート判定を優先し、取れるときは COM Selection を読まない。
-  - 1.3.9 (2026-04-11) 仕様書 §3.0: モード B は左上コーナー（全シート）選択のみ。単一セル→B・Used 外交差の単一セル→B を廃止。bridge 時も COM の全シート判定を OR。
-  - 1.3.8 (2026-04-11) bridge: 列全体/行全体等は Application.Range / シートローカルで解決。_dupli_sel_log の full_sheet キー重複を解消。
-  - 1.3.7 (2026-04-11) bridge JSON の selection_areas（VBA Areas×External 付き）で交差矩形を構築し、Python 側の Application.Selection 読取を回避。失敗時は COM にフォールバック。
-  - 1.3.6 (2026-04-11) DISP_E_EXCEPTION を hresult の U32（0x80020009）で判定し、details タプル内のいずれかがビジー HRESULT ならリトライ対象に。
-  - 1.3.5 (2026-04-11) ビジー HRESULT を符号なしで照合（0x80027EFA 等・DISP_E 内側）。selection_used_rects 失敗ログを is_busy 明示。
-  - 1.3.4 (2026-04-11) Selection/UsedRange 読取で RPC_E_SERVERCALL_RETRYLATER 等のとき短いバックオフでリトライ（レポート直後の対象なし緩和）。
-  - 1.3.3 (2026-04-11) 全シート判定: CountLarge 優先。交差矩形なしでも全シート相当ならモードB。[DUPLI_SEL] 診断ログ。
-  - 1.3.2 (2026-04-10) 全シート選択（左上コーナー）を検知しモードBと同じセル単位走査。highlight_clear に book_name。
-  - 1.3.1 (2026-04-11) 単一セルが UsedRange と交差しない場合もモードB。highlight_clear に sheet_name。UI 側はシート固定＋Interior 強化クリア・Goto スクロール。
-  - 1.3.0 (2026-04-11) モード A: Areas×UsedRange・選択列のみ着色・空欄正規化。モード B: 単一セルで有効データ領域をセル値重複。highlight_clear.rects。仕様書 §3 準拠。
-  - 1.2.1 (2026-04-11) UI 順序: 完了通知 pickle をレポートより先に投入（mtime 順）。着色クリアはレポート閉鎖時のみ（完了 OK では消さない）。
-  - 1.2.0 (2026-04-11) レポート: 同一値グループを先頭行の若い順で一覧。タイトルと総数表示を分離。UI 閉鎖で着色クリア用 runs を渡す。
-  - 1.1.1 (2026-04-11) 重複着色: 連続行を 1 レンジにマージして COM 削減。進捗 _upd を行数・時間の複合間隔に変更。
-  - 1.1.0 (2026-04-06) HC_LOG_PERF: [DUPLI_PERF]。診断: [DUPLI_TRACE]。
-  - 1.0.0 (2026-03-11) core_xlc.get_excel_context_from_hwnd 利用、完了通知・進捗・レポート表示、ログ出力（範囲・重複有無・重複数）。
-  - 初出 (2026-03-06) hc_dupli から分離。svc_dupli + ui_dupli + config/ui_dupli.json で完結。
 """
 from __future__ import annotations
 

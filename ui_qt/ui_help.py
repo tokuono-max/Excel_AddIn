@@ -8,14 +8,10 @@ Version: 1.0.8
 Purpose:
   操作マニュアル本文を PySide6 のモーダルダイアログで表示する。
   文言・テンプレは config/ui_help.json（MESSAGES / SCREENS）必須。
-History:
+History (latest 3):
   - 1.0.8 (2026-05-03) 前景追従廃止: stop_front_follow／showEvent の FOLLOW 専用 nudge を削除。done_dialog_show_event_on_excel に一本化。
   - 1.0.7 (2026-05-03) doc: WINDOW.EXCEL_LOCK（旧 EXCEL_CHILD_HWND_LOCK_WHILE_MODAL 互換）表記に合わせる。
   - 1.0.6 (2026-05-03) EXCEL_FRONT_FOLLOW 時の nudge 遅延を config/ui_window_timing.json HELP_SHOW_EVENT.FOLLOW_NUDGE_DELAYS_MS から読込（既定に 520/900ms を追加）。
-  - 1.0.5 (2026-05-03) EXCEL_FRONT_FOLLOW 時: showEvent で done_dialog 後に短い遅延 ensure_front（0/150/320ms）を追加（症状 B・json の TOPMOST/FOLLOW は不変更）。
-  - 1.0.4 (2026-05-03) _hc_help_dialog プロパティで ui_common.ensure_front の AttachThreadInput 経路を有効化。exec 前の bump／遅延は ui_server（HELP_BEFORE_MODAL_EXEC）。1.0.3 の bring_to_front／show 後 QTimer 列は撤回。
-  - 1.0.3 (2026-05-03) EXCEL_FRONT_FOLLOW 時: show 前に XLMAIN を bring_to_front、showEvent 後に ui_window_timing の追加遅延 ensure_front（効果不十分のため 1.0.4 で撤回）。
-  - 1.0.2 (2026-05-03) 閉じる／closeEvent 先頭で stop_front_follow_if_matches。閉鎖後に EXCEL_FRONT_FOLLOW の not_visible 復帰が show() して窓を蘇生するのを防ぐ。
 """
 from __future__ import annotations
 

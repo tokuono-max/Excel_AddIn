@@ -15,7 +15,6 @@ History (latest 3):
   - 1.2.13 (2026-06-06) waitform_ready_signal_path / write_waitform_ready_signal（VBA WaitForm 合図ファイル）。
   - 1.2.12 (2026-04-06) IPC ルート解決を core.core_env.ipc_dir_raw() に統一（HC_IPC_ROOT / HC_QT_IPC_DIR）。
   - 1.2.1 (2026-02-11) TEMP配下固定(%TEMP%\\csv_tool)とログパスを安定化。構文不備を修正。
-  - 1.2.0 (2026-02-11) READY_UI 早期通知のため UiRequest に ready_path を追加。
 """
 
 

@@ -124,6 +124,40 @@ def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
     return msgs
 
 
+def _is_patch_apply_mode(apply_mode: str) -> bool:
+    return str(apply_mode or "").strip().lower() == "patch"
+
+
+def updater_busy_title(ui_msgs: dict[str, str], apply_mode: str) -> str:
+    if _is_patch_apply_mode(apply_mode):
+        return str(ui_msgs.get("UPDATER_PHASE_BUSY_TITLE_PATCH") or "差分更新中")
+    return str(ui_msgs.get("UPDATER_PHASE_BUSY_TITLE_FULL") or "フル更新中")
+
+
+def updater_busy_body(
+    ui_msgs: dict[str, str],
+    apply_mode: str,
+    message_key: str,
+    default: str,
+    *,
+    apply_phase: bool = False,
+) -> str:
+    if apply_phase:
+        if _is_patch_apply_mode(apply_mode):
+            return str(
+                ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE_PATCH")
+                or "差分パッケージをインストールしています"
+            )
+        return str(
+            ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE_FULL") or "フルパッケージをインストールしています"
+        )
+    prefix = "差分" if _is_patch_apply_mode(apply_mode) else "フル"
+    base = str(ui_msgs.get(message_key) or default).strip() or default
+    if base.startswith(prefix):
+        return base
+    return f"{prefix} {base}"
+
+
 def _self_hc_updater_dst_paths() -> set[Path]:
     """Paths under app\\bin that this updater run may replace via sidecar."""
     extra: set[Path] = set()
@@ -617,6 +651,11 @@ def run(job_path: Path) -> int:
     apply_title = ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "更新中")
     try:
         job = _load_job(job_path)
+        busy_title = updater_busy_title(ui_msgs, job.apply_mode)
+        apply_title = busy_title
+        apply_msg = updater_busy_body(
+            ui_msgs, job.apply_mode, "UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。", apply_phase=True
+        )
         _append_with_cap(
             job.log_path,
             f"{_ts()} apply_bin: updater job loaded pid={os.getpid()} job={job_path}\n",
@@ -654,8 +693,13 @@ def run(job_path: Path) -> int:
             job.log_path,
             ui,
             "start",
-            ui_msgs.get("UPDATER_PHASE_START_TITLE", "更新中"),
-            ui_msgs.get("UPDATER_PHASE_START_MESSAGE", "更新処理を開始しています。"),
+            busy_title,
+            updater_busy_body(
+                ui_msgs,
+                job.apply_mode,
+                "UPDATER_PHASE_START_MESSAGE",
+                "更新処理を開始しています。",
+            ),
             15,
         )
         dl_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_download_"))
@@ -664,8 +708,13 @@ def run(job_path: Path) -> int:
             job.log_path,
             ui,
             "download_copy",
-            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_TITLE", "更新中"),
-            ui_msgs.get("UPDATER_PHASE_DOWNLOAD_MESSAGE", "更新ファイルを取得しています。"),
+            busy_title,
+            updater_busy_body(
+                ui_msgs,
+                job.apply_mode,
+                "UPDATER_PHASE_DOWNLOAD_MESSAGE",
+                "更新ファイルを取得しています。",
+            ),
             30,
         )
         shutil.copy2(job.zip_path, zip_local)
@@ -681,18 +730,37 @@ def run(job_path: Path) -> int:
                 job.log_path,
                 ui,
                 "extract",
-                ui_msgs.get("UPDATER_PHASE_EXTRACT_TITLE", "更新中"),
-                ui_msgs.get("UPDATER_PHASE_EXTRACT_MESSAGE", "更新ファイルを展開しています。"),
+                busy_title,
+                updater_busy_body(
+                    ui_msgs,
+                    job.apply_mode,
+                    "UPDATER_PHASE_EXTRACT_MESSAGE",
+                    "更新ファイルを展開しています。",
+                ),
                 50,
             )
             ui.set(
-                apply_title,
-                ui_msgs.get("UPDATER_PHASE_EXTRACT_MESSAGE", "更新ファイルを展開しています。"),
+                busy_title,
+                updater_busy_body(
+                    ui_msgs,
+                    job.apply_mode,
+                    "UPDATER_PHASE_EXTRACT_MESSAGE",
+                    "更新ファイルを展開しています。",
+                ),
                 55,
             )
             shutil.unpack_archive(str(zip_local), str(extract_tmp))
             cfg = load_runtime_config(job.install_root)
-            ui.set(apply_title, "関連プロセスを終了しています…", 68)
+            ui.set(
+                busy_title,
+                updater_busy_body(
+                    ui_msgs,
+                    job.apply_mode,
+                    "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
+                    "関連プロセスを終了しています…",
+                ),
+                68,
+            )
             ensure_packaged_children_stopped(
                 lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
                 cfg,
@@ -711,8 +779,8 @@ def run(job_path: Path) -> int:
                 job.log_path,
                 ui,
                 "apply",
-                ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "更新中"),
-                ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。"),
+                busy_title,
+                apply_msg,
                 75,
             )
 

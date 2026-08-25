@@ -14,22 +14,6 @@ History (latest 3):
   - 1.4.37 (2026-07-02) 進捗 pickle を core.progress_pickle_write に統一。DONE 検証・失敗ログ・ERROR fallback。
   - 1.4.36 (2026-06-30) （未コミット系の版上げを含む）
   - 1.4.35 (2026-06-29) AUTOFILTER 適用成功時に 1 行目固定を連動（csv_excel_post_write）。
-  - 1.4.34 (2026-06-29) 進捗を done/total 行数同期に統一。読込中も N/M 更新。pct 明示送信を廃止。
-  - 1.4.33 (2026-06-29) 進捗バー: 工程3の疑似クリープ廃止・done_delay 400ms・DONE 後待機 0.25s で完了通知を短縮。
-  - 1.4.32 (2026-06-29) 完了通知の前面化: ScreenUpdating 復帰を進捗クローズ ACK 待ちの前へ移動（DoneDialog 表示後の Excel 前面奪取を抑制）。
-  - 1.4.31 (2026-06-29) 進捗クローズ ACK を共通モジュールへ統一（15秒+nudge）。3秒タイムアウトの独自待機を廃止。
-  - 1.4.30 (2026-06-29) 展開後 AutoFit/AutoFilter を ui_csv_mg.json（AUTOFIT_MAX_ROWS / AUTOFILTER）に統一。mode_append・start_row=1 のみフィルタ。
-  - 1.4.29 (2026-06-22) 結合直前の Book/Sheet 解決を _attach_book+GUID に変更（apps.active 廃止）。
-  - 1.4.28 (2026-06-13) 進捗表示: Excel書き込み→CSVファイル結合中。
-  - 1.4.27 (2026-06-13) 進捗 UI 共通設定（poll/creep）とファイル確定直後の砂時計 ON。
-  - 1.4.26 (2026-06-06) ハング緩和: 書込〜DONE を ScreenUpdating 復帰前に完了。restore_on_exit=False + wait_after_progress_done。
-  - 1.4.24 (2026-06-04) 結合処理中の砂時計 ON（ファイル確定後〜完了）。Excel 書込みループで tick 再武装。
-  - 1.4.23 (2026-05-05) progress の parent_hwnd を環境変数依存から引数へ統一。progress_closed_path ACK 待ちを追加し、進捗クローズ後に完了通知/再表示へ遷移。
-  - 1.4.22 (2026-04-09) 結合メイン IPC と done_then_merge に excel_rect（Excel HWND の GetWindowRect）を付与。進捗と同じ送信時点矩形で中央寄せを統一。
-  - 1.4.21 (2026-04-08) ジャンプ用定義名: ハイフン等を Excel 構文に合わせてサニタイズ（UTF-8 等を含むファイル名で Names.Add 失敗を防止）。失敗ログに name/ref を付与。
-  - 1.4.20 (2026-04-05) 完了通知を DONE 進捗 pickle（show_done_dialog / done_items / seq）に集約し done_then_merge 二重経路を解消。_progress_write に単調 seq。progress の req_dict に excel_rect・done_delay_ms。ERROR/OVER_LIMIT も seq 付与。
-  - 1.4.19 (2026-04-06) req_path 修正、運用・診断ログ（phase/ms/req）、READY_UI 経過ログ、merge_csv の WaitForm 救済、致命的エラー時 notify_wait_form_ready。結合処理に prep/write 区間ログ。
-  - 1.4.18 (2026-03-09) オートフィットをセル数→行数基準に変更。定数は core_cst.AUTOFIT_MAX_ROWS に統一。
 """
 from __future__ import annotations
 

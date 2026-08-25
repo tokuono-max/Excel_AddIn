@@ -11,14 +11,6 @@ History (latest 3):
   - 1.1.9 (2026-05-05) PREVIEW 一覧: 左側に連番（1始まり）を付与し、削除件数を視認しやすくした。
   - 1.1.8 (2026-05-05) DONE: prepare 内 ensure_front をスキップ（_hc_prepare_skip_ensure_front）してちらつき抑制を強化。close/OK 直後に Excel root を即 bring_to_front して背後アプリ前面化を抑止。
   - 1.1.7 (2026-05-05) DONE: 透明化/非透明化（opacity reveal）自体を廃止。prepare 済み座標でそのまま表示し、表示時の見え変化を抑制。
-  - 1.1.6 (2026-05-05) DONE: OPACITY_REVEAL_DELAY_MS を撤去し透明解除は即時(0ms)。_hc_disable_ensure_front_retry を付与して前面化再試行由来の揺れを抑止。
-  - 1.1.5 (2026-05-05) DONE ちらつき抑止: 透明解除を遅延（OPACITY_REVEAL_DELAY_MS）し、showEvent 先頭で再度 0.0 を適用して移動中の露出を抑制。
-  - 1.1.4 (2026-04-12) 完了 OK／× 閉じ後に focus_excel_after_modal_close（CMD 前面化の抑止）。
-  - 1.1.3 (2026-04-10) HC_UI_FG_DIAG: 完了ダイアログ showEvent / opacity 1.0 直後に log_ui_fg_phase。
-  - 1.1.2 (2026-04-10) 完了ダイアログのみ opacity 0→show 後 singleShot で 1.0（進捗は対象外。WA_DontShowOnScreen は使わない）。
-  - 1.1.1 (2026-04-10) 完了／確認ダイアログ: exec 前に prepare_dialog で配置し showEvent の二重センタを廃止（ちらつき抑制）。
-  - 1.0.0 (2026-03-11) hc_row_dl から分離。進捗は ui_common、完了は SCREENS.DONE で表示。
-  - 初出 (2026-03-06) 計画に基づく ui_row_dl 新規作成。
 """
 from __future__ import annotations
 

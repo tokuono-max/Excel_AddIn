@@ -12,9 +12,6 @@ History (latest 3):
   - 3.0.13 (2026-04-09) 重複確認 _finish: WA_DeleteOnClose、hide 明示、枠残像抑制のため次フレームで accept（QTimer.singleShot(0)）。事例8と同系のネイティブ枠対策。
   - 3.0.12 (2026-04-09) 分割開始後は結果 pickle のみ書き accept（進捗は svc が重複解決後に IPC）。ゴースト低減。分割 MAIN に _hc_csv_sp_split_main。中央は ui_server prepare に委譲。
   - 3.0.11 (2026-04-09) ちらつき: 分割・重複とも opacity 演出を廃止（次フレーム中央のみ）。重複終了: 進捗前面化→非表示→processEvents→accept でゴースト枠低減。
-  - 3.0.10 (2026-04-09) 分割・重複 showEvent: 透明化→0ms 中央→50ms 不透明で位置跳びちらつきを抑制。
-  - 3.0.9 (2026-04-09) 重複確認: hc_csv_tool.diag.ui_csv_sp に CONFLICT_LIFECYCLE ログ（finish／pickle／accept）。
-  - 3.0.8 (2026-04-09) 重複確認 _finish: WA_DontShowOnScreen／遅延 accept を撤去し同期 accept。ゴースト外枠低減。終了掃除は ui_server 後処理に委ねる。
 """
 from __future__ import annotations
 

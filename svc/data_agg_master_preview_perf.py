@@ -195,10 +195,9 @@ def master_preview_join_pool_row_cap(
     read_rows_limit: int,
     file_count: int,
 ) -> int:
-    """結合プレビュー: 参照ファイル数 × 読込上限（プール合計行数）。"""
-    per = max(1, int(read_rows_limit))
-    fc = max(1, int(file_count))
-    return per * fc
+    """結合プレビュー: 表示行上限までで打ち切る総読込行数上限。"""
+    _ = max(1, int(file_count))
+    return max(1, int(read_rows_limit))
 
 
 def master_preview_per_file_pool_row_cap(*, read_rows_limit: int) -> int:
@@ -397,7 +396,7 @@ def master_preview_read_pool_display_cap(
     read_rows_limit: int,
     file_count: int,
 ) -> int:
-    """読込行数表示の分母（参照ファイル数 × 1 ファイルあたり読込上限）。"""
+    """読込行数表示の分母（マスタデバッグの総読込行数上限）。"""
     return master_preview_join_pool_row_cap(
         read_rows_limit=read_rows_limit,
         file_count=file_count,
@@ -407,11 +406,7 @@ def master_preview_read_pool_display_cap(
 _MASTER_PREVIEW_DIAG_SOURCE = "ui_data_agg_debug.master_preview"
 
 
-def master_preview_join_max_files_cap(debug_diag: Any) -> int | None:
-    """結合項目のファイル読込上限。正の整数のみ。0・省略・不正値は無制限。"""
-    if not isinstance(debug_diag, dict):
-        return None
-    raw = debug_diag.get("master_preview_join_max_files")
+def _positive_int_cap(raw: Any) -> int | None:
     if raw is None:
         return None
     try:
@@ -419,6 +414,20 @@ def master_preview_join_max_files_cap(debug_diag: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return cap if cap > 0 else None
+
+
+def master_preview_join_max_files_cap(debug_diag: Any) -> int | None:
+    """結合項目のファイル読込上限。正の整数のみ。0・省略・不正値は無制限。"""
+    if not isinstance(debug_diag, dict):
+        return None
+    return _positive_int_cap(debug_diag.get("master_preview_join_max_files"))
+
+
+def master_preview_max_files_cap(debug_diag: Any) -> int | None:
+    """非結合項目のファイル読込上限。正の整数のみ。0・省略・不正値は無制限。"""
+    if not isinstance(debug_diag, dict):
+        return None
+    return _positive_int_cap(debug_diag.get("master_preview_max_files"))
 
 
 def master_preview_should_apply_join_file_cap(
@@ -467,6 +476,48 @@ def apply_master_preview_join_max_files(
         try:
             log.info(
                 "[DATA_AGG_DIAG] master_preview_join_file_cap detected=%s read=%s cap=%s",
+                detected,
+                len(capped),
+                cap,
+            )
+        except Exception:
+            pass
+    return capped
+
+
+def apply_master_preview_max_files(
+    paths: list[str],
+    items: list[Any],
+    debug_diag: Any,
+    *,
+    log: Any = None,
+) -> list[str]:
+    """マスタデバッグ非結合項目: filter 後の paths を上限件数で打切る。結合項目は触らない。"""
+    if not paths or not isinstance(debug_diag, dict):
+        return paths
+    if str(debug_diag.get("source") or "") != _MASTER_PREVIEW_DIAG_SOURCE:
+        return paths
+    cap = master_preview_max_files_cap(debug_diag)
+    if cap is None:
+        return paths
+    mi_idx = debug_diag.get("mi_idx")
+    if not isinstance(mi_idx, int) or mi_idx < 0:
+        return paths
+    if master_preview_should_apply_join_file_cap(items, int(mi_idx)):
+        return paths
+    detected = len(paths)
+    debug_diag["master_preview_max_files_detected"] = int(detected)
+    if detected <= cap:
+        debug_diag["master_preview_max_file_cap_hit"] = False
+        debug_diag["master_preview_max_files_read"] = int(detected)
+        return paths
+    capped = list(paths[:cap])
+    debug_diag["master_preview_max_file_cap_hit"] = True
+    debug_diag["master_preview_max_files_read"] = int(len(capped))
+    if log is not None:
+        try:
+            log.info(
+                "[DATA_AGG_DIAG] master_preview_max_file_cap detected=%s read=%s cap=%s",
                 detected,
                 len(capped),
                 cap,

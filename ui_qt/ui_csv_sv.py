@@ -15,12 +15,6 @@ History (latest 3):
   - 1.4.6 (2026-06-29) 保存ダイアログ: ui_fil v0.4.0（comdlg32 直叩き。QFileDialog ホスト廃止）。
   - 1.4.5 (2026-06-29) 保存ダイアログ: ui_fil.show_save_file_dialog_for_excel（QFileDialog.exec＋FG監視）。
   - 1.4.4 (2026-06-29) ネイティブ保存ダイアログ: ui_fil.prepare/restore_native_file_dialog_excel に集約（他機能連続後の背後表示対策）。
-  - 1.4.3 (2026-06-29) ネイティブ保存ダイアログ: ensure_front を bring_excel_first=true に戻し processEvents（Excel 背後に開く事象の修正。csv_ld 同型）。
-  - 1.4.2 (2026-06-06) ネイティブ保存ダイアログ直前に dismiss_vba_wait_form_best_effort（WaitForm を ui 側で解除）。
-  - 1.4.1 (2026-04-07) 保存ダイアログ終了時（操作再開後）に core_w32.bring_to_front で Excel 前面復帰。
-  - 1.4.0 (2026-03-09) 進捗完了時に完了通知を表示。_done_cfg で SCREENS.DONE を渡す。
-  - 1.3.0 (2026-03-05) 保存画面を Excel 前面・親子・アイコン対応。表示中 Excel 操作無効化。基準フォルダ(initial_dir)対応。
-  - 1.2.0 (2026-03-05) 進捗表示を ui_csv_mg から分離。action "progress" を自前で処理し config/ui_csv_sv.json の PROGRESS を使用。
 """
 from __future__ import annotations
 

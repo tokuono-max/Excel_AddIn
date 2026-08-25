@@ -23,10 +23,10 @@
 
 | 項目 | 内容 |
 |------|------|
-| **命名規則** | `ui_<機能キー小文字>.json`（例: ui_csv_mg.json, ui_csv_ld.json, ui_csv_sv.json, ui_csv_sp.json） |
-| **配置** | プロジェクトルートの `config/` フォルダ。 |
-| **読込** | `core.core_cst.get_ui_config_from_file_required(feature_key)`。機能キーは §7 の機能別 JSON 一覧に準ずる（csv_mg, csv_ld, csv_sv, csv_sp, hd_nr, undo, dupli, row_dl, col_dl, dt_ymd, dt_hm, trm_ex, help 等）。 |
-| **読込タイミング** | 各画面表示時（create_dialog 等の呼び出し時）。core_cst がファイル mtime でキャッシュするため、保存後に次回表示で反映。 |
+| **命名規則** | 画面あり: `ui_<機能キー小文字>.json`（例: ui_csv_mg.json）。**例外**: 出荷履歴項目追加は画面なしのため `hd_in.json`（`ui_` なし）。 |
+| **配置** | プロジェクトルートの `config/` フォルダ。現場上書き `出荷履歴項目.json` は `{app}` 直下（config には置かない）。 |
+| **読込** | 画面設定は `core.core_cst.get_ui_config_from_file_required(feature_key)`。**例外**: `hd_in.json` は `svc.svc_hd_in.load_hd_in_labels`（リボン実行時。core_cst の画面キャッシュは使わない）。 |
+| **読込タイミング** | 画面設定は各画面表示時（create_dialog 等）。`hd_in.json` は出荷履歴項目追加の実行時。 |
 | **除外キー** | ルートの `_header` と `_separator` は実行時に設定として使わない（メタ情報・区切り用）。 |
 
 ---
@@ -131,6 +131,7 @@
 | **ui_csv_ld.json** | CSV読込 | WINDOW, MAIN（TITLE, FILTER）, SCREENS.PROGRESS |
 | **ui_csv_sv.json** | CSV保存 | WINDOW, MAIN（TITLE, FILTER）, SCREENS.PROGRESS |
 | **ui_csv_sp.json** | CSV分割 | WINDOW, MAIN（TITLE, DESC, TABLE, DIALOG_BUTTONS, DIALOGS.FOLDER）, SCREENS（PROGRESS, DONE, WARNING） |
+| **hd_in.json** | 出荷履歴項目追加（画面なし） | LABELS, OVERRIDE_FILE。現場上書きは `{app}/出荷履歴項目.json`（config には置かない） |
 | **ui_hd_nr.json** | 行整形（ヘッダブロック横結合） | WINDOW, MAIN（TITLE, DESC, DIALOG_BUTTONS）, SCREENS（WARNING, PROGRESS, DONE, DATA_SHORTAGE） |
 | **ui_undo.json** | 元に戻す（復元不可時） | SCREENS.UNDO_FAILED 等。 |
 | **ui_dupli.json** | 重複チェック | MESSAGES, HIGHLIGHT, SCREENS（PROGRESS, DONE, REPORT） |

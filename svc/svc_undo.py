@@ -19,22 +19,6 @@ History (latest 3):
   - 1.7.14 (2026-07-02) 進捗 DONE を verified 書込 + progress_closed ACK 待ち（96% 残留対策、csv_ld 同型）。
   - 1.7.13 (2026-07-02) 部分スナップショット: snapshot_region 指定で矩形のみ save/restore（v2 payload、旧 full は互換維持）。
   - 1.7.12 (2026-07-02) 復元成功で完了ダイアログ表示時は finally の bring_to_front をスキップ（Excel 選択ちらつき抑制、1.7.5 相当を復活）。
-  - 1.7.11 (2026-07-02) スナップショット保存時 ScreenUpdating 停止。余白列幅リセットを範囲一括指定に変更。
-  - 1.7.10 (2026-06-06) 構造復元成功時もキャッシュ削除→_undo_progress_done を実行（進捗クローズ漏れ修正）。
-  - 1.7.9 (2026-06-06) ハング緩和: DONE を ScreenUpdating 復帰前に書込。restore_on_exit=False + wait_after_progress_done。
-  - 1.7.8 (2026-06-06) 進捗表示中は excel_lock=True（復元開始から Excel 操作無効）。完了時 teardown で解除。
-  - 1.7.7 exec_undo finally: 成功時も常に w32.bring_to_front(hwnd) を実行（1.7.5 のスキップを撤去）。TOPMOST 進捗後の前景を他機能（例 svc_dt_ymd）と揃え、続くモーダル前面の切り分け用。再発時はリバートまたは進捗側の TOPMOST 解除等を検討。
-  - 1.7.6 Undo 成功: キャッシュ削除を進捗フェーズ（PHASE_UNDO_CACHE_DELETE）に含め、削除完了後に _undo_progress_done。進捗内の早期 DONE 呼び出しを廃止。_undo_progress_done の done_delay_ms / sleep を短縮。
-  - 1.7.5 exec_undo finally: 復元成功かつ _show_undo_done_dialog を表示した直後は w32.bring_to_front(hwnd) をスキップ（完了 OK 後に Excel を強制前面にすると続く UI が背後に回る事象の緩和）。失敗・例外経路では従来どおり bring_to_front。（1.7.7 で撤去）
-  - 1.7.4 Undo 進捗 IPC: excel_lock を False に変更（CSV 読込等の進捗と同様。ProgressDialog の enable_excel_window(False) を踏まない）。復元中の操作抑止は Interactive=False 等に依存。
-  - 1.7.3 データ復元: スナップショットが空リスト（使用範囲なし）でも復元可能に（出荷履歴項目追加の Undo 等）。
-  - 1.7.2 データ復元: 進捗表示直後（with 突入前）から Interactive=False。進捗～Excel 操作無効の隙間を解消。
-  - 1.7.1 Undo 進捗: excel_lock=True（復元中は enable_excel_window 無効化）。構造復元も Interactive=False。終了時は進捗 close＋finally で有効化。
-  - 1.7.0 exec_undo: ui_server 経由の進捗ダイアログ（config/ui_undo.json PROGRESS）。データ復元・構造復元の両方。キャンセルなし。
-  - 1.6.1 HC_LOG_PERF: [UNDO_PERF]。診断: [UNDO_TRACE]（exec_undo）。
-  - 1.6.0 表示更新を xlc.suspend_sheet_updates で一括制御。復元成功時に終了通知を表示（config/ui_undo.json SCREENS.UNDO_DONE）。
-  - 1.5.3 枠固定をスナップショットに含め復元時に解除→データ復元後に再設定。
-  - 1.5.2 復元後、不要列の列幅をシートの標準幅に戻す。
 """
 from __future__ import annotations
 

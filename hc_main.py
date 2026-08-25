@@ -19,10 +19,6 @@ History (latest 3):
   - 0.2.4 (2026-04-11) check_duplicates: bridge の `selection_count_large` / `sheet_cells_count_large` を kwargs に転送。
   - 0.2.3 (2026-04-11) bridge JSON の `selection_areas` を検証のうえ `svc_requests` の kwargs に転送（重複チェック用）。
   - 0.2.2 (2026-04-11) Mutex `HC_MAIN_RUNNER` ＋ 旧 `HC_BRIDGE_RUNNER` を両方取得（旧 svc_host との生存検知互換）。
-  - 0.2.1 (2026-04-11) フェーズ E: ログ `[MAIN]`、`HC_MAIN_*` env（`HC_BRIDGE_*` フォールバック）。
-  - 0.2.0 (2026-04-11) svc/bridge_runner からルート hc_main.py へ移設。bootstrap は「本ファイルの親＝プロジェクトルート」。
-  - 0.1.8 (2026-04-11) core.ribbon_public_to_svc に action 対応を集約。
-  - 0.1.7 (2026-04-10) リボン action 全件転送、JSON payload 引き継ぎ。
 """
 from __future__ import annotations
 
