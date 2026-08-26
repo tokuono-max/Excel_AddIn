@@ -279,6 +279,8 @@ def read_xls_repeated_series(
     col_step: int,
     limit: int,
     repeat_until_empty: bool,
+    skip_row_hidden: Any = None,
+    rule_iters_out: Any = None,
 ) -> list[Any]:
     """縦/横反復を行列から読む。"""
     from svc.svc_data_agg_extract import _matrix_cell_value, _read_repeated_series_from_matrix
@@ -288,10 +290,16 @@ def read_xls_repeated_series(
     if not mat:
         return []
     if row_step == 0 and col_step == 0:
+        if skip_row_hidden is not None and skip_row_hidden(base_row):
+            return []
         v0 = _matrix_cell_value(mat, base_col, base_row)
         if repeat_until_empty and (v0 is None or v0 == ""):
             return []
-        return [v0] * max(0, limit)
+        out = [v0] * max(0, limit)
+        if rule_iters_out is not None:
+            rule_iters_out.clear()
+            rule_iters_out.extend([0] * len(out))
+        return out
     return _read_repeated_series_from_matrix(
         mat,
         base_col=base_col,
@@ -300,4 +308,6 @@ def read_xls_repeated_series(
         col_step=col_step,
         limit=limit,
         repeat_until_empty=repeat_until_empty,
+        skip_row_hidden=skip_row_hidden,
+        rule_iters_out=rule_iters_out,
     )

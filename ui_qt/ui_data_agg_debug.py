@@ -4,9 +4,9 @@ Python: 3.12+
 Module: ui_qt/ui_data_agg_debug.py
 Purpose: データ集約デバッグウィンドウ（要求定義 §3.1.3）。文言・列見出し・ツールチップは config/ui_data_agg.json の SCREENS.DEBUG（TIP_*）。
 History (latest 3):
+  - 2026-08-26 シナリオデバッグの前置「・」は live_items の carry_empty を参照（scenario_for_dry_run 未渡し対策）。
+  - 2026-08-26 デバッグ結果一覧: 前置保持(carry_empty)対象の項目名文頭に「・」（本番一括は対象外）。
   - 2026-08-24 シナリオ結果一覧—フェーズ境界（_value_col_spans の先頭列）に太縦線（本体・列見出し）。行はフェーズ間で揃えない。
-  - 2026-08-24 シナリオ主キーは先に表示し裏で連携を読む。空主キーの連携は出さない。
-  - 2026-04-14 デバッグ—シナリオ/マスタでウィンドウタイトル（TITLE_SCENARIO/TITLE_MASTER）と連続実行ボタン（BTN_RUN_ALL_*、TIP_RUN_ALL_*）をモード連動。
 """
 from __future__ import annotations
 
@@ -295,6 +295,56 @@ def _parse_hash_bracket_column_values(colvals: list[str]) -> dict[str, list[str]
             continue
         tgt = (m.group(2) or "").strip() or "未指定"
         out.setdefault(tgt, []).append(str(m.group(3)))
+    return out
+
+
+_CARRY_EMPTY_HEADER_MARK = "・"
+
+
+def carry_empty_target_names_from_items(items: list[Any] | None) -> set[str]:
+    """
+    連携キー carry_empty が ON の登録先項目名集合。
+    デバッグ結果一覧の見出し装飾専用（本番 Excel 見出しには使わない）。
+    """
+    from svc.data_agg_source_ui import source_ui_block
+    from svc.svc_data_agg_extract import link_def_wants_carry_empty
+
+    names: set[str] = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        for src in it.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            ui = source_ui_block(src)
+            if not isinstance(ui, dict):
+                continue
+            for ld in ui.get("link_defs") or []:
+                if not isinstance(ld, dict):
+                    continue
+                if not link_def_wants_carry_empty(ld):
+                    continue
+                tgt = str(ld.get("item") or "").strip()
+                if tgt:
+                    names.add(tgt)
+    return names
+
+
+def decorate_debug_carry_empty_headers(
+    headers: list[str] | None,
+    carry_names: set[str] | None,
+) -> list[str]:
+    """前置保持対象の項目名文頭に「・」を付ける（既に付いていれば二重にしない）。"""
+    mark = _CARRY_EMPTY_HEADER_MARK
+    carry = carry_names or set()
+    out: list[str] = []
+    for h in headers or []:
+        raw = str(h or "")
+        bare = raw[len(mark) :] if raw.startswith(mark) else raw
+        if bare in carry:
+            out.append(mark + bare)
+        else:
+            out.append(bare if raw.startswith(mark) else raw)
     return out
 
 
@@ -4791,14 +4841,15 @@ class DataAggDebugDialog(QDialog):
     def _apply_value_grid_from_snapshot(self, headers: list[str], rows: list[list[str]]) -> None:
         self._mpv_join_table_active = False
         self._mpv_join_table_ncols = 0
-        nc = len(headers)
+        disp_headers = self._decorate_debug_grid_headers([str(h) for h in headers])
+        nc = len(disp_headers)
         nr = len(rows)
-        self._value_grid_note_structure([str(h) for h in headers])
+        self._value_grid_note_structure(disp_headers)
         self.value_grid.clear()
         self.value_grid.setColumnCount(max(0, nc))
         self.value_grid.setRowCount(max(0, nr))
         if nc > 0:
-            self.value_grid.setHorizontalHeaderLabels([str(h) for h in headers])
+            self.value_grid.setHorizontalHeaderLabels(disp_headers)
         hdr_v = self.value_grid.horizontalHeader()
         hdr_v.setVisible(True)
         hdr_v.setMinimumHeight(32)
@@ -6273,6 +6324,26 @@ class DataAggDebugDialog(QDialog):
             it.get("name") or it.get("id") or ("項目_%s" % i)
             for i, it in enumerate(items)
         ]
+
+    def _debug_carry_empty_target_names(self) -> set[str]:
+        """
+        前置保持(carry_empty)対象項目名。
+        シナリオ編集からの起動は scenario_for_dry_run が無いため live_items を使う。
+        マスタは dry_run の items を優先する。
+        """
+        dry = list((self._scenario_for_dry_run or {}).get("items") or [])
+        live = list(self._live_items or [])
+        if self._mode == 0:
+            items = live or dry
+        else:
+            items = dry or live
+        return carry_empty_target_names_from_items(items)
+
+    def _decorate_debug_grid_headers(self, headers: list[str]) -> list[str]:
+        """デバッグ結果一覧用: 前置保持項目の見出しに「・」を付ける。"""
+        return decorate_debug_carry_empty_headers(
+            headers, self._debug_carry_empty_target_names()
+        )
 
     def _mpv_preview_compute_paths(self) -> list[str]:
         """compute_batch 内部 filter と同じ絞り込み後パス（凍結検証用）。"""
@@ -8732,6 +8803,7 @@ class DataAggDebugDialog(QDialog):
             str(it.get("name") or it.get("id") or ("項目_%s" % i))
             for i, it in enumerate(items)
         ]
+        headers = self._decorate_debug_grid_headers(headers)
         ncols = len(headers)
         if ncols == 0:
             self._reset_value_grid()
@@ -9009,6 +9081,7 @@ class DataAggDebugDialog(QDialog):
                     str(it.get("name") or it.get("id") or ("項目_%s" % i))
                     for i, it in enumerate(items)
                 ]
+                headers = self._decorate_debug_grid_headers(headers)
                 if headers:
                     self._mpv_join_table_active = True
                     self._mpv_join_table_ncols = len(headers)
@@ -9117,7 +9190,7 @@ class DataAggDebugDialog(QDialog):
             self._paint_result_highlights()
             return
         max_r = max(len(col) for _, col, _ in expanded) if expanded else 0
-        headers = [h for h, _, _ in expanded]
+        headers = self._decorate_debug_grid_headers([h for h, _, _ in expanded])
         self._value_grid_note_structure(headers)
         self.value_grid.setColumnCount(ncols)
         self.value_grid.setRowCount(max_r)

@@ -4,15 +4,15 @@ Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
 Updated: 2026-08-26
-Version: 0.1.20
+Version: 0.1.21
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.21 (2026-08-26) skip_hidden_rows: 非表示・フィルタ行を主キー走査から除外（.xls/.xlsx/.xlsm）。
   - 0.1.20 (2026-08-26) skip_carry_seed: スキップ行の連携値を前置種にする主キー側オプション。
   - 0.1.19 (2026-08-24) 空スキップ後の非連番 rule_iter でも連携/結合を列一括読取して拾う。
-  - 0.1.18 (2026-08-24) 連携/結合列が主キーと同じ長さ・同じ iter なら揃えコピーを省略。
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.20"
+__version__ = "0.1.21"
 
 
 class DataAggCsvReadError(Exception):
@@ -1244,12 +1244,30 @@ def _finish_repeated_cell_vals(
     max_primary_rows: Optional[int],
     peek_v: Any,
     skip_trunc_peek: bool = False,
+    rule_iters: Optional[list[int]] = None,
+    cell_source_rule_iters_out: Optional[dict[int, list[int]]] = None,
 ) -> None:
     """縦/横反復の主値抽出後処理（xlsx / CSV 共通）。"""
+    del repeat_until_empty  # 互換引数（呼び出し側で解決済み）
     if source_end_mode(src) == END_MODE_UNTIL_LAST:
-        vals = apply_until_last_trim(vals, until_last=True)
+        if rule_iters is not None and len(rule_iters) == len(vals):
+            last = -1
+            for i, v in enumerate(vals):
+                if not is_blank_primary_value(v):
+                    last = i
+            if last < 0:
+                vals = []
+                rule_iters = []
+            else:
+                vals = list(vals[: last + 1])
+                rule_iters = list(rule_iters[: last + 1])
+        else:
+            vals = apply_until_last_trim(vals, until_last=True)
+            if rule_iters is not None:
+                rule_iters = list(rule_iters[: len(vals)])
     if vals:
-        n_last = len(vals) - 1
+        # 最終セル位置は rule_iter（非表示スキップ後の Excel オフセット）を優先
+        n_last = int(rule_iters[-1]) if rule_iters else (len(vals) - 1)
         cell_ref_last = _resolve_cell_with_offset(cell_ref, row_off * n_last, col_off * n_last)
         c0, r0 = _parse_cell_ref(cell_ref_last)
         if c0 is not None and r0 is not None and item_id:
@@ -1263,6 +1281,7 @@ def _finish_repeated_cell_vals(
                 item_label=item_label,
                 source_index=si,
             )
+    before = len(results)
     _append_postprocessed_cell_vals(
         results,
         vals,
@@ -1270,8 +1289,15 @@ def _finish_repeated_cell_vals(
         src,
         max_primary_rows=max_primary_rows,
     )
+    n_added = len(results) - before
     if cell_source_spans_out is not None:
         cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
+    if (
+        cell_source_rule_iters_out is not None
+        and rule_iters is not None
+        and n_added > 0
+    ):
+        cell_source_rule_iters_out[si] = [int(x) for x in rule_iters[:n_added]]
 
 
 def precache_csv_matrix_for_file(
@@ -1557,27 +1583,50 @@ def _read_repeated_series_from_matrix(
     limit: int,
     repeat_until_empty: bool,
     cancel_check: Optional[Callable[..., None]] = None,
+    skip_row_hidden: Optional[Callable[[int], bool]] = None,
+    rule_iters_out: Optional[list[int]] = None,
 ) -> list[Any]:
-    """materialize 済み行列から反復系列を読む（縦/横/固定セル反復）。"""
+    """materialize 済み行列から反復系列を読む（縦/横/固定セル反復）。
+
+    skip_row_hidden: Excel 行（0 始まり）が非表示なら True。その段は値に含めず空停止もしない。
+    rule_iters_out: 取得した各値に対応するソース内オフセット n を追記する（指定時）。
+    """
     vals: list[Any] = []
+    if rule_iters_out is not None:
+        rule_iters_out.clear()
     if row_step == 0 and col_step == 0:
+        if skip_row_hidden is not None and skip_row_hidden(base_row):
+            return []
         v0 = _matrix_cell_value(mat, base_col, base_row)
         if _stop_repeat_on_empty(v0, repeat_until_empty=repeat_until_empty):
             return []
-        return [v0] * limit
+        out0 = [v0] * limit
+        if rule_iters_out is not None:
+            rule_iters_out.extend([0] * len(out0))
+        return out0
     n = 0
-    while len(vals) < limit:
+    # 非表示スキップで n だけ進む場合の上限（無限ループ防止）
+    max_n = max(limit * 50, len(mat) + limit + 1, 10000)
+    while len(vals) < limit and n < max_n:
         if n % 64 == 0:
             _poll_cancel_check(cancel_check)
         if row_step > 0 and col_step == 0:
-            v = _matrix_cell_value(mat, base_col, base_row + row_step * n)
+            excel_row = base_row + row_step * n
+            if skip_row_hidden is not None and skip_row_hidden(excel_row):
+                n += 1
+                continue
+            v = _matrix_cell_value(mat, base_col, excel_row)
         elif row_step == 0 and col_step > 0:
+            if skip_row_hidden is not None and skip_row_hidden(base_row):
+                break
             v = _matrix_cell_value(mat, base_col + col_step * n, base_row)
         else:
             break
         if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
             break
         vals.append(v)
+        if rule_iters_out is not None:
+            rule_iters_out.append(int(n))
         n += 1
     return vals
 
@@ -1697,6 +1746,8 @@ def _xlsx_read_repeated_series_open_workbook(
     repeat_until_empty: bool,
     path: Optional[Path] = None,
     cancel_check: Optional[Callable[..., None]] = None,
+    skip_row_hidden: Optional[Callable[[int], bool]] = None,
+    rule_iters_out: Optional[list[int]] = None,
 ) -> Optional[list[Any]]:
     """
     反復セル抽出の高速経路（OpenXML Excel / read_only）。
@@ -1728,9 +1779,15 @@ def _xlsx_read_repeated_series_open_workbook(
                     limit=limit,
                     repeat_until_empty=repeat_until_empty,
                     cancel_check=cancel_check,
+                    skip_row_hidden=skip_row_hidden,
+                    rule_iters_out=rule_iters_out,
                 )
             except Exception:
                 return None
+
+    # 非表示スキップは materialize 経路のみ（iter_rows 高速経路では扱わない）
+    if skip_row_hidden is not None:
+        return None
 
     if row_step == 0 and col_step == 0:
         try:
@@ -2359,6 +2416,7 @@ def extract_item_values(
     max_primary_rows: Optional[int] = None,
     *,
     cell_source_spans_out: Optional[dict[int, tuple[int, int]]] = None,
+    cell_source_rule_iters_out: Optional[dict[int, list[int]]] = None,
     cancel_check: Optional[Callable[..., None]] = None,
 ) -> list[Any]:
     """
@@ -2518,6 +2576,20 @@ def extract_item_values(
                 wb_owned = False
                 rd_row_step = row_off if repeat_dir == "vertical" else 0
                 rd_col_step = col_off if repeat_dir == "horizontal" else 0
+                from svc.data_agg_row_visibility import (  # noqa: WPS433
+                    make_row_hidden_predicate,
+                    source_wants_skip_hidden_rows,
+                )
+
+                skip_row_hidden = make_row_hidden_predicate(
+                    p_abs,
+                    sheet_name,
+                    enabled=source_wants_skip_hidden_rows(src),
+                )
+                rule_iters_buf: list[int] = []
+                rule_iters_arg: Optional[list[int]] = (
+                    rule_iters_buf if skip_row_hidden is not None else None
+                )
                 if p_abs.suffix.lower() == ".csv":
                     if _xlsx_workbook_cache_top() is not None:
                         vals_opt = _read_repeated_series_from_csv_cached(
@@ -2565,6 +2637,8 @@ def extract_item_values(
                             max_primary_rows=max_primary_rows,
                             peek_v=peek_v,
                             skip_trunc_peek=skip_trunc_peek,
+                            rule_iters=None,
+                            cell_source_rule_iters_out=cell_source_rule_iters_out,
                         )
                         continue
                     csv_mat = _get_csv_matrix(p_abs, create=False)
@@ -2609,6 +2683,8 @@ def extract_item_values(
                             max_primary_rows=max_primary_rows,
                             peek_v=peek_v,
                             skip_trunc_peek=skip_trunc_peek,
+                            rule_iters=None,
+                            cell_source_rule_iters_out=cell_source_rule_iters_out,
                         )
                         continue
                 try:
@@ -2634,12 +2710,19 @@ def extract_item_values(
                             col_step=rd_col_step,
                             limit=limit,
                             repeat_until_empty=repeat_until_empty,
+                            skip_row_hidden=skip_row_hidden,
+                            rule_iters_out=rule_iters_arg,
                         )
                         peek_v = None
                         if not skip_trunc_peek:
+                            peek_n = (
+                                int(rule_iters_buf[-1]) + 1
+                                if rule_iters_buf
+                                else len(vals_xls)
+                            )
                             peek_ref = _col_row_to_cell_ref(
-                                base_col + (col_off * len(vals_xls)),
-                                base_row + (row_off * len(vals_xls)),
+                                base_col + (col_off * peek_n),
+                                base_row + (row_off * peek_n),
                             )
                             peek_v = read_xls_cell(p_abs, sheet_name, peek_ref)
                         _finish_repeated_cell_vals(
@@ -2662,6 +2745,8 @@ def extract_item_values(
                             max_primary_rows=max_primary_rows,
                             peek_v=peek_v,
                             skip_trunc_peek=skip_trunc_peek,
+                            rule_iters=list(rule_iters_buf) if rule_iters_arg is not None else None,
+                            cell_source_rule_iters_out=cell_source_rule_iters_out,
                         )
                         continue
                     if wb_ctx is not None:
@@ -2676,11 +2761,18 @@ def extract_item_values(
                             repeat_until_empty=repeat_until_empty,
                             path=p_abs if not wb_owned else None,
                             cancel_check=cancel_check,
+                            skip_row_hidden=skip_row_hidden,
+                            rule_iters_out=rule_iters_arg,
                         )
                         if isinstance(vals_fast, list):
                             vals = vals_fast
                             peek_v = None
                             if not skip_trunc_peek:
+                                peek_n = (
+                                    int(rule_iters_buf[-1]) + 1
+                                    if rule_iters_buf
+                                    else len(vals)
+                                )
                                 peek_v = _read_cell_at_repeat_index(
                                     wb_ctx=wb_ctx,
                                     wb_owned=wb_owned,
@@ -2690,7 +2782,7 @@ def extract_item_values(
                                     base_row=base_row,
                                     row_off=row_off,
                                     col_off=col_off,
-                                    index=len(vals),
+                                    index=peek_n,
                                 )
                             _finish_repeated_cell_vals(
                                 vals=vals,
@@ -2712,6 +2804,10 @@ def extract_item_values(
                                 max_primary_rows=max_primary_rows,
                                 peek_v=peek_v,
                                 skip_trunc_peek=skip_trunc_peek,
+                                rule_iters=list(rule_iters_buf)
+                                if rule_iters_arg is not None
+                                else None,
+                                cell_source_rule_iters_out=cell_source_rule_iters_out,
                             )
                             continue
                     if p_abs.suffix.lower() == ".csv" and _xlsx_workbook_cache_top() is not None:
@@ -2719,10 +2815,15 @@ def extract_item_values(
                             "CSV 一括抽出に失敗（バッチ内逐次ループ禁止）: %s" % p_abs
                         )
                     # 取得座標 = 基準セル + (行/列オフセット * N)（N は 0 始まり）
-                    for n in range(limit):
+                    n = 0
+                    max_n = max(limit * 50, 10000)
+                    while len(vals) < limit and n < max_n:
                         _poll_cancel_check(cancel_check)
                         col_n = base_col + (col_off * n)
                         row_n = base_row + (row_off * n)
+                        if skip_row_hidden is not None and skip_row_hidden(row_n):
+                            n += 1
+                            continue
                         cell_ref_n = _col_row_to_cell_ref(col_n, row_n)
                         if wb_ctx is not None:
                             v = _xlsx_cell_value_open_workbook(
@@ -2741,10 +2842,17 @@ def extract_item_values(
                         if _stop_repeat_on_empty(v, repeat_until_empty=repeat_until_empty):
                             break
                         vals.append(v)
+                        if rule_iters_arg is not None:
+                            rule_iters_buf.append(int(n))
+                        n += 1
                     if vals:
-                        if repeat_until_last:
-                            vals = apply_until_last_trim(vals, until_last=True)
+                        peek_v = None
                         if not skip_trunc_peek:
+                            peek_n = (
+                                int(rule_iters_buf[-1]) + 1
+                                if rule_iters_buf
+                                else len(vals)
+                            )
                             peek_v = _read_cell_at_repeat_index(
                                 wb_ctx=wb_ctx,
                                 wb_owned=wb_owned,
@@ -2754,39 +2862,40 @@ def extract_item_values(
                                 base_row=base_row,
                                 row_off=row_off,
                                 col_off=col_off,
-                                index=len(vals),
+                                index=peek_n,
                             )
-                            record_extract_truncation_if_needed(
-                                vals,
-                                limit=limit,
-                                peek_next=peek_v,
-                                file_path=file_path,
-                                item_label=item_label,
-                                source_index=si,
-                            )
+                        _finish_repeated_cell_vals(
+                            vals=vals,
+                            results=results,
+                            cell_start=cell_start,
+                            cell_source_spans_out=cell_source_spans_out,
+                            si=si,
+                            limit=limit,
+                            repeat_until_empty=repeat_until_empty,
+                            file_path=file_path,
+                            item_label=item_label,
+                            item_id=item_id,
+                            positions=positions,
+                            cell_ref=cell_ref,
+                            row_off=row_off,
+                            col_off=col_off,
+                            ui_blk=_blk,
+                            src=src,
+                            max_primary_rows=max_primary_rows,
+                            peek_v=peek_v,
+                            skip_trunc_peek=skip_trunc_peek,
+                            rule_iters=list(rule_iters_buf)
+                            if rule_iters_arg is not None
+                            else None,
+                            cell_source_rule_iters_out=cell_source_rule_iters_out,
+                        )
+                        continue
                 finally:
                     if wb_owned and wb_ctx is not None:
                         try:
                             wb_ctx.close()
                         except Exception:
                             pass
-                _append_postprocessed_cell_vals(
-                    results,
-                    vals,
-                    _blk,
-                    src,
-                    max_primary_rows=max_primary_rows,
-                )
-                if vals and item_id:
-                    n_last = len(vals) - 1
-                    cell_ref_last = _resolve_cell_with_offset(
-                        cell_ref,
-                        row_off * n_last,
-                        col_off * n_last,
-                    )
-                    c0, r0 = _parse_cell_ref(cell_ref_last)
-                    if c0 is not None and r0 is not None:
-                        positions[item_id] = (c0, r0)
             else:
                 v = extract_cell(
                     file_path,
@@ -2798,7 +2907,9 @@ def extract_item_values(
                     col, row = _parse_cell_ref(cell_ref)
                     if col is not None and row is not None and item_id:
                         positions[item_id] = (col, row)
-            if cell_source_spans_out is not None:
+                if cell_source_spans_out is not None:
+                    cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
+            if cell_source_spans_out is not None and si not in cell_source_spans_out:
                 cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
         if max_primary_rows is not None and max_primary_rows > 0 and len(results) >= max_primary_rows:
             break
@@ -3847,6 +3958,7 @@ def _extract_item_bundle_impl(
         return bundle
 
     cell_spans: dict[int, tuple[int, int]] = {}
+    cell_rule_iters: dict[int, list[int]] = {}
     prim_vals = extract_item_values(
         file_path,
         item_config,
@@ -3854,6 +3966,7 @@ def _extract_item_bundle_impl(
         cell_positions=cell_positions,
         max_primary_rows=max_primary_rows,
         cell_source_spans_out=cell_spans,
+        cell_source_rule_iters_out=cell_rule_iters,
         cancel_check=cancel_check,
     )
     bundle: dict[str, Any] = {
@@ -3881,6 +3994,23 @@ def _extract_item_bundle_impl(
         "path_item_contexts": {},
         "_cell_source_spans": dict(cell_spans),
     }
+    # 非表示スキップ等で Excel オフセットが非連番のとき rule_iter_index を先に刻む
+    for si, ris in cell_rule_iters.items():
+        sp = cell_spans.get(si)
+        if not sp or not isinstance(ris, list):
+            continue
+        try:
+            g_off = int(sp[0])
+        except (TypeError, ValueError):
+            continue
+        ictx = bundle["iteration_contexts"]
+        for local_i, ri in enumerate(ris):
+            gi = g_off + local_i
+            if 0 <= gi < len(ictx) and isinstance(ictx[gi], dict):
+                try:
+                    ictx[gi]["rule_iter_index"] = int(ri)
+                except (TypeError, ValueError):
+                    ictx[gi]["rule_iter_index"] = int(local_i)
     run_link_join = debug_step_scope is None
     for si, src in enumerate(sources):
         _poll_cancel_check(cancel_check)

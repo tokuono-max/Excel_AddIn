@@ -603,6 +603,12 @@ def apply_scenario_detail_cell_tooltips(
         "TIP_SKIP_CARRY_SEED",
         "スキップ行の連携値を前置保持の種に使います。",
     )
+    _apply_cfg_tip_force(
+        refs.get("skip_hidden_rows"),
+        cfg,
+        "TIP_SKIP_HIDDEN_ROWS",
+        "OFF（既定）は全行走査。ON は Excel で見えている行だけ走査します。",
+    )
     for cbx in refs.get("cell_checks") or []:
         if not (cbx.toolTip() or "").strip():
             _apply_cfg_tip_force(
@@ -1000,6 +1006,14 @@ def build_scenario_detail_cell_scroll(
         cb_skip_carry_seed,
     )
     refs["skip_carry_seed"] = cb_skip_carry_seed
+
+    cb_skip_hidden = QCheckBox("")
+    cb_skip_hidden.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_HIDDEN_ROWS", False)))
+    f3v.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_SKIP_HIDDEN_ROWS", "非表示・フィルタ行を除く")),
+        cb_skip_hidden,
+    )
+    refs["skip_hidden_rows"] = cb_skip_hidden
 
     def _end_mode_label(kind: str) -> str:
         # kind: n | blank | last
