@@ -103,6 +103,14 @@ def cell_coordinate_setting_lines(
                 sm if sm else "（空欄）",
             )
         )
+        if src.get("skip_carry_seed"):
+            lines.append(
+                "%s%s: ON"
+                % (
+                    pfx,
+                    _lbl(dc, "LABEL_SKIP_CARRY_SEED", "スキップ行を前置に使う"),
+                )
+            )
 
     nchk = pb.get("cell_checks") if isinstance(pb.get("cell_checks"), list) else []
     proc = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
@@ -268,6 +276,11 @@ def cell_coordinate_full_detail_lines(
                 sm if sm else "（空欄）",
             )
         )
+        if src.get("skip_carry_seed"):
+            sec3.append(
+                "3.4c %s: ON"
+                % _lbl(dc, "LABEL_SKIP_CARRY_SEED", "スキップ行を前置に使う")
+            )
     sec3.extend(
         [
             "3.5 %s: %s" % (_lbl(dc, "LABEL_CHECKS", "加工"), proc),

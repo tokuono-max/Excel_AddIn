@@ -29,7 +29,13 @@ def _txt(v: object) -> str:
     return str(v).lstrip("'") if v is not None else ""
 
 
-def _link_item(*, carry: bool, skip_empty: bool = False, sheet_rule: str | None = None) -> dict:
+def _link_item(
+    *,
+    carry: bool,
+    skip_empty: bool = False,
+    skip_carry_seed: bool = False,
+    sheet_rule: str | None = None,
+) -> dict:
     ui: dict = {
         "link_defs": [
             {
@@ -63,6 +69,7 @@ def _link_item(*, carry: bool, skip_empty: bool = False, sheet_rule: str | None 
         "repeat_until_empty": False,
         "repeat_max": 5 if sheet_rule is None else 3,
         "skip_empty_primary": skip_empty,
+        "skip_carry_seed": bool(skip_empty and skip_carry_seed),
         "ui_scenario_source_v1": ui,
     }
     return {"name": "PK", "sources": [src]}
@@ -75,6 +82,16 @@ def test_link_def_wants_carry_empty_truthy() -> None:
     assert link_def_wants_carry_empty({"carry_empty": False}) is False
     assert link_def_wants_carry_empty({}) is False
     assert link_def_wants_carry_empty(None) is False
+
+
+def test_source_wants_skip_carry_seed() -> None:
+    from svc.svc_data_agg_extract import source_wants_skip_carry_seed
+
+    assert source_wants_skip_carry_seed({"skip_empty_primary": True, "skip_carry_seed": True})
+    assert not source_wants_skip_carry_seed({"skip_empty_primary": False, "skip_carry_seed": True})
+    assert not source_wants_skip_carry_seed({"skip_empty_primary": True, "skip_carry_seed": False})
+    assert not source_wants_skip_carry_seed({})
+    assert not source_wants_skip_carry_seed(None)
 
 
 def test_is_blank_link_carry_value() -> None:
@@ -207,7 +224,7 @@ def test_multi_sheet_does_not_carry_across_sheets(tmp_path: Path) -> None:
 def test_skip_empty_primary_then_carry_does_not_use_dropped_seed(
     tmp_path: Path,
 ) -> None:
-    """主キースキップ後に前埋め。落ちた行の連携値は種にしない。"""
+    """主キースキップ後に前埋め。落ちた行の連携値は種にしない（skip_carry_seed OFF）。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "S"
@@ -230,6 +247,94 @@ def test_skip_empty_primary_then_carry_does_not_use_dropped_seed(
         b = extract_item_bundle(str(fp), item, item_id="i1")
     assert [_txt(x) for x in (b["primary_values"] or [])] == ["P1", "P3"]
     assert [_txt(x) for x in (b["link_values"]["連携"] or [])] == ["L1", "L1"]
+
+
+def test_skip_carry_seed_on_uses_dropped_row_link(tmp_path: Path) -> None:
+    """skip_carry_seed ON: スキップ行の非空連携値を次行の前置種にする。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = "P1"
+    ws["A2"] = None
+    ws["A3"] = "P3"
+    ws["B1"] = "L1"
+    ws["B2"] = "L2"
+    ws["B3"] = None
+    ws["C1"] = "J1"
+    ws["C2"] = "J2"
+    ws["C3"] = "J3"
+    fp = tmp_path / "carry_skip_seed_on.xlsx"
+    wb.save(fp)
+    wb.close()
+    item = _link_item(carry=True, skip_empty=True, skip_carry_seed=True)
+    item["sources"][0]["repeat_max"] = 3
+    with xlsx_workbook_scope():
+        b = extract_item_bundle(str(fp), item, item_id="i1")
+    assert [_txt(x) for x in (b["primary_values"] or [])] == ["P1", "P3"]
+    assert [_txt(x) for x in (b["link_values"]["連携"] or [])] == ["L1", "L2"]
+
+
+def test_skip_carry_seed_on_blank_skip_keeps_previous_last(tmp_path: Path) -> None:
+    """skip_carry_seed ON でもスキップ行の連携が空なら last を上書きしない。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = "P1"
+    ws["A2"] = None
+    ws["A3"] = "P3"
+    ws["B1"] = "L1"
+    ws["B2"] = None
+    ws["B3"] = None
+    ws["C1"] = "J1"
+    ws["C2"] = "J2"
+    ws["C3"] = "J3"
+    fp = tmp_path / "carry_skip_seed_blank.xlsx"
+    wb.save(fp)
+    wb.close()
+    item = _link_item(carry=True, skip_empty=True, skip_carry_seed=True)
+    item["sources"][0]["repeat_max"] = 3
+    with xlsx_workbook_scope():
+        b = extract_item_bundle(str(fp), item, item_id="i1")
+    assert [_txt(x) for x in (b["primary_values"] or [])] == ["P1", "P3"]
+    assert [_txt(x) for x in (b["link_values"]["連携"] or [])] == ["L1", "L1"]
+
+
+def test_scenario_debug_skip_carry_seed_on(tmp_path: Path) -> None:
+    """シナリオ段階実行でも skip_carry_seed ON ならスキップ行の連携を種にする。"""
+    from svc.svc_data_agg_debug_run import scenario_debug_phase_result
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = "P1"
+    ws["A2"] = None
+    ws["A3"] = "P3"
+    ws["B1"] = "L1"
+    ws["B2"] = "SEED"
+    ws["B3"] = None
+    fp = tmp_path / "carry_skip_seed_dbg.xlsx"
+    wb.save(fp)
+    wb.close()
+    item = _link_item(carry=True, skip_empty=True, skip_carry_seed=True)
+    item["id"] = "i1"
+    item["sources"][0]["repeat_max"] = 3
+    item["sources"][0]["ui_scenario_source_v1"]["ext_checked"] = [".xlsx"]
+    cache: dict = {}
+    paths = [str(fp)]
+    _s2, cols2, _e2, _t2 = scenario_debug_phase_result(item, paths, 2, 200, cache)
+    _s3, cols3, _e3, _t3 = scenario_debug_phase_result(item, paths, 3, 200, cache)
+
+    def _body(v: object) -> str:
+        s = str(v).lstrip("'")
+        if "] " in s:
+            s = s.split("] ", 1)[-1].lstrip("'")
+        return s
+
+    assert [_body(x) for x in cols2] == ["P1", "P3"]
+    assert [_body(x) for x in cols3] == ["L1", "SEED"]
+    b = cache[str(fp)]
+    assert b.get("_dbg_full_extract") is True
+    assert [_txt(x) for x in (b.get("link_values") or {}).get("連携", [])] == ["L1", "SEED"]
 
 
 def test_debug_link_phase_applies_carry_per_sheet(tmp_path: Path) -> None:

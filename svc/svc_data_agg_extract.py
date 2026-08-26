@@ -3,16 +3,16 @@
 Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
-Updated: 2026-08-24
-Version: 0.1.19
+Updated: 2026-08-26
+Version: 0.1.20
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.20 (2026-08-26) skip_carry_seed: スキップ行の連携値を前置種にする主キー側オプション。
   - 0.1.19 (2026-08-24) 空スキップ後の非連番 rule_iter でも連携/結合を列一括読取して拾う。
   - 0.1.18 (2026-08-24) 連携/結合列が主キーと同じ長さ・同じ iter なら揃えコピーを省略。
-  - 0.1.17 (2026-08-24) 一部ソースのみの連携/結合列を主キー行に揃える。短い列の iter 振り直しで他ソース行へ載る不具合を修正。
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.16"
+__version__ = "0.1.20"
 
 
 class DataAggCsvReadError(Exception):
@@ -2184,6 +2184,33 @@ def link_def_wants_carry_empty(ld: dict[str, Any] | None) -> bool:
     return False
 
 
+def source_wants_skip_carry_seed(src: dict[str, Any] | None) -> bool:
+    """
+    主キースキップ行の連携値を前置保持の種にするか。
+    skip_empty_primary が無効なら常に False（既定 OFF）。
+    """
+    if not isinstance(src, dict):
+        return False
+    if not bool(src.get("skip_empty_primary")):
+        return False
+    v = src.get("skip_carry_seed")
+    if v is True or v == 1:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
+def item_wants_skip_carry_seed(item_config: dict[str, Any] | None) -> bool:
+    """項目のいずれかの cell ソースで skip_carry_seed が有効か。"""
+    if not isinstance(item_config, dict):
+        return False
+    for src in item_config.get("sources") or []:
+        if isinstance(src, dict) and source_wants_skip_carry_seed(src):
+            return True
+    return False
+
+
 def _is_blank_link_carry_value(v: Any) -> bool:
     """前置保持用の空欄判定（空白のみ・Excel テキストの先頭 ' のみも空）。"""
     if v is None:
@@ -2194,10 +2221,54 @@ def _is_blank_link_carry_value(v: Any) -> bool:
     return s == ""
 
 
+def _primary_skip_drop_mask(
+    bundle: dict[str, Any], sources: list[Any]
+) -> list[bool]:
+    """主キースキップ対象の反復マスク（圧縮前）。対象外ソースはすべて False。"""
+    prim = list(bundle.get("primary_values") or [])
+    n = len(prim)
+    drop = [False] * n
+    if not prim:
+        return drop
+    span_map_raw = bundle.get("_cell_source_spans")
+    span_map: dict[Any, Any] = span_map_raw if isinstance(span_map_raw, dict) else {}
+    for si, src in enumerate(sources):
+        if not isinstance(src, dict):
+            continue
+        if (src.get("type") or "cell").strip().lower() != "cell":
+            continue
+        tokens = effective_skip_primary_tokens(src)
+        if not tokens:
+            continue
+        if source_skips_sheet_extract(src):
+            continue
+        sp = span_map.get(si)
+        if not sp or not isinstance(sp, (tuple, list)) or len(sp) != 2:
+            if isinstance(span_map_raw, dict) and span_map:
+                continue
+            g_off, n_src = 0, n
+        else:
+            try:
+                g_off = int(sp[0])
+                n_src = int(sp[1])
+            except (TypeError, ValueError):
+                continue
+        for local_i in range(max(0, n_src)):
+            gi = g_off + local_i
+            if 0 <= gi < n and primary_value_matches_skip_tokens(prim[gi], tokens):
+                drop[gi] = True
+    return drop
+
+
 def _apply_carry_empty_link_values(bundle: dict[str, Any], sources: list[Any]) -> None:
     """
     carry_empty の連携キー列について、ソース区間内で空欄を直前の非空値で埋める。
     シート／ファイルをまたがない（呼び出し側がシート単位の bundle であること）。
+
+    主キースキップ対象行:
+      - skip_carry_seed OFF … 連携値を種にしない（last 継続。クリアしない）
+      - skip_carry_seed ON  … 非空の連携値で last を上書き。空なら last 維持
+    スキップ行自体への空欄埋めは行わない（直後の skip で落ちるため）。
     """
     vals_map = bundle.get("link_values")
     if not isinstance(vals_map, dict) or not vals_map:
@@ -2205,6 +2276,7 @@ def _apply_carry_empty_link_values(bundle: dict[str, Any], sources: list[Any]) -
     span_map_raw = bundle.get("_cell_source_spans")
     span_map: dict[Any, Any] = span_map_raw if isinstance(span_map_raw, dict) else {}
     n_all = len(bundle.get("primary_values") or [])
+    drop = _primary_skip_drop_mask(bundle, sources)
     for si, src in enumerate(sources):
         if not isinstance(src, dict):
             continue
@@ -2228,6 +2300,7 @@ def _apply_carry_empty_link_values(bundle: dict[str, Any], sources: list[Any]) -
             g_off, n_src = 0, n_all
         if n_src < 1:
             continue
+        seed_on = source_wants_skip_carry_seed(src)
         for ld in ui_blk.get("link_defs") or []:
             if not isinstance(ld, dict):
                 continue
@@ -2248,6 +2321,11 @@ def _apply_carry_empty_link_values(bundle: dict[str, Any], sources: list[Any]) -
                 if gi < 0 or gi >= len(series):
                     break
                 cur = series[gi]
+                is_drop = gi < len(drop) and drop[gi]
+                if is_drop:
+                    if seed_on and not _is_blank_link_carry_value(cur):
+                        last = cur
+                    continue
                 if _is_blank_link_carry_value(cur):
                     if last is not None:
                         series[gi] = last
@@ -3954,6 +4032,7 @@ def _extract_item_bundle_impl(
             {"file_path": str(file_path), "iter_index": int(i)} for i in range(n)
         ]
     _align_link_join_series_to_primary(bundle)
-    _apply_skip_empty_primary_filter(bundle, sources if isinstance(sources, list) else [])
+    # 前置はスキップ圧縮の前（スキップ行の種を拾えるようにする）
     _apply_carry_empty_link_values(bundle, sources if isinstance(sources, list) else [])
+    _apply_skip_empty_primary_filter(bundle, sources if isinstance(sources, list) else [])
     return bundle

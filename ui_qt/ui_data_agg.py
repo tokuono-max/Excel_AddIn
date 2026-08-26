@@ -3632,6 +3632,8 @@ class _DataAggMainWindow(QDialog):
         if s.get("skip_empty_primary"):
             sm = str(s.get("skip_primary_match") or "").strip()
             end_s = "%s/スキップ%s" % (end_s, ("=%s" % sm) if sm else "(空欄)")
+            if s.get("skip_carry_seed"):
+                end_s = "%s/前置種" % end_s
         nl = len(pb.get("link_defs") or []) if isinstance(pb.get("link_defs"), list) else 0
         nj = len(pb.get("join_defs") or []) if isinstance(pb.get("join_defs"), list) else 0
         lead = ("%s セル座標から取得" % sn_user) if sn_user else "セル座標から取得"
@@ -5087,6 +5089,9 @@ class _ScenarioEditDialog(QDialog):
         spm = cr.get("skip_primary_match")
         if spm is not None:
             spm.textChanged.connect(self._on_form_changed)
+        scs = cr.get("skip_carry_seed")
+        if scs is not None:
+            scs.stateChanged.connect(self._on_form_changed)
         for cbx in cr["cell_checks"]:
             cbx.stateChanged.connect(self._on_form_changed)
         vsc = cr.get("value_shape_script")
@@ -5744,6 +5749,7 @@ class _ScenarioEditDialog(QDialog):
             cr["n_count"],
             cr.get("skip_empty_primary"),
             cr.get("skip_primary_match"),
+            cr.get("skip_carry_seed"),
             cr["write_mode_cell"],
             cr.get("value_shape_script"),
         ):
@@ -5887,6 +5893,12 @@ class _ScenarioEditDialog(QDialog):
                 spm = r.get("skip_primary_match")
                 if spm is not None:
                     spm.setText(str(src.get("skip_primary_match") or ""))
+                scs = r.get("skip_carry_seed")
+                if scs is not None:
+                    scs.setChecked(
+                        bool(src.get("skip_empty_primary", False))
+                        and bool(src.get("skip_carry_seed", False))
+                    )
                 sync_skip = r.get("sync_skip_match_enabled")
                 if callable(sync_skip):
                     sync_skip()
@@ -6176,8 +6188,12 @@ class _ScenarioEditDialog(QDialog):
             cur_end = r["end_mode"].currentText()
             sep = r.get("skip_empty_primary")
             spm = r.get("skip_primary_match")
+            scs = r.get("skip_carry_seed")
             skip_on = bool(sep.isChecked()) if sep is not None else False
             skip_match = spm.text() if spm is not None else ""
+            skip_carry = (
+                bool(scs.isChecked()) if scs is not None and skip_on else False
+            )
             if cur_end == blank_lbl:
                 src["repeat_until_empty"] = True
                 src["repeat_until_last"] = False
@@ -6192,6 +6208,7 @@ class _ScenarioEditDialog(QDialog):
                 src["repeat_max"] = int(r["n_count"].value())
             src["skip_empty_primary"] = skip_on
             src["skip_primary_match"] = str(skip_match)
+            src["skip_carry_seed"] = skip_carry
             src["repeat_direction"] = "vertical"
             p = self._source_ui_bucket(src)
             src["anchor"] = p.get("legacy_anchor")

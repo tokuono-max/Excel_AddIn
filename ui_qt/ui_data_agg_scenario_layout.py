@@ -597,6 +597,12 @@ def apply_scenario_detail_cell_tooltips(
         "TIP_SKIP_PRIMARY_MATCH",
         "例: 空欄のみ＝未入力 / 空欄と文字= ,A,- / 文字のみ= A,-",
     )
+    _apply_cfg_tip_force(
+        refs.get("skip_carry_seed"),
+        cfg,
+        "TIP_SKIP_CARRY_SEED",
+        "スキップ行の連携値を前置保持の種に使います。",
+    )
     for cbx in refs.get("cell_checks") or []:
         if not (cbx.toolTip() or "").strip():
             _apply_cfg_tip_force(
@@ -987,6 +993,14 @@ def build_scenario_detail_cell_scroll(
     refs["skip_empty_primary"] = cb_skip_empty
     refs["skip_primary_match"] = ed_skip_match
 
+    cb_skip_carry_seed = QCheckBox("")
+    cb_skip_carry_seed.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_CARRY_SEED", False)))
+    f3v.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_SKIP_CARRY_SEED", "スキップ行を前置に使う")),
+        cb_skip_carry_seed,
+    )
+    refs["skip_carry_seed"] = cb_skip_carry_seed
+
     def _end_mode_label(kind: str) -> str:
         # kind: n | blank | last
         if kind == "blank":
@@ -998,6 +1012,9 @@ def build_scenario_detail_cell_scroll(
     def _sync_skip_match_enabled(_: int = 0) -> None:
         on = bool(cb_skip_empty.isChecked())
         ed_skip_match.setEnabled(on)
+        cb_skip_carry_seed.setEnabled(on)
+        if not on:
+            cb_skip_carry_seed.setChecked(False)
 
     def _sync_n_count_for_end(_: int = 0) -> None:
         blank_lbl = _end_mode_label("blank")

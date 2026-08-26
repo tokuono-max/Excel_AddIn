@@ -925,12 +925,14 @@ def _extract_phase2_item_bundle(
     primary_only: bool,
     max_primary_rows: int | None = None,
 ) -> dict[str, Any]:
-    from svc.svc_data_agg_extract import extract_item_bundle
+    from svc.svc_data_agg_extract import extract_item_bundle, item_wants_skip_carry_seed
 
     extra: dict[str, Any] = {}
     if max_primary_rows is not None:
         extra["max_primary_rows"] = max_primary_rows
-    if primary_only:
+    # skip_carry_seed ON 時はスキップ行の連携値が必要なため主キーのみでは不足。一括抽出する。
+    use_primary_only = bool(primary_only) and not item_wants_skip_carry_seed(item)
+    if use_primary_only:
         b = extract_item_bundle(
             file_path,
             item,
