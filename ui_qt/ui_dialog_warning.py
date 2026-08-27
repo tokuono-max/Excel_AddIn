@@ -38,6 +38,7 @@ from ui_qt.ui_common import (
     apply_window_config,
     center_on_excel,
     excel_rect_tuple_from_req,
+    set_widget_tooltip,
 )
 
 __version__ = "0.1.1"
@@ -118,7 +119,7 @@ class WarningDialog(QDialog):
         btn_ok = QPushButton(btn_label or "OK")
         btn_tip = str(cfg_merged.get("BTN_OK_TOOLTIP") or "").strip()
         if btn_tip:
-            btn_ok.setToolTip(btn_tip)
+            set_widget_tooltip(btn_ok, btn_tip)
         btn_ok.clicked.connect(self._on_ok)  # type: ignore[attr-defined]
         row_btn.addWidget(btn_ok)
         lay.addLayout(row_btn)

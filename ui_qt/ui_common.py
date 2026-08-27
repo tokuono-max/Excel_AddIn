@@ -332,6 +332,70 @@ def _normalize_message_newlines(text: str) -> str:
     return s
 
 
+_TOOLTIP_WRAP_WIDTH = 45
+_TOOLTIP_BREAK_AFTER = frozenset("。、．，,;；:：)）]】」!?！？")
+
+
+def _wrap_tooltip_line(line: str, width: int = _TOOLTIP_WRAP_WIDTH) -> list[str]:
+    """1行ツールチップを width 文字前後で折り返す（句読点・空白を優先）。"""
+    s = line.strip()
+    if not s:
+        return []
+    if len(s) <= width:
+        return [s]
+    out: list[str] = []
+    rest = s
+    while len(rest) > width:
+        chunk = rest[:width]
+        cut = width
+        for i in range(len(chunk) - 1, max(0, len(chunk) - 16), -1):
+            if chunk[i] in _TOOLTIP_BREAK_AFTER:
+                cut = i + 1
+                break
+            if chunk[i] == " ":
+                cut = i + 1
+                break
+        piece = rest[:cut].rstrip()
+        if not piece:
+            piece = rest[:width]
+            cut = width
+        out.append(piece)
+        rest = rest[cut:].lstrip()
+    if rest:
+        out.append(rest)
+    return out
+
+
+def _normalize_tooltip_text(text: str, width: int = _TOOLTIP_WRAP_WIDTH) -> str:
+    """ツールチップ用: 改行正規化のうえ、長い行を複数行に折り返す。"""
+    s = _normalize_message_newlines(text)
+    if not s:
+        return s
+    stripped = s.lstrip()
+    if stripped.startswith("<") and ">" in s:
+        return s
+    lines: list[str] = []
+    for para in s.split("\n"):
+        lines.extend(_wrap_tooltip_line(para, width))
+    return "\n".join(lines)
+
+
+def set_widget_tooltip(widget: Any, text: str | None) -> None:
+    """ウィジェットへ折り返し済みツールチップを設定する。"""
+    if widget is None:
+        return
+    raw = str(text or "").strip()
+    if not raw:
+        return
+    tip = _normalize_tooltip_text(raw)
+    if not tip:
+        return
+    try:
+        widget.setToolTip(tip)
+    except Exception:
+        pass
+
+
 def apply_common_window_flags(w: QWidget) -> None:
     """
     Method Name : apply_common_window_flags
@@ -1393,17 +1457,13 @@ def ensure_owner_and_front(w: QWidget, owner_hwnd: int) -> None:
 def apply_tooltip_if_set(widget, cfg: dict, key: str = "TOOLTIP") -> None:
     """
     設定にツールチップが定義されていればウィジェットに設定する。空・未定義なら何もしない。
-    共通仕様: \\n・\\t を有効にするため _normalize_message_newlines を適用。前後は空白・タブのみ strip。
+    共通仕様: \\n・\\t を有効にし、長文は約45文字で折り返す。
     """
     if widget is None or not isinstance(cfg, dict):
         return
     raw = str(cfg.get(key) or cfg.get(key.lower()) or "").strip(" \t\r")
-    tip = _normalize_message_newlines(raw)
-    if tip:
-        try:
-            widget.setToolTip(tip)
-        except Exception:
-            pass
+    if raw:
+        set_widget_tooltip(widget, raw)
 
 
 def _get_progress_config() -> dict:

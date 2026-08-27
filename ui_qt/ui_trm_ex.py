@@ -183,6 +183,7 @@ class _TrmExChoiceDialog(QDialog):
             _normalize_message_newlines,
             _warning_icon_pixmap,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         lay = QVBoxLayout(self)
@@ -221,15 +222,15 @@ class _TrmExChoiceDialog(QDialog):
         row_btns = QHBoxLayout()
         row_btns.addStretch(1)
         btn_leading = QPushButton(str(self._choice_cfg.get("BTN_LEADING") or "文頭削除"))
-        btn_leading.setToolTip(str(self._choice_cfg.get("BTN_LEADING_TOOLTIP") or ""))
+        set_widget_tooltip(btn_leading, str(self._choice_cfg.get("BTN_LEADING_TOOLTIP") or ""))
         btn_leading.clicked.connect(lambda: self._on_choice("leading"))
         row_btns.addWidget(btn_leading)
         btn_trailing = QPushButton(str(self._choice_cfg.get("BTN_TRAILING") or "文末削除"))
-        btn_trailing.setToolTip(str(self._choice_cfg.get("BTN_TRAILING_TOOLTIP") or ""))
+        set_widget_tooltip(btn_trailing, str(self._choice_cfg.get("BTN_TRAILING_TOOLTIP") or ""))
         btn_trailing.clicked.connect(lambda: self._on_choice("trailing"))
         row_btns.addWidget(btn_trailing)
         btn_all = QPushButton(str(self._choice_cfg.get("BTN_ALL") or "全削除"))
-        btn_all.setToolTip(str(self._choice_cfg.get("BTN_ALL_TOOLTIP") or ""))
+        set_widget_tooltip(btn_all, str(self._choice_cfg.get("BTN_ALL_TOOLTIP") or ""))
         btn_all.clicked.connect(lambda: self._on_choice("all"))
         default_btn = str(self._choice_cfg.get("DEFAULT_BUTTON") or "all").strip().lower()
         if default_btn == "all":
@@ -238,7 +239,7 @@ class _TrmExChoiceDialog(QDialog):
             self._btn_all = btn_all
         row_btns.addWidget(btn_all)
         btn_cancel = QPushButton(str(self._choice_cfg.get("BTN_CANCEL") or "キャンセル"))
-        btn_cancel.setToolTip(str(self._choice_cfg.get("BTN_CANCEL_TOOLTIP") or ""))
+        set_widget_tooltip(btn_cancel, str(self._choice_cfg.get("BTN_CANCEL_TOOLTIP") or ""))
         btn_cancel.clicked.connect(lambda: self._on_choice("cancel"))
         row_btns.addWidget(btn_cancel)
         lay.addLayout(row_btns)
@@ -549,6 +550,7 @@ class _TrmExDoneDialog(QDialog):
             _normalize_message_newlines,
             _warning_icon_pixmap,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         lay = QVBoxLayout(self)
@@ -571,7 +573,7 @@ class _TrmExDoneDialog(QDialog):
         row_btn = QHBoxLayout()
         row_btn.addStretch(1)
         btn_ok = QPushButton(str(self._done_cfg.get("BTN_OK") or "OK"))
-        btn_ok.setToolTip(str(self._done_cfg.get("BTN_OK_TOOLTIP") or ""))
+        set_widget_tooltip(btn_ok, str(self._done_cfg.get("BTN_OK_TOOLTIP") or ""))
         btn_ok.clicked.connect(self._on_ok)
         row_btn.addWidget(btn_ok)
         lay.addLayout(row_btn)

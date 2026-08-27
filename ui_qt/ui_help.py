@@ -60,7 +60,7 @@ class _HelpDialog(QDialog):
         content = str(self._req.get("content") or "").strip()
         empty_txt = str(self._messages.get("HELP_CONTENT_EMPTY") or "").strip() or "（内容なし）"
 
-        from ui_qt.ui_common import apply_window_config
+        from ui_qt.ui_common import apply_window_config, set_widget_tooltip
 
         lay = QVBoxLayout(self)
         self._text = QTextEdit(self)
@@ -73,7 +73,7 @@ class _HelpDialog(QDialog):
         row_btn = QHBoxLayout()
         row_btn.addStretch(1)
         btn_close = QPushButton(str(self._help_cfg.get("BTN_CLOSE") or "閉じる"))
-        btn_close.setToolTip(str(self._help_cfg.get("BTN_CLOSE_TOOLTIP") or ""))
+        set_widget_tooltip(btn_close, str(self._help_cfg.get("BTN_CLOSE_TOOLTIP") or ""))
         btn_close.clicked.connect(self._on_close)
         row_btn.addWidget(btn_close)
         lay.addLayout(row_btn)

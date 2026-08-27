@@ -101,6 +101,7 @@ try:
         center_on_excel,
         ensure_front,
         ensure_owner_and_front,
+        set_widget_tooltip,
     )
     from ui_qt.ui_win import enable_excel_window
 except Exception:  # pragma: no cover
@@ -584,10 +585,10 @@ class _DuplicateCheckDialog(QDialog):
                 pass
         _dup_ok_tip = str(self._dup_cfg.get("BTN_OK_TOOLTIP") or "").strip()
         if _dup_ok_tip:
-            self._ok_btn.setToolTip(_dup_ok_tip)
+            set_widget_tooltip(self._ok_btn, _dup_ok_tip)
         _dup_cancel_tip = str(self._dup_cfg.get("BTN_CANCEL_TOOLTIP") or "").strip()
         if _dup_cancel_tip:
-            self._cancel_btn.setToolTip(_dup_cancel_tip)
+            set_widget_tooltip(self._cancel_btn, _dup_cancel_tip)
         self._layout.addStretch(1)
         win_cfg = self._dup_cfg.get("WINDOW") or {}
         if apply_window_config is not None:
@@ -1108,7 +1109,7 @@ class CsvMergeDialog(QDialog):
             pass
         tbl_tip = (tbl_cfg.get("TOOLTIP") or "").strip() if isinstance(tbl_cfg.get("TOOLTIP"), str) else ""
         if tbl_tip:
-            self._table.setToolTip(tbl_tip)
+            set_widget_tooltip(self._table, tbl_tip)
         try:
             alt = tbl_cfg.get("ALTERNATE_ROW_COLORS")
             if isinstance(alt, bool):
@@ -1160,14 +1161,14 @@ class CsvMergeDialog(QDialog):
         self._merge_ok_btn = ok_btn
         ok_tip = (db.get("OK_TOOLTIP") or db.get("ok_tooltip") or "").strip()
         if ok_tip:
-            ok_btn.setToolTip(ok_tip)
+            set_widget_tooltip(ok_btn, ok_tip)
         ok_btn.clicked.connect(self.accept)
 
         cancel_btn = QPushButton(cancel_text if show_btn_label else "", self)
         self._cancel_btn = cancel_btn
         cancel_tip = (db.get("CANCEL_TOOLTIP") or db.get("cancel_tooltip") or "").strip()
         if cancel_tip:
-            cancel_btn.setToolTip(cancel_tip)
+            set_widget_tooltip(cancel_btn, cancel_tip)
         cancel_btn.clicked.connect(self._on_reject)
         _trace_csv_mg("cancel_btn created and clicked.connect(_on_reject) done")
 
@@ -1340,7 +1341,7 @@ class CsvMergeDialog(QDialog):
         if not tip:
             tip = _text(self._cfg, "TIP_{}".format(btn_id.upper()), "")
         if tip:
-            btn.setToolTip(tip)
+            set_widget_tooltip(btn, tip)
 
         # 【目的】ボタンごとに対応するスロットを割り当てるため
         if btn_id == "add":
@@ -1403,7 +1404,7 @@ class CsvMergeDialog(QDialog):
 
             rb = QRadioButton(label, box)
             if item_tip:
-                rb.setToolTip(item_tip)
+                set_widget_tooltip(rb, item_tip)
             rb.setProperty("radio_id", rid)
             self._radio_group.addButton(rb)
             v.addWidget(rb)

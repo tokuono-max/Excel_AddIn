@@ -64,6 +64,7 @@ from svc.data_agg_excel_read import (  # noqa: E402
     extract_read_openpyxl_row,
 )
 from svc.data_agg_value_post import (  # noqa: E402
+    _coerce_cell_scalar_to_full_text,
     postprocess_cell_primary,
     postprocess_cell_primary_batch,
     postprocess_link_rule_value,
@@ -1406,6 +1407,23 @@ def _parse_cell_ref(cell_ref: str) -> tuple[Optional[int], Optional[int]]:
         col = col * 26 + (ord(c) - ord("A") + 1)
     col -= 1  # 1-based to 0-based
     return (col, row)
+
+
+def _split_plus_cell_refs(cell_spec: str) -> list[str]:
+    """
+    連携キー用: 「D10+E10」を ['D10','E10'] に分割する。
+    空白はそのまま残してもよい（結合結果が空になるだけ）。空トークンは除く。
+    """
+    raw = str(cell_spec or "")
+    if "+" not in raw:
+        one = raw.strip()
+        return [one] if one else []
+    out: list[str] = []
+    for part in raw.split("+"):
+        t = str(part).strip()
+        if t:
+            out.append(t)
+    return out
 
 
 def _get_excel_cell(
@@ -2943,18 +2961,36 @@ def _extract_from_cell_rule(
     file_path: str | Path,
     src: dict[str, Any],
     rule: dict[str, Any],
+    *,
+    allow_plus_concat: bool = False,
 ) -> Any:
-    """link_defs / join_defs の 1 ルールから値を抽出する。"""
+    """link_defs / join_defs の 1 ルールから値を抽出する。
+
+    allow_plus_concat: True のとき連携キー向けに「D10+E10」を順結合する（結合キーは False）。
+    """
     mode = str(rule.get("mode") or "セル座標").strip()
     rdict = rule if isinstance(rule, dict) else {}
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
         return postprocess_link_rule_value(rule.get("cell"), rdict)
     sheet_name = src.get("sheet_name")
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1")
-    # 連携キー/結合キーとも同一の座標解決規約（基準セル + 独自 row/col offset）を使う。
-    cell_ref = _resolve_cell_with_offset(base_cell, rule.get("row"), rule.get("col"))
-    v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-    return postprocess_link_rule_value(v, rdict)
+    parts = (
+        _split_plus_cell_refs(base_cell)
+        if allow_plus_concat
+        else ([base_cell.strip()] if str(base_cell).strip() else [])
+    )
+    if not parts:
+        parts = ["A1"]
+    if len(parts) == 1:
+        cell_ref = _resolve_cell_with_offset(parts[0], rule.get("row"), rule.get("col"))
+        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+        return postprocess_link_rule_value(v, rdict)
+    chunks: list[str] = []
+    for part in parts:
+        cell_ref = _resolve_cell_with_offset(part, rule.get("row"), rule.get("col"))
+        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+        chunks.append(_coerce_cell_scalar_to_full_text(v))
+    return postprocess_link_rule_value("".join(chunks), rdict)
 
 
 def _cell_ref_with_iteration(base_cell: str, repeat_direction: str, iter_index: int) -> str:
@@ -2975,12 +3011,16 @@ def _extract_from_cell_rule_with_context(
     src: dict[str, Any],
     rule: dict[str, Any],
     iter_ctx: dict[str, Any],
+    *,
+    allow_plus_concat: bool = False,
 ) -> Any:
     """
     反復コンテキスト（file_path + base_cell）に基づいて link/join 値を取得する。
     rule の row/col は link/join 側の独自オフセットとして常に適用する。
     シート上の段進みには rule_iter_index（ソース内 0 始まり）を使い、未指定時は iter_index
     （結合主値リスト上の行。後方互換）にフォールバックする。
+
+    allow_plus_concat: 連携キーのみ True。「AA+BB」の各起点に同じオフセットを掛けて結合する。
     """
     mode = str(rule.get("mode") or "セル座標").strip()
     rdict = rule if isinstance(rule, dict) else {}
@@ -3004,11 +3044,23 @@ def _extract_from_cell_rule_with_context(
     col_step = _to_int(rule.get("col"), 0)
     row_off = row_step * max(0, rule_iter)
     col_off = col_step * max(0, rule_iter)
-    # 取得座標 = 設定座標 + (オフセット * N)（N は 0 開始）
-    # ここでは基準セルを二重に進めず、offset*N のみを適用する。
-    cell_ref = _resolve_cell_with_offset(base_cell, row_off, col_off)
-    v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-    return postprocess_link_rule_value(v, rdict)
+    parts = (
+        _split_plus_cell_refs(base_cell)
+        if allow_plus_concat
+        else ([base_cell.strip()] if str(base_cell).strip() else [])
+    )
+    if not parts:
+        parts = ["A1"]
+    if len(parts) == 1:
+        cell_ref = _resolve_cell_with_offset(parts[0], row_off, col_off)
+        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+        return postprocess_link_rule_value(v, rdict)
+    chunks: list[str] = []
+    for part in parts:
+        cell_ref = _resolve_cell_with_offset(part, row_off, col_off)
+        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+        chunks.append(_coerce_cell_scalar_to_full_text(v))
+    return postprocess_link_rule_value("".join(chunks), rdict)
 
 
 def _extract_cell_rule_series_fast(
@@ -3018,10 +3070,12 @@ def _extract_cell_rule_series_fast(
     *,
     n_src: int,
     cancel_check: Optional[Callable[..., None]] = None,
+    allow_plus_concat: bool = False,
 ) -> Optional[list[Any]]:
     """
     link/join ルールの反復値を高速取得する（OpenXML Excel / CSV の典型セル座標パターン）。
     非対応時は None を返し、呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバックする。
+    allow_plus_concat かつセルに「+」がある場合は複数セル結合のため None（逐次経路へ）。
     """
     if n_src < 1:
         return []
@@ -3034,6 +3088,9 @@ def _extract_cell_rule_series_fast(
     if not is_csv and not is_openxml_excel_suffix(p_abs.suffix) and not is_xls:
         return None
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
+    # 連携キーの複数セル結合は系列一括経路では扱わない（逐次で各パートに同一オフセット）
+    if allow_plus_concat and "+" in base_cell:
+        return None
     c0, r0 = _parse_cell_ref(base_cell)
     if c0 is None or r0 is None:
         return None
@@ -3139,6 +3196,7 @@ def _extract_cell_rules_series_fast_map(
     *,
     n_src: int,
     cancel_check: Optional[Callable[..., None]] = None,
+    allow_plus_concat: bool = False,
 ) -> Optional[dict[int, list[Any]]]:
     """
     複数 link/join ルールを 1 回の列範囲走査でまとめて取得する高速経路。
@@ -3147,6 +3205,7 @@ def _extract_cell_rules_series_fast_map(
       - 非固定値ルールは同一基準行・同一 row_step（col=0 の縦反復）
     非対応時は None（呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバック）。
     部分適用: 開始行や歩幅が違うルールは個別高速経路へ回す。
+    allow_plus_concat 時、「+」複数セル結合ルールはマップから外し個別経路へ回す。
     """
     if n_src < 1:
         return {}
@@ -3175,6 +3234,9 @@ def _extract_cell_rules_series_fast_map(
             fixed.append((i, r.get("cell"), r))
             continue
         base_cell = str(r.get("cell") or src.get("cell_ref") or "A1").strip()
+        # 連携キーの D10+E10 はマップ対象外（呼び出し側の個別系列へ）
+        if allow_plus_concat and "+" in base_cell:
+            continue
         c0, r0 = _parse_cell_ref(base_cell)
         if c0 is None or r0 is None:
             return None
@@ -3771,6 +3833,7 @@ def _append_rule_series_to_bundle(
     iter_contexts: list[dict[str, Any]],
     n_src: int,
     cancel_check: Optional[Callable[..., None]] = None,
+    allow_plus_concat: bool = False,
 ) -> None:
     """link/join の系列値を bundle に追記。非連番 rule_iter も列一括読取して拾う。"""
     ris = _rule_iter_indices_list(iter_contexts)
@@ -3779,7 +3842,12 @@ def _append_rule_series_to_bundle(
         n_read = max(n_read, max(ris) + 1)
     vals_fast = (
         _extract_cell_rule_series_fast(
-            file_path, src, rule, n_src=n_read, cancel_check=cancel_check
+            file_path,
+            src,
+            rule,
+            n_src=n_read,
+            cancel_check=cancel_check,
+            allow_plus_concat=allow_plus_concat,
         )
         if n_read > 0
         else []
@@ -3798,7 +3866,9 @@ def _append_rule_series_to_bundle(
             )
         return
     for iter_ctx in iter_contexts:
-        v = _extract_from_cell_rule_with_context(file_path, src, rule, iter_ctx)
+        v = _extract_from_cell_rule_with_context(
+            file_path, src, rule, iter_ctx, allow_plus_concat=allow_plus_concat
+        )
         bundle[values_key].setdefault(target, []).append(v)
         bundle[contexts_key].setdefault(target, []).append(
             {
@@ -3930,6 +4000,7 @@ def _extract_item_bundle_impl(
                         iter_contexts=iter_contexts,
                         n_src=n_src,
                         cancel_check=cancel_check,
+                        allow_plus_concat=True,
                     )
             else:
                 for jd in ui_blk.get("join_defs") or []:
@@ -3949,6 +4020,7 @@ def _extract_item_bundle_impl(
                         iter_contexts=iter_contexts,
                         n_src=n_src,
                         cancel_check=cancel_check,
+                        allow_plus_concat=False,
                     )
         if debug_step_scope == "link":
             _align_link_join_series_to_primary(bundle)
@@ -4058,7 +4130,12 @@ def _extract_item_bundle_impl(
                 link_defs = [x for x in (ui_blk.get("link_defs") or []) if isinstance(x, dict)]
                 link_fast = (
                     _extract_cell_rules_series_fast_map(
-                        file_path, src, link_defs, n_src=n_src, cancel_check=cancel_check
+                        file_path,
+                        src,
+                        link_defs,
+                        n_src=n_src,
+                        cancel_check=cancel_check,
+                        allow_plus_concat=True,
                     )
                     if contiguous
                     else None
@@ -4093,11 +4170,17 @@ def _extract_item_bundle_impl(
                             iter_contexts=iter_contexts,
                             n_src=n_src,
                             cancel_check=cancel_check,
+                            allow_plus_concat=True,
                         )
                 join_defs = [x for x in (ui_blk.get("join_defs") or []) if isinstance(x, dict)]
                 join_fast = (
                     _extract_cell_rules_series_fast_map(
-                        file_path, src, join_defs, n_src=n_src, cancel_check=cancel_check
+                        file_path,
+                        src,
+                        join_defs,
+                        n_src=n_src,
+                        cancel_check=cancel_check,
+                        allow_plus_concat=False,
                     )
                     if contiguous
                     else None
@@ -4132,6 +4215,7 @@ def _extract_item_bundle_impl(
                             iter_contexts=iter_contexts,
                             n_src=n_src,
                             cancel_check=cancel_check,
+                            allow_plus_concat=False,
                         )
         elif stype == "name_extract":
             if not name_extract_search_matches(file_path, src):

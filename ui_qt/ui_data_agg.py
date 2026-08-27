@@ -73,7 +73,9 @@ from PySide6.QtWidgets import (
 from core import core_env
 from ui_qt.ui_common import (
     _normalize_message_newlines,
+    _normalize_tooltip_text,
     excel_rect_tuple_from_req as _excel_rect_tuple_from_req,
+    set_widget_tooltip,
     show_done_notice,
     show_error_notice,
     show_info_notice,
@@ -221,7 +223,7 @@ def _log_data_agg_create_dialog_phase(
 
 def _data_agg_summary_table_tooltip(display: str) -> str:
     """要約表ツールチップ: 区切り「 | 」を改行して複数行表示（メイン項目表・シナリオ編集一覧で共用）。"""
-    return (display or "").replace(" | ", "\n")
+    return _normalize_tooltip_text((display or "").replace(" | ", "\n"))
 
 
 __version__ = "0.4.50"
@@ -567,21 +569,23 @@ class _DataAggMainWindow(QDialog):
             "現在読み込んでいるシナリオファイル名の表示です。",
         )
         btn_clear_all = QPushButton(_u("BTN_SCENARIO_CLEAR_ALL", "すべてクリア"))
-        btn_clear_all.setToolTip(
+        set_widget_tooltip(
+            btn_clear_all,
             _u(
                 "TOOLTIP_SCENARIO_CLEAR_ALL",
                 "マスタ項目一覧とシナリオ定義を空にし、未読込状態に戻します。シナリオ保存は無効のままです。",
-            )
+            ),
         )
         btn_clear_all.setAutoDefault(False)
         btn_clear_all.setDefault(False)
         btn_clear_all.clicked.connect(self._on_scenario_clear_all)
         btn_clear_sc = QPushButton(_u("BTN_SCENARIO_CLEAR_SOURCES", "シナリオクリア"))
-        btn_clear_sc.setToolTip(
+        set_widget_tooltip(
+            btn_clear_sc,
             _u(
                 "TOOLTIP_SCENARIO_CLEAR_SOURCES",
                 "項目名は残し、各項目に登録した取得シナリオのみ削除します。保存が必要な変更としてシナリオ保存を有効にします。",
-            )
+            ),
         )
         btn_clear_sc.setAutoDefault(False)
         btn_clear_sc.setDefault(False)
@@ -647,10 +651,10 @@ class _DataAggMainWindow(QDialog):
         move_row = QHBoxLayout()
         move_row.addStretch(0)
         btn_up = QPushButton(_u("BTN_MOVE_UP", "▲ 上へ"))
-        btn_up.setToolTip(_u("TOOLTIP_MOVE_UP", "選択行を1行上に移動（連続・歯抜け選択可）"))
+        set_widget_tooltip(btn_up, _u("TOOLTIP_MOVE_UP", "選択行を1行上に移動（連続・歯抜け選択可）"))
         btn_up.clicked.connect(self._on_move_items_up)
         btn_down = QPushButton(_u("BTN_MOVE_DOWN", "▼ 下へ"))
-        btn_down.setToolTip(_u("TOOLTIP_MOVE_DOWN", "選択行を1行下に移動（連続・歯抜け選択可）"))
+        set_widget_tooltip(btn_down, _u("TOOLTIP_MOVE_DOWN", "選択行を1行下に移動（連続・歯抜け選択可）"))
         btn_down.clicked.connect(self._on_move_items_down)
         move_row.addWidget(btn_up)
         move_row.addWidget(btn_down)
@@ -823,23 +827,29 @@ class _DataAggMainWindow(QDialog):
         try:
             tab_widget.setTabToolTip(
                 0,
-                _u(
-                    "TOOLTIP_TAB_SCAN",
-                    "基準フォルダ・拡張子・検索で対象ファイルを列挙します。",
+                _normalize_tooltip_text(
+                    _u(
+                        "TOOLTIP_TAB_SCAN",
+                        "基準フォルダ・拡張子・検索で対象ファイルを列挙します。",
+                    )
                 ),
             )
             tab_widget.setTabToolTip(
                 1,
-                _u(
-                    "TOOLTIP_TAB_ITEMS",
-                    "マスタ項目とシナリオ要約の一覧です。行の移動やシナリオ編集の起点になります。",
+                _normalize_tooltip_text(
+                    _u(
+                        "TOOLTIP_TAB_ITEMS",
+                        "マスタ項目とシナリオ要約の一覧です。行の移動やシナリオ編集の起点になります。",
+                    )
                 ),
             )
             tab_widget.setTabToolTip(
                 2,
-                _u(
-                    "TOOLTIP_TAB_EXCEL",
-                    "マスタへの書き込み先・並べ替えなどのオプションです。",
+                _normalize_tooltip_text(
+                    _u(
+                        "TOOLTIP_TAB_EXCEL",
+                        "マスタへの書き込み先・並べ替えなどのオプションです。",
+                    )
                 ),
             )
         except Exception:
@@ -895,7 +905,7 @@ class _DataAggMainWindow(QDialog):
         self._btn_debug.setDefault(False)
         tip_dbg = str(self._ui.get("TOOLTIP_DEBUG") or "").strip()
         if tip_dbg:
-            self._btn_debug.setToolTip(tip_dbg)
+            set_widget_tooltip(self._btn_debug, tip_dbg)
         self._btn_debug.clicked.connect(self._on_debug)
         row_btn.addWidget(self._btn_debug)
         self._btn_scenario_export = QPushButton(_u("BTN_SCENARIO_EXPORT", "シナリオ出力"))
@@ -903,7 +913,7 @@ class _DataAggMainWindow(QDialog):
         self._btn_scenario_export.setDefault(False)
         tip_exp = str(self._ui.get("TOOLTIP_SCENARIO_EXPORT") or "").strip()
         if tip_exp:
-            self._btn_scenario_export.setToolTip(tip_exp)
+            set_widget_tooltip(self._btn_scenario_export, tip_exp)
         self._btn_scenario_export.clicked.connect(self._on_scenario_export)
         row_btn.addWidget(self._btn_scenario_export)
         row_btn.addStretch(1)
@@ -977,7 +987,7 @@ class _DataAggMainWindow(QDialog):
             return
         t = _ui_disp_str(self._ui or {}, key, default).strip()
         if t:
-            w.setToolTip(t)
+            set_widget_tooltip(w, t)
 
     def _scenario_has_any_registered_source(self) -> bool:
         """マスタ項目が1件以上あり、いずれかの行に有効な取得ソース（sources）が1件以上あるとき True。"""
@@ -1022,18 +1032,18 @@ class _DataAggMainWindow(QDialog):
         ).strip()
         if btn is not None:
             btn.setEnabled(ok)
-            btn.setToolTip(tip_ok if ok else (tip_need or tip_ok))
+            set_widget_tooltip(btn, tip_ok if ok else (tip_need or tip_ok))
         if dbg is not None:
             dbg.setEnabled(ok)
-            dbg.setToolTip(tip_dbg_ok if ok else (tip_need or tip_dbg_ok))
+            set_widget_tooltip(dbg, tip_dbg_ok if ok else (tip_need or tip_dbg_ok))
         if exp is not None:
             exp.setEnabled(ok_export)
             if ok_export:
-                exp.setToolTip(tip_exp_ok or tip_ok)
+                set_widget_tooltip(exp, tip_exp_ok or tip_ok)
             elif not ok_src:
-                exp.setToolTip(tip_need or tip_exp_ok)
+                set_widget_tooltip(exp, tip_need or tip_exp_ok)
             else:
-                exp.setToolTip(tip_exp_need or tip_exp_ok or tip_need)
+                set_widget_tooltip(exp, tip_exp_need or tip_exp_ok or tip_need)
 
     def _apply_excel_menu_bar_lock(self, lock: bool) -> bool:
         """メイン表示中は Excel のリボン／メニュー操作を抑止し、閉じたときに解除する。
@@ -1445,13 +1455,13 @@ class _DataAggMainWindow(QDialog):
         def _tip_str(key: str, default: str = "") -> str:
             t = str((self._ui or {}).get(key) or "").strip()
             if not t and default:
-                t = _normalize_message_newlines(str(default).strip())
-            return t
+                t = str(default).strip()
+            return _normalize_tooltip_text(t) if t else ""
 
         def _apply_tip(w: QWidget, key: str, default: str = "") -> None:
             t = _tip_str(key, default)
             if t:
-                w.setToolTip(t)
+                set_widget_tooltip(w, t)
 
         # --- 出力先 ---
         grp_out = QGroupBox(_u("GROUP_EXCEL_OUTPUT", "出力先"))
@@ -1796,9 +1806,9 @@ class _DataAggMainWindow(QDialog):
         def _tip_key(w: QWidget, key: str, default: str = "") -> None:
             t = str((self._ui or {}).get(key) or "").strip()
             if not t and default:
-                t = _normalize_message_newlines(str(default).strip())
+                t = str(default).strip()
             if t:
-                w.setToolTip(t)
+                set_widget_tooltip(w, t)
 
         row = QWidget()
         hl = QHBoxLayout(row)
@@ -2556,8 +2566,8 @@ class _DataAggMainWindow(QDialog):
         if not blocks:
             return fallback
         if len(blocks) == 1:
-            return blocks[0]
-        return "\n\n".join(blocks)
+            return _normalize_tooltip_text(blocks[0])
+        return _normalize_tooltip_text("\n\n".join(blocks))
 
     def _create_summary_item(self, text: str) -> QTableWidgetItem:
         """シナリオ要約列用の編集不可アイテムを生成する。"""
@@ -2691,15 +2701,15 @@ class _DataAggMainWindow(QDialog):
                 cell.setForeground(fg)
                 cell.setBackground(bg)
             if c0 is not None:
-                c0.setToolTip(tip)
+                set_widget_tooltip(c0, tip)
             if c2 is not None:
-                c2.setToolTip(self._main_summary_column_tooltip(r))
+                set_widget_tooltip(c2, self._main_summary_column_tooltip(r))
             btn = self._item_table.cellWidget(r, 1)
             if isinstance(btn, QPushButton):
                 btn.setEnabled(not linked)
                 if linked:
                     btn.setStyleSheet(_BTN_EDIT_LINKED_DISABLED)
-                    btn.setToolTip("連携項目で参照中のため編集不可")
+                    set_widget_tooltip(btn, "連携項目で参照中のため編集不可")
                 else:
                     btn.setStyleSheet(_BTN_EDIT_ENABLED)
                     btn.setToolTip("")
@@ -4201,7 +4211,7 @@ class _ScenarioEditDialog(QDialog):
             return
         t = _ui_disp_str(self._screen_cfg, key, default).strip()
         if t:
-            w.setToolTip(t)
+            set_widget_tooltip(w, t)
 
     @staticmethod
     def _combo_select_saved_master_item(cb: QComboBox, itxt: str) -> None:
@@ -4305,11 +4315,10 @@ class _ScenarioEditDialog(QDialog):
         lbl_sc_list = QLabel(
             "<b>%s</b>" % _u("LABEL_SCENARIO_LIST", "シナリオ一覧").replace("\n", "<br/>")
         )
-        lbl_sc_list.setToolTip(
-            _u(
-                "TIP_LABEL_SCENARIO_LIST",
-                "このマスタ項目に紐づく取得シナリオの一覧です。上から順に評価されます。",
-            )
+        self._scenario_set_tip(
+            lbl_sc_list,
+            "TIP_LABEL_SCENARIO_LIST",
+            "このマスタ項目に紐づく取得シナリオの一覧です。上から順に評価されます。",
         )
         left_top_lay.addWidget(lbl_sc_list)
         self._sources_table = QTableWidget()
@@ -4317,13 +4326,17 @@ class _ScenarioEditDialog(QDialog):
         self._sources_table.verticalHeader().setVisible(False)
         hi_idx = QTableWidgetItem(_u("TABLE_HEADER_INDEX", "#"))
         hi_idx.setToolTip(
-            _u("TIP_TABLE_HEADER_INDEX", "シナリオの評価順（行番号）です。")
+            _normalize_tooltip_text(
+                _u("TIP_TABLE_HEADER_INDEX", "シナリオの評価順（行番号）です。")
+            )
         )
         hi_name = QTableWidgetItem(_u("TABLE_HEADER_SCENARIO_NAME", "シナリオ名"))
         hi_name.setToolTip(
-            _u(
-                "TIP_TABLE_HEADER_SCENARIO_NAME",
-                "シナリオの表示名です。ツールチップで要約の一部を確認できます。",
+            _normalize_tooltip_text(
+                _u(
+                    "TIP_TABLE_HEADER_SCENARIO_NAME",
+                    "シナリオの表示名です。ツールチップで要約の一部を確認できます。",
+                )
             )
         )
         self._sources_table.setHorizontalHeaderItem(0, hi_idx)
@@ -4399,42 +4412,48 @@ class _ScenarioEditDialog(QDialog):
             btn.setFixedWidth(w)
 
         btn_src_up = QPushButton(_u("BTN_SOURCE_UP", "▲"))
-        btn_src_up.setToolTip(_u("TIP_SOURCE_UP", "選択中のソースを上へ（取得の評価順）"))
+        set_widget_tooltip(btn_src_up, _u("TIP_SOURCE_UP", "選択中のソースを上へ（取得の評価順）"))
         btn_src_up.clicked.connect(self._on_source_move_up)
         btn_src_up.setAutoDefault(False)
         btn_src_up.setDefault(False)
         _src_btn_min_w(btn_src_up)
         btn_src_dn = QPushButton(_u("BTN_SOURCE_DOWN", "▼"))
-        btn_src_dn.setToolTip(_u("TIP_SOURCE_DOWN", "選択中のソースを下へ（取得の評価順）"))
+        set_widget_tooltip(btn_src_dn, _u("TIP_SOURCE_DOWN", "選択中のソースを下へ（取得の評価順）"))
         btn_src_dn.clicked.connect(self._on_source_move_down)
         btn_src_dn.setAutoDefault(False)
         btn_src_dn.setDefault(False)
         _src_btn_min_w(btn_src_dn)
         btn_add = QPushButton(_u("BTN_ADD_SOURCE", "追加"))
-        btn_add.setToolTip(
-            _u("TIP_ADD_SOURCE", "一覧の末尾に新しいシナリオを追加します。")
+        set_widget_tooltip(
+            btn_add,
+            _u("TIP_ADD_SOURCE", "一覧の末尾に新しいシナリオを追加します。"),
         )
         btn_add.clicked.connect(self._on_add_source)
         btn_add.setAutoDefault(False)
         btn_add.setDefault(False)
         _src_btn_min_w(btn_add)
         btn_dup = QPushButton(_u("BTN_DUPLICATE_SOURCE", "複製"))
-        btn_dup.setToolTip(_u("TIP_DUPLICATE_SOURCE", "選択中のシナリオをコピーして一覧に追加します。"))
+        set_widget_tooltip(
+            btn_dup,
+            _u("TIP_DUPLICATE_SOURCE", "選択中のシナリオをコピーして一覧に追加します。"),
+        )
         btn_dup.clicked.connect(self._on_duplicate_source)
         btn_dup.setAutoDefault(False)
         btn_dup.setDefault(False)
         _src_btn_min_w(btn_dup)
         btn_remove = QPushButton(_u("BTN_REMOVE_SOURCE", "削除"))
-        btn_remove.setToolTip(
-            _u("TIP_REMOVE_SOURCE", "選択中のシナリオを一覧から削除します。")
+        set_widget_tooltip(
+            btn_remove,
+            _u("TIP_REMOVE_SOURCE", "選択中のシナリオを一覧から削除します。"),
         )
         btn_remove.clicked.connect(self._on_remove_source)
         btn_remove.setAutoDefault(False)
         btn_remove.setDefault(False)
         _src_btn_min_w(btn_remove)
         self._btn_undo_remove = QPushButton(_u("BTN_UNDO_REMOVE_SOURCE", "Undo"))
-        self._btn_undo_remove.setToolTip(
-            _u("TIP_UNDO_REMOVE_SOURCE", "直近の削除を元に戻します（利用可能なときのみ）。")
+        set_widget_tooltip(
+            self._btn_undo_remove,
+            _u("TIP_UNDO_REMOVE_SOURCE", "直近の削除を元に戻します（利用可能なときのみ）。"),
         )
         self._btn_undo_remove.setEnabled(False)
         self._btn_undo_remove.setAutoDefault(False)
@@ -4474,11 +4493,10 @@ class _ScenarioEditDialog(QDialog):
         row_dbg = QHBoxLayout()
         row_dbg.addStretch(1)
         self._btn_step = QPushButton(_u("BTN_STEP_SCENARIO", "デバッグ"))
-        self._btn_step.setToolTip(
-            _u(
-                "TIP_STEP_SCENARIO",
-                "デバッグを開きます。シナリオフェーズで実ファイル抽出のプレビュー（マスタへは書込みません）。親画面の基準フォルダで再スキャンしたパスを優先します。",
-            )
+        self._scenario_set_tip(
+            self._btn_step,
+            "TIP_STEP_SCENARIO",
+            "デバッグを開きます。シナリオフェーズで実ファイル抽出のプレビュー（マスタへは書込みません）。親画面の基準フォルダで再スキャンしたパスを優先します。",
         )
         self._btn_step.clicked.connect(self._on_step_scenario_placeholder)
         self._btn_step.setAutoDefault(False)
@@ -4523,14 +4541,18 @@ class _ScenarioEditDialog(QDialog):
                 (item_name or "-").replace("\n", "<br/>"),
             )
         )
-        lbl_item_hdr.setToolTip(
-            _u("TIP_LABEL_ITEM_NAME", "マスタ上のこの列（項目）の名称です。")
+        self._scenario_set_tip(
+            lbl_item_hdr,
+            "TIP_LABEL_ITEM_NAME",
+            "マスタ上のこの列（項目）の名称です。",
         )
         right.addWidget(lbl_item_hdr)
         row_ident = QHBoxLayout()
         lbl_ident = QLabel(_u("LABEL_SCENARIO_NAME", "シナリオ名") + "：")
-        lbl_ident.setToolTip(
-            _u("TIP_LABEL_SCENARIO_NAME", "一覧で識別するシナリオ名です。")
+        self._scenario_set_tip(
+            lbl_ident,
+            "TIP_LABEL_SCENARIO_NAME",
+            "一覧で識別するシナリオ名です。",
         )
         row_ident.addWidget(lbl_ident)
         self._edit_scenario_ident = QLineEdit()
@@ -4539,17 +4561,18 @@ class _ScenarioEditDialog(QDialog):
         self._edit_scenario_ident.textChanged.connect(self._on_scenario_name_text_changed)
         self._edit_scenario_ident.returnPressed.connect(lambda: self._edit_scenario_ident.clearFocus())
         row_ident.addWidget(self._edit_scenario_ident, 1)
-        self._edit_scenario_ident.setToolTip(
-            _u("TIP_SCENARIO_NAME_EDIT", "空のときは自動生成名が一覧に表示されます。")
+        self._scenario_set_tip(
+            self._edit_scenario_ident,
+            "TIP_SCENARIO_NAME_EDIT",
+            "空のときは自動生成名が一覧に表示されます。",
         )
         right.addLayout(row_ident)
         kind_row_top = QHBoxLayout()
         lbl_kind = QLabel(_u("LABEL_KIND", "種別") + "：")
-        lbl_kind.setToolTip(
-            _u(
-                "TIP_LABEL_KIND",
-                "セル座標から取得か名前から取得か。同一項目内では混在できません。",
-            )
+        self._scenario_set_tip(
+            lbl_kind,
+            "TIP_LABEL_KIND",
+            "セル座標から取得か名前から取得か。同一項目内では混在できません。",
         )
         kind_row_top.addWidget(lbl_kind)
         self._form_combo_type = QComboBox()
@@ -4557,8 +4580,10 @@ class _ScenarioEditDialog(QDialog):
         self._form_combo_type.addItem(_u("SOURCE_TYPE_NAME_EXTRACT", "名前から取得"), "name_extract")
         self._form_combo_type.currentIndexChanged.connect(self._on_form_type_changed)
         self._form_combo_type.setMaximumWidth(280)
-        self._form_combo_type.setToolTip(
-            _u("TIP_FORM_COMBO_TYPE", "取得元の種別です。変更すると詳細フォームが切り替わります。")
+        self._scenario_set_tip(
+            self._form_combo_type,
+            "TIP_FORM_COMBO_TYPE",
+            "取得元の種別です。変更すると詳細フォームが切り替わります。",
         )
         kind_row_top.addWidget(self._form_combo_type)
         kind_row_top.addStretch(1)
@@ -4587,6 +4612,9 @@ class _ScenarioEditDialog(QDialog):
         self._cell_refs["on_link_group_added"] = self._wire_new_link_def
         self._cell_refs["on_link_group_removed"] = self._on_link_or_join_removed
         self._cell_refs["on_join_group_removed"] = self._on_link_or_join_removed
+        self._cell_refs["on_link_group_structure_changed"] = (
+            self._on_link_or_join_structure_changed
+        )
         scroll_name, self._name_refs = build_scenario_detail_name_scroll(
             self._item_name, items or [], detail_name
         )
@@ -4643,15 +4671,19 @@ class _ScenarioEditDialog(QDialog):
         row_btn = QHBoxLayout()
         row_btn.addStretch(1)
         self._btn_register = QPushButton(_u("BTN_OK", "登録"))
-        self._btn_register.setToolTip(
-            _u("TIP_BTN_OK", "変更を項目に反映してダイアログを閉じます。")
+        self._scenario_set_tip(
+            self._btn_register,
+            "TIP_BTN_OK",
+            "変更を項目に反映してダイアログを閉じます。",
         )
         self._btn_register.clicked.connect(self._on_register_clicked)
         self._btn_register.setAutoDefault(False)
         self._btn_register.setDefault(False)
         btn_cancel = QPushButton(_u("BTN_CANCEL", "キャンセル"))
-        btn_cancel.setToolTip(
-            _u("TIP_BTN_CANCEL", "変更を破棄して閉じます。")
+        self._scenario_set_tip(
+            btn_cancel,
+            "TIP_BTN_CANCEL",
+            "変更を破棄して閉じます。",
         )
         btn_cancel.clicked.connect(self.reject)
         btn_cancel.setAutoDefault(False)
@@ -5053,6 +5085,14 @@ class _ScenarioEditDialog(QDialog):
             self._apply_form_to_source(self._current_source_index, include_scenario_name=False)
         self._notify_main_scenario_dirty()
 
+    def _on_link_or_join_structure_changed(self, _added: Any = None) -> None:
+        """連携／結合の追加・挿入後。未入力の定義を即 apply すると item 未選択で落ちるため dirty のみ。"""
+        if self._loading_source_form:
+            return
+        self._dirty = True
+        self._update_register_button_state()
+        self._notify_main_scenario_dirty()
+
     def _wire_new_link_def(self, ld: dict[str, Any]) -> None:
         """連携キー行追加後に、その行だけフォーム変更シグナルを接続する。"""
         ld["cell"].textChanged.connect(self._on_form_changed)
@@ -5244,8 +5284,10 @@ class _ScenarioEditDialog(QDialog):
                         )
                     else:
                         cell_it.setToolTip(
-                            scenario_source_tooltip_plain(
-                                snap_disp, dname, detail_cell_cfg=dcell
+                            _normalize_tooltip_text(
+                                scenario_source_tooltip_plain(
+                                    snap_disp, dname, detail_cell_cfg=dcell
+                                )
                             )
                         )
                     self._sources_table.setItem(i, 1, cell_it)
@@ -5412,9 +5454,11 @@ class _ScenarioEditDialog(QDialog):
         lines = self._detail_lines_for_source(disp, row)
         full_text = "%s\n\n%s" % (_u("LABEL_SUMMARY_FULL", "要約（全文）"), "\n".join(lines))
         self._summary_preview.setText(full_text)
-        long_tip = _normalize_message_newlines(full_text).strip()
+        long_tip = _normalize_tooltip_text(
+            _normalize_message_newlines(full_text).strip()
+        )
         if len(long_tip) > 200:
-            self._summary_preview.setToolTip(long_tip[:4096])
+            set_widget_tooltip(self._summary_preview, long_tip[:4096])
         else:
             self._scenario_set_tip(
                 self._summary_preview,

@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui_qt.ui_common import _normalize_message_newlines, ensure_front, show_warning_notice
+from ui_qt.ui_common import _normalize_message_newlines, ensure_front, set_widget_tooltip, show_warning_notice
 from ui_qt.ui_dialog_progress import raise_csv_sp_partner_progress
 
 try:
@@ -271,7 +271,7 @@ class _SplitDialog(QDialog):
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         tbl_tip = str(tbl_cfg.get("TOOLTIP") or "").strip()
         if tbl_tip:
-            self._table.setToolTip(tbl_tip)
+            set_widget_tooltip(self._table, tbl_tip)
         self._table.verticalHeader().setVisible(False)
         try:
             self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -291,7 +291,7 @@ class _SplitDialog(QDialog):
             btn = QPushButton(str(b.get("label") or b.get("id") or ""))
             tip = str(b.get("tooltip") or "").strip()
             if tip:
-                btn.setToolTip(tip)
+                set_widget_tooltip(btn, tip)
             bid = str(b.get("id") or "").strip().lower()
             if bid == "add":
                 btn.clicked.connect(self._on_add)
@@ -308,7 +308,7 @@ class _SplitDialog(QDialog):
             btn = QPushButton(str(b.get("label") or b.get("id") or ""))
             tip = str(b.get("tooltip") or "").strip()
             if tip:
-                btn.setToolTip(tip)
+                set_widget_tooltip(btn, tip)
             bid = str(b.get("id") or "").strip().lower()
             if bid == "start":
                 btn.clicked.connect(self._on_start)

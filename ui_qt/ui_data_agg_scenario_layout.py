@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ui_qt.ui_common import _normalize_message_newlines, show_warning_notice
+from ui_qt.ui_common import _normalize_message_newlines, _normalize_tooltip_text, set_widget_tooltip, show_warning_notice
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel
@@ -86,7 +86,7 @@ class CollapsibleSection(QWidget):
         self._sync_title()
         st = (section_tooltip or "").strip()
         if st:
-            tt = _normalize_message_newlines(st)
+            tt = _normalize_tooltip_text(st)
             self.setToolTip(tt)
             self._btn.setToolTip(tt)
             self._arrow_lbl.setToolTip(tt)
@@ -125,11 +125,13 @@ def _dch(cfg: dict[str, Any] | None, key: str, default: Any = "") -> str:
 def _cfg_tip(cfg: dict[str, Any] | None, key: str, default: str = "") -> str:
     """詳細フォーム用ツールチップ。JSON の TIP_* があれば優先、なければ default。"""
     if not isinstance(cfg, dict):
-        return _normalize_message_newlines(default.strip()) if default else ""
+        raw = default.strip() if default else ""
+        return _normalize_tooltip_text(raw) if raw else ""
     v = cfg.get(key)
     if v is not None and str(v).strip():
-        return _normalize_message_newlines(str(v).strip())
-    return _normalize_message_newlines(default.strip()) if default else ""
+        return _normalize_tooltip_text(str(v).strip())
+    raw = default.strip() if default else ""
+    return _normalize_tooltip_text(raw) if raw else ""
 
 
 def _apply_cfg_tip(
@@ -142,7 +144,7 @@ def _apply_cfg_tip(
         return
     t = _cfg_tip(cfg, key, default)
     if t and not (w.toolTip() or "").strip():
-        w.setToolTip(t)
+        set_widget_tooltip(w, t)
 
 
 def _apply_cfg_tip_force(
@@ -155,7 +157,7 @@ def _apply_cfg_tip_force(
         return
     t = _cfg_tip(cfg, key, default)
     if t:
-        w.setToolTip(t)
+        set_widget_tooltip(w, t)
 
 
 def _hint_label(text: str) -> QLabel:
@@ -343,7 +345,7 @@ def _checkbox_row_left(
     for i, t in enumerate(labels):
         cbx = QCheckBox(t)
         if i < len(tips) and str(tips[i] or "").strip():
-            cbx.setToolTip(str(tips[i]).strip())
+            cbx.setToolTip(_normalize_tooltip_text(str(tips[i]).strip()))
         h.addWidget(cbx)
         checks.append(cbx)
     return row, checks
@@ -365,7 +367,7 @@ def _checkbox_column_left(
     for i, t in enumerate(labels):
         cbx = QCheckBox(t)
         if i < len(tips) and str(tips[i] or "").strip():
-            cbx.setToolTip(str(tips[i]).strip())
+            cbx.setToolTip(_normalize_tooltip_text(str(tips[i]).strip()))
         v.addWidget(cbx, 0, Qt.AlignmentFlag.AlignLeft)
         checks.append(cbx)
     return row, checks
@@ -811,7 +813,7 @@ def build_scenario_detail_cell_scroll(
         le_fn.setPlaceholderText(ph_fn)
     tip_fn = _dcp(cfg, "TOOLTIP_FILE_NAME", "")
     if tip_fn:
-        le_fn.setToolTip(tip_fn)
+        set_widget_tooltip(le_fn, tip_fn)
     f1.addRow(_field_lbl(_dcp(cfg, "LABEL_FILE_NAME", "ファイル名")), le_fn)
     refs["file_pattern"] = le_fn
 
@@ -890,7 +892,7 @@ def build_scenario_detail_cell_scroll(
         le_sheet.setPlaceholderText(ph_sheet)
     tip_sheet = _dcp(cfg, "TOOLTIP_SHEET_NAME", "")
     if tip_sheet:
-        le_sheet.setToolTip(tip_sheet)
+        set_widget_tooltip(le_sheet, tip_sheet)
     f2.addRow(_field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")), le_sheet)
     _csv_note = QLabel(_dch(cfg, "SHEET_CSV_NOTE_HTML", ""))
     _csv_note.setWordWrap(True)
@@ -1155,6 +1157,18 @@ def build_scenario_detail_cell_scroll(
     w_link_spin = int(_dc(cfg, "SPIN_WIDTH_LINK", w_join))
     msg_title_link = _dcp(cfg, "MSGBOX_TITLE", "シナリオ編集")
 
+    def _renumber_link_groups() -> None:
+        for i, one in enumerate(link_defs, start=1):
+            gb0 = one.get("group_box")
+            if gb0 is not None:
+                gb0.setTitle(link_fmt % i)
+
+    def _sync_empty_link_add_controls() -> None:
+        """連携キー 0 件のときだけ末尾「＋ 連携キー追加」を出す（1 件以上は各定義の下に挿入）。"""
+        btn = refs.get("btn_add_link")
+        if btn is not None:
+            btn.setVisible(len(link_defs) == 0)
+
     def remove_link_group(ld: dict[str, Any]) -> None:
         if ld not in link_defs:
             return
@@ -1163,6 +1177,8 @@ def build_scenario_detail_cell_scroll(
         if gb is not None:
             v_link.removeWidget(gb)
             gb.deleteLater()
+        _renumber_link_groups()
+        _sync_empty_link_add_controls()
         cb_rm = refs.get("on_link_group_removed")
         if callable(cb_rm):
             cb_rm(ld)
@@ -1254,6 +1270,7 @@ def build_scenario_detail_cell_scroll(
         gv.addLayout(gf)
         row_lbtn = QHBoxLayout()
         row_lbtn.addStretch(1)
+        btn_ins_l = QPushButton(_dcp(cfg, "BTN_LINK_INSERT", "下に挿入"))
         btn_rm_l = QPushButton(_dcp(cfg, "BTN_LINK_REMOVE", "削除"))
         ld: dict[str, Any] = {
             "cell": le_lc,
@@ -1267,6 +1284,8 @@ def build_scenario_detail_cell_scroll(
             "value_shape_script": le_link_shape,
             "carry_empty": cb_carry_empty,
             "group_box": gb,
+            "btn_insert": btn_ins_l,
+            "btn_remove": btn_rm_l,
         }
         def _sync_link_mode_state(*_args: Any, force_fixed: bool | None = None) -> None:
             # toggled(bool) が第1引数に来る。セル座標がオンならオフセットを有効にする
@@ -1285,7 +1304,9 @@ def build_scenario_detail_cell_scroll(
         rad_link_cell.toggled.connect(_sync_link_mode_state)
         rad_link_fixed.toggled.connect(_sync_link_mode_state)
         _sync_link_mode_state()
+        btn_ins_l.clicked.connect(lambda _=False, L=ld: insert_link_group_after(L))
         btn_rm_l.clicked.connect(lambda _=False, L=ld: remove_link_group(L))
+        row_lbtn.addWidget(btn_ins_l)
         row_lbtn.addWidget(btn_rm_l)
         gv.addLayout(row_lbtn)
         _apply_cfg_tip_force(
@@ -1316,19 +1337,19 @@ def build_scenario_detail_cell_scroll(
             le_lc,
             cfg,
             "TIP_LINK_CELL_OR_FIXED",
-            "セル参照（A1形式）または固定値です。値種別に応じて意味が変わります。",
+            "セル参照は A1 形式。複数セルは「D10+D11」のように + で左から順に結合（区切り文字なし）。空セルは空文字。行・列オフセットは各セルに同じだけ適用。固定値モード時はその文字列。",
         )
         _apply_cfg_tip_force(
             sj,
             cfg,
             "TIP_SPIN_LINK_ROW",
-            "連携値の基準セルからの行オフセットです。",
+            "連携値の各基準セルからの行オフセットです（複数セル結合時も各セルに同じオフセット）。",
         )
         _apply_cfg_tip_force(
             sk,
             cfg,
             "TIP_SPIN_LINK_COL",
-            "連携値の基準セルからの列オフセットです。",
+            "連携値の各基準セルからの列オフセットです（複数セル結合時も各セルに同じオフセット）。",
         )
         for cbx in link_checks:
             if not (cbx.toolTip() or "").strip():
@@ -1352,12 +1373,40 @@ def build_scenario_detail_cell_scroll(
             "同じシート内で、空欄の連携値に直前の非空値を入れます。先頭が空なら空のままです。シートやファイルが変わるとリセットします。",
         )
         _apply_cfg_tip_force(
+            btn_ins_l,
+            cfg,
+            "TIP_BTN_LINK_INSERT",
+            "この連携キー定義の直後に、新しい定義を差し込みます。末尾に足すときも一番下の定義で挿入します。",
+        )
+        _apply_cfg_tip_force(
             btn_rm_l,
             cfg,
             "TIP_BTN_LINK_REMOVE",
             "この連携キー定義を削除します。",
         )
         return gb, ld
+
+    def _place_link_group_widget(gb: QGroupBox, *, after_gb: Any = None) -> None:
+        """after_gb の直後、無ければ末尾追加アンカー直前へ group_box を置く。"""
+        if after_gb is not None:
+            ix = v_link.indexOf(after_gb)
+            if ix >= 0:
+                v_link.insertWidget(ix + 1, gb)
+                return
+        anchor = refs.get("_link_group_insert_anchor") or refs.get("btn_add_link")
+        ix = v_link.indexOf(anchor) if anchor is not None else -1
+        if ix < 0:
+            ix = max(0, v_link.count())
+        v_link.insertWidget(ix, gb)
+
+    def _notify_link_group_added(ld: dict[str, Any]) -> None:
+        cb = refs.get("on_link_group_added")
+        if callable(cb):
+            cb(ld)
+        # 追加直後は dirty のみ（即 apply すると連携項目未選択の定義が保存から落ちる）
+        cb_st = refs.get("on_link_group_structure_changed")
+        if callable(cb_st):
+            cb_st(ld)
 
     def append_link_group() -> None:
         max_link = int(_dc(cfg, "MAX_LINK_DEFS", 50))
@@ -1370,20 +1419,40 @@ def build_scenario_detail_cell_scroll(
             return
         n = len(link_defs) + 1
         gb, ld = _build_one_link_group(n)
-        anchor = refs.get("_link_group_insert_anchor") or refs.get("btn_add_link")
-        ix = v_link.indexOf(anchor) if anchor is not None else -1
-        if ix < 0:
-            ix = max(0, v_link.count() - 1)
-        v_link.insertWidget(ix, gb)
+        _place_link_group_widget(gb)
         link_defs.append(ld)
-        cb = refs.get("on_link_group_added")
-        if callable(cb):
-            cb(ld)
+        _renumber_link_groups()
+        _sync_empty_link_add_controls()
+        _notify_link_group_added(ld)
+
+    def insert_link_group_after(after_ld: dict[str, Any]) -> None:
+        """指定グループの直後（次定義の直前）へ割り込み追加する。"""
+        max_link = int(_dc(cfg, "MAX_LINK_DEFS", 50))
+        if len(link_defs) >= max_link:
+            show_warning_notice(
+                None,
+                msg_title_link,
+                _dcp(cfg, "MSG_LINK_KEY_MAX", "連携キー定義は最大50件までです。"),
+            )
+            return
+        try:
+            at = link_defs.index(after_ld)
+        except ValueError:
+            return
+        gb, ld = _build_one_link_group(at + 2)
+        after_gb = after_ld.get("group_box")
+        _place_link_group_widget(gb, after_gb=after_gb)
+        link_defs.insert(at + 1, ld)
+        _renumber_link_groups()
+        _sync_empty_link_add_controls()
+        _notify_link_group_added(ld)
 
     refs["link_defs"] = link_defs
     refs["link_section_vlayout"] = v_link
     refs["append_link_group"] = append_link_group
+    refs["insert_link_group_after"] = insert_link_group_after
     refs["remove_link_group"] = remove_link_group
+    refs["sync_empty_link_add_controls"] = _sync_empty_link_add_controls
     _link_and_hint = QLabel(_dch(cfg, "LINK_AND_HINT_HTML", ""))
     _link_and_hint.setWordWrap(True)
     _link_insert_anchor: QWidget | None = None
@@ -1402,11 +1471,12 @@ def build_scenario_detail_cell_scroll(
         btn_add_link,
         cfg,
         "TIP_BTN_LINK_ADD",
-        "連携キー定義を 1 件追加します。",
+        "連携キーがまだ無いとき、最初の1件を追加します。2件目以降は各定義の「下に挿入」を使います。",
     )
     v_link.addWidget(btn_add_link, 0, Qt.AlignmentFlag.AlignLeft)
     refs["btn_add_link"] = btn_add_link
     refs["_link_group_insert_anchor"] = _link_insert_anchor or btn_add_link
+    _sync_empty_link_add_controls()
     sec_link = CollapsibleSection(
         _dcp(cfg, "SEC_LINK_TITLE", "4. 連携キー"),
         w_link,

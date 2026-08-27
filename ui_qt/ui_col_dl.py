@@ -83,6 +83,7 @@ class _ColDlPreviewDialog(QDialog):
             _warning_icon_pixmap,
             apply_tooltip_if_set,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         lay = QVBoxLayout(self)
@@ -119,7 +120,7 @@ class _ColDlPreviewDialog(QDialog):
         self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         tip_list = str(self._preview_cfg.get("LIST_TOOLTIP") or "").strip()
         if tip_list:
-            self._list.setToolTip(tip_list)
+            set_widget_tooltip(self._list, tip_list)
 
         raw_items = self._req.get("items")
         if isinstance(raw_items, list) and kind == "confirm":
@@ -136,20 +137,20 @@ class _ColDlPreviewDialog(QDialog):
             btn_ok = QPushButton(str(self._preview_cfg.get("BTN_OK_NONE") or "OK"))
             tip_ok = str(self._preview_cfg.get("BTN_OK_NONE_TOOLTIP") or "").strip()
             if tip_ok:
-                btn_ok.setToolTip(tip_ok)
+                set_widget_tooltip(btn_ok, tip_ok)
             btn_ok.clicked.connect(lambda: self._finish("ok"))
             row_btn.addWidget(btn_ok)
         else:
             btn_del = QPushButton(str(self._preview_cfg.get("BTN_DELETE") or "削除"))
             tip_del = str(self._preview_cfg.get("BTN_DELETE_TOOLTIP") or "").strip()
             if tip_del:
-                btn_del.setToolTip(tip_del)
+                set_widget_tooltip(btn_del, tip_del)
             btn_del.clicked.connect(lambda: self._finish("delete"))
             row_btn.addWidget(btn_del)
             btn_cancel = QPushButton(str(self._preview_cfg.get("BTN_CANCEL") or "キャンセル"))
             tip_c = str(self._preview_cfg.get("BTN_CANCEL_TOOLTIP") or "").strip()
             if tip_c:
-                btn_cancel.setToolTip(tip_c)
+                set_widget_tooltip(btn_cancel, tip_c)
             btn_cancel.clicked.connect(lambda: self._finish("cancel"))
             row_btn.addWidget(btn_cancel)
         lay.addLayout(row_btn)
@@ -238,6 +239,7 @@ class _ColDlDoneDialog(QDialog):
             _normalize_message_newlines,
             _warning_icon_pixmap,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         lay = QVBoxLayout(self)
@@ -270,7 +272,7 @@ class _ColDlDoneDialog(QDialog):
         btn_ok = QPushButton(btn_label or "OK")
         btn_tip = str(self._done_cfg.get("BTN_OK_TOOLTIP") or "").strip()
         if btn_tip:
-            btn_ok.setToolTip(btn_tip)
+            set_widget_tooltip(btn_ok, btn_tip)
         btn_ok.clicked.connect(self._on_ok)
         row_btn.addWidget(btn_ok)
         lay.addLayout(row_btn)

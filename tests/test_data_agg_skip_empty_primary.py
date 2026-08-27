@@ -682,3 +682,146 @@ def _body_dbg(v: object) -> str:
     if "] " in s:
         s = s.split("] ", 1)[-1].lstrip("'")
     return s
+
+
+def test_batch_all_skipped_primary_emits_no_blank_row(tmp_path: Path) -> None:
+    """
+    主キーが全スキップで primary_values=[] のとき、本番一括は空行を出さない。
+    （旧: `or [None]` で余白1行が残るバグの回帰）
+    """
+    from svc.svc_data_agg import compute_batch_table_rows
+
+    fp_empty = tmp_path / "ODN-623_empty.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "チェックシート"
+    ws["D8"] = None
+    wb.save(fp_empty)
+    wb.close()
+
+    fp_ok = tmp_path / "ODN-623_ok.xlsx"
+    wb2 = Workbook()
+    ws2 = wb2.active
+    assert ws2 is not None
+    ws2.title = "チェックシート"
+    ws2["D8"] = "PT123"
+    wb2.save(fp_ok)
+    wb2.close()
+
+    data = {
+        "id": "odn623_blank_singleton",
+        "items": [
+            {
+                "id": "item_eq",
+                "name": "機器番号",
+                "write_mode": "append",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "チェックシート",
+                        "cell_ref": "D8",
+                        "row_offset": 0,
+                        "col_offset": 0,
+                        "repeat_direction": "vertical",
+                        "repeat_until_empty": False,
+                        "repeat_max": 1,
+                        "skip_empty_primary": True,
+                        "skip_primary_match": ",-,ー",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "ODN-623",
+                            "file_name_rule": "含む",
+                            "sheet_rule": "含む",
+                            "link_defs": [
+                                {
+                                    "cell": "FIXED",
+                                    "mode": "固定値",
+                                    "item": "製品コード",
+                                    "row": 0,
+                                    "col": 0,
+                                }
+                            ],
+                            "join_defs": [],
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "item_pc",
+                "name": "製品コード",
+                "write_mode": "fill_in",
+                "sources": [],
+            },
+        ],
+        "match_keys": [],
+        "excel_options": {"output_target": "active_sheet", "write_mode": "append"},
+    }
+    headers, rows, _, _ = compute_batch_table_rows(
+        data,
+        [str(fp_empty), str(fp_ok)],
+        max_table_rows=50,
+        probe_caller="excel_batch_submit",
+    )
+    assert headers[:2] == ["機器番号", "製品コード"]
+    assert len(rows) == 1
+    eq = str(rows[0][0]).lstrip("'") if rows[0][0] is not None else ""
+    assert eq == "PT123"
+    # 全列空の余白行が混ざらない
+    assert not any(
+        all((c is None or str(c).strip() in ("", "'")) for c in r) for r in rows
+    )
+
+
+def test_batch_no_matching_sheet_emits_no_blank_row(tmp_path: Path) -> None:
+    """ファイル名は条件に合うがシート不一致 → 空バンドルでも余白行を出さない。"""
+    from svc.svc_data_agg import compute_batch_table_rows
+
+    fp = tmp_path / "【other】no_sheet.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "別シート"
+    ws["A1"] = "x"
+    wb.save(fp)
+    wb.close()
+
+    data = {
+        "id": "odn623_no_sheet",
+        "items": [
+            {
+                "id": "item_eq",
+                "name": "機器番号",
+                "write_mode": "append",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "sheet_name": "チェックシート",
+                        "cell_ref": "D8",
+                        "row_offset": 0,
+                        "col_offset": 0,
+                        "repeat_direction": "vertical",
+                        "repeat_until_empty": False,
+                        "repeat_max": 1,
+                        "skip_empty_primary": True,
+                        "skip_primary_match": ",-,ー",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "【",
+                            "file_name_rule": "含む",
+                            "sheet_rule": "含む",
+                            "link_defs": [],
+                            "join_defs": [],
+                        },
+                    }
+                ],
+            }
+        ],
+        "match_keys": [],
+        "excel_options": {"output_target": "active_sheet", "write_mode": "append"},
+    }
+    _headers, rows, _, _ = compute_batch_table_rows(
+        data,
+        [str(fp)],
+        max_table_rows=50,
+        probe_caller="excel_batch_submit",
+    )
+    assert rows == []

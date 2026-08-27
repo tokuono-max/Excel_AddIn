@@ -102,6 +102,7 @@ class _UndoDoneDialog(QDialog):
             _normalize_message_newlines,
             _warning_icon_pixmap,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         # タイトル・本文: 画面種別（UNDO_DONE / UNDO_FAILED）に応じた screen_cfg と req から取得
@@ -141,7 +142,7 @@ class _UndoDoneDialog(QDialog):
         btn_ok = QPushButton(btn_label or "OK")
         btn_tip = str(self._screen_cfg.get("BTN_OK_TOOLTIP") or "").strip()
         if btn_tip:
-            btn_ok.setToolTip(btn_tip)
+            set_widget_tooltip(btn_ok, btn_tip)
         btn_ok.clicked.connect(self._on_ok)
         row_btn.addWidget(btn_ok)
         lay.addLayout(row_btn)

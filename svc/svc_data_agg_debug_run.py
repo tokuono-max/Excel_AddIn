@@ -407,12 +407,14 @@ def _name_extract_phase2_colvals_and_tips(
             p_res = Path(fp)
         norm_fp = normalize_source_path(fp)
         norm_dir = normalize_source_path(p_res.parent)
-        prim_vals = list(b.get("primary_values") or [None])
+        prim_vals = list(b.get("primary_values") or [])
         piv = b.get("path_item_values") or {}
         pvs = (piv.get(pit_label) if pit_label else None) or []
         if not isinstance(pvs, list):
             pvs = []
-        n = max(len(prim_vals), len(pvs), 1)
+        n = max(len(prim_vals), len(pvs))
+        if n < 1:
+            continue
         for k in range(n):
             pv = prim_vals[k] if k < len(prim_vals) else None
             pk = "" if pv is None else str(pv).strip()
@@ -554,7 +556,7 @@ def _name_extract_debug_phase_result(
         ordered_unique: list[str] = []
         for fp in hit_files:
             b = cache.get(fp) or {}
-            for v in b.get("primary_values") or [None]:
+            for v in b.get("primary_values") or []:
                 s = "" if v is None else str(v).strip()
                 if s and s not in seen_prim:
                     seen_prim.add(s)
@@ -588,7 +590,7 @@ def _name_extract_debug_phase_result(
         seen_u: set[str] = set()
         for fp in hit_files:
             b = cache.get(fp) or {}
-            for v in b.get("primary_values") or [None]:
+            for v in b.get("primary_values") or []:
                 sx = "" if v is None else str(v).strip()
                 if sx and sx not in seen_u:
                     seen_u.add(sx)
@@ -1217,7 +1219,7 @@ def _flatten_map_values(
         if not isinstance(mp, dict):
             continue
         for _tgt, vals in mp.items():
-            for v in vals or [None]:
+            for v in vals or []:
                 if len(flat) >= max_rows:
                     return _cap_list_capped(flat, max_rows)
                 flat.append("" if v is None else str(v))

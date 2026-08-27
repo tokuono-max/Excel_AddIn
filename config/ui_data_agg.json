@@ -816,17 +816,24 @@
         "LABEL_LINK_CHECKS": "加工",
         "LABEL_LINK_CARRY_EMPTY": "空欄は前回値を保持",
         "TIP_LINK_CARRY_EMPTY": "同じシート内で、空欄の連携値に直前の非空値を入れます。先頭が空なら空のままです。シートやファイルが変わるとリセットします。",
+        "TIP_LINK_CELL_OR_FIXED": "セル参照は A1 形式。複数セルは「D10+D11」のように + で左から順に結合（区切り文字なし）。空セルは空文字。行・列オフセットは各セルに同じだけ適用。固定値モード時はその文字列。",
+        "TIP_SPIN_LINK_ROW": "連携値の各基準セルからの行オフセットです（複数セル結合時も各セルに同じオフセット）。",
+        "TIP_SPIN_LINK_COL": "連携値の各基準セルからの列オフセットです（複数セル結合時も各セルに同じオフセット）。",
         "LINK_CHECK_LABELS": [
           "トリム",
           "全角→半角",
           "年月日変換"
         ],
         "BTN_LINK_ADD": "＋ 連携キー追加",
+        "TIP_BTN_LINK_ADD": "連携キーがまだ無いとき、最初の1件を追加します。2件目以降は各定義の「下に挿入」を使います。",
+        "BTN_LINK_INSERT": "下に挿入",
+        "TIP_BTN_LINK_INSERT": "この連携キー定義の直後に、新しい定義を差し込みます。末尾に足すときも一番下の定義で挿入します。",
         "BTN_LINK_REMOVE": "削除",
+        "TIP_BTN_LINK_REMOVE": "この連携キー定義を削除します。",
         "LABEL_LINK_NORMALIZE": "正規化",
         "LABEL_LINK_REPLACE": "置換",
         "MSG_LINK_KEY_MAX": "連携キー定義は最大50件までです。",
-        "LINK_AND_HINT_HTML": "<i>＋ ボタンで連携キーを追加</i>",
+        "LINK_AND_HINT_HTML": "<i>未設定時は「＋ 連携キー追加」。追加後は各定義の「下に挿入」で直後（末尾含む）に差し込みます</i>",
         "LINK_DEFAULT_CELLS": [
           "B2"
         ],

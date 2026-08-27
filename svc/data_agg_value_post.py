@@ -13,8 +13,17 @@ _YMD_HM_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{1,2}:\d{2}$")
 
 
 def _coerce_cell_scalar_to_full_text(val: Any) -> str:
-    """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。"""
-    return scalar_to_text(val)
+    """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。
+
+    セル内改行（結合セルの折り返し等）は除去する（例: 「電\\n源」→「電源」）。
+    シナリオ／マスタ／本番の抽出共通経路で効く。
+    """
+    s = scalar_to_text(val)
+    if not s:
+        return s
+    if "\n" in s or "\r" in s:
+        s = s.replace("\r\n", "").replace("\n", "").replace("\r", "")
+    return s
 
 
 def apply_check_labels(val: Any, labels: list[Any] | None, *, raw: Any | None = None) -> str:

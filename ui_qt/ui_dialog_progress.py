@@ -60,6 +60,7 @@ from ui_qt.ui_common import (
     center_on_parent_widget,
     enable_excel_window,
     ensure_front,
+    set_widget_tooltip,
     _set_owner_hwnd,
     _keep_modeless,
     teardown_feature_ui_shared_state,
@@ -426,7 +427,7 @@ class ProgressDialog(QDialog):
             try:
                 tt_c = str(_cfg.get("PROGRESS_CANCEL_TOOLTIP") or "").strip()
                 if tt_c:
-                    self._btn_cancel.setToolTip(tt_c)
+                    set_widget_tooltip(self._btn_cancel, tt_c)
             except Exception:
                 pass
             _conn = Qt.ConnectionType.AutoConnection

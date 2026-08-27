@@ -4060,7 +4060,8 @@ def _batch_file_extract_and_merge(
                 cancel_check=cancel_check,
             )
             bundles.append(b)
-            prim_vals = b.get("primary_values") or [None]
+            # 空リストを [None] にしない（空スキップ後の余白行を防ぐ）
+            prim_vals = list(b.get("primary_values") or [])
             if record_item_timing:
                 try:
                     _agg_diag.info(
@@ -4926,7 +4927,7 @@ def compute_batch_table_rows(
                         if diag_on and not srcs:
                             _agg_diag.info(
                                 "[DATA_AGG_DIAG] item_empty_sources file=%s idx=%s item=%s "
-                                "primary=blank_singleton",
+                                "primary=empty_no_row",
                                 str(file_path),
                                 i,
                                 str(it.get("name") or it.get("id") or ""),
@@ -4941,7 +4942,8 @@ def compute_batch_table_rows(
                             cancel_check=_item_cancel_check,
                         )
                         bundles.append(b)
-                        prim_vals = b.get("primary_values") or [None]
+                        # 空リストを [None] にしない（空スキップ後の余白行を防ぐ）
+                        prim_vals = list(b.get("primary_values") or [])
                         if diag_on:
                             src0 = (it_eff.get("sources") or [{}])[0]
                             if not isinstance(src0, dict):

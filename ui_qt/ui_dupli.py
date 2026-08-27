@@ -981,7 +981,12 @@ class DupliReportDialog(QDialog):
         title = str(self._req.get("title") or "").strip() or str(rep.get("TITLE_TEMPLATE") or "重複レポート")
         self.setWindowTitle(title)
 
-        from ui_qt.ui_common import apply_tooltip_if_set, apply_window_config
+        from ui_qt.ui_common import (
+            _normalize_tooltip_text,
+            apply_tooltip_if_set,
+            apply_window_config,
+            set_widget_tooltip,
+        )
 
         apply_window_config(self, {"WINDOW": _win_rep}, self._parent_hwnd, "REPORT")
         self._hc_prepare_window_cfg = dict(_win_rep)
@@ -1044,14 +1049,14 @@ class DupliReportDialog(QDialog):
         tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         tt_tbl = str(rep.get("TABLE_TOOLTIP") or "").strip()
         if tt_tbl:
-            tbl.setToolTip(tt_tbl)
+            set_widget_tooltip(tbl, tt_tbl)
 
         for ci in range(min(ncol, len(headers))):
             ht = str(headers[ci].get("tooltip") or headers[ci].get("TOOLTIP") or "").strip()
             if ht:
                 it = tbl.horizontalHeaderItem(ci)
                 if it is not None:
-                    it.setToolTip(ht)
+                    it.setToolTip(_normalize_tooltip_text(ht))
 
         # 重複行の先頭列を薄いオレンジで区別
         dup_brush = QBrush(QColor(255, 245, 230))
@@ -1091,9 +1096,9 @@ class DupliReportDialog(QDialog):
         tt_goto = str(rep.get("BTN_GOTO_TOOLTIP") or "").strip()
         tt_close = str(rep.get("BTN_CLOSE_TOOLTIP") or "").strip()
         if tt_goto:
-            btn_goto.setToolTip(tt_goto)
+            set_widget_tooltip(btn_goto, tt_goto)
         if tt_close:
-            btn_close.setToolTip(tt_close)
+            set_widget_tooltip(btn_close, tt_close)
         btn_goto.clicked.connect(lambda: self._do_goto(tbl))
         btn_close.clicked.connect(self._on_report_close_clicked)
 
@@ -1120,7 +1125,7 @@ class DupliReportDialog(QDialog):
                 pass
             tt_intro = str(rep.get("REPORT_INTRO_TOOLTIP") or "").strip()
             if tt_intro:
-                lbl_intro.setToolTip(tt_intro)
+                set_widget_tooltip(lbl_intro, tt_intro)
             lay.addWidget(lbl_intro)
         lbl_count = QLabel(count_line)
         try:
@@ -1133,7 +1138,7 @@ class DupliReportDialog(QDialog):
             pass
         tt_count = str(rep.get("COUNT_CAPTION_TOOLTIP") or "").strip()
         if tt_count:
-            lbl_count.setToolTip(tt_count)
+            set_widget_tooltip(lbl_count, tt_count)
         lay.addWidget(lbl_count)
         lay.addWidget(tbl)
         lay.addLayout(lay_h)
@@ -2203,6 +2208,7 @@ class _DupliDoneDialog(QDialog):
             _warning_icon_pixmap,
             apply_tooltip_if_set,
             apply_window_config,
+            set_widget_tooltip,
         )
 
         lay = QVBoxLayout(self)
@@ -2218,7 +2224,7 @@ class _DupliDoneDialog(QDialog):
                     icon_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                     icon_tip = str(self._done_cfg.get("ICON_TOOLTIP") or "").strip()
                     if icon_tip:
-                        icon_lbl.setToolTip(icon_tip)
+                        set_widget_tooltip(icon_lbl, icon_tip)
                     lay.addWidget(icon_lbl)
             except Exception:
                 pass
@@ -2232,7 +2238,7 @@ class _DupliDoneDialog(QDialog):
             pass
         msg_tip = str(self._done_cfg.get("MSG_TOOLTIP") or "").strip()
         if msg_tip:
-            msg_lbl.setToolTip(msg_tip)
+            set_widget_tooltip(msg_lbl, msg_tip)
         lay.addWidget(msg_lbl)
         lay.addStretch(1)
         row_btn = QHBoxLayout()
@@ -2241,7 +2247,7 @@ class _DupliDoneDialog(QDialog):
         btn_ok = QPushButton(btn_label or "OK")
         btn_tip = str(self._done_cfg.get("BTN_OK_TOOLTIP") or "").strip()
         if btn_tip:
-            btn_ok.setToolTip(btn_tip)
+            set_widget_tooltip(btn_ok, btn_tip)
         btn_ok.clicked.connect(self._on_ok)
         row_btn.addWidget(btn_ok)
         lay.addLayout(row_btn)

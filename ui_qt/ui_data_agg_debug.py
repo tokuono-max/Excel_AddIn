@@ -4,9 +4,9 @@ Python: 3.12+
 Module: ui_qt/ui_data_agg_debug.py
 Purpose: データ集約デバッグウィンドウ（要求定義 §3.1.3）。文言・列見出し・ツールチップは config/ui_data_agg.json の SCREENS.DEBUG（TIP_*）。
 History (latest 3):
+  - 2026-08-27 シナリオ結果の #n[項目] 展開: 形式外1行で全体失敗しない（POWが連携キー1列のままになる対策）。
   - 2026-08-26 シナリオデバッグの前置「・」は live_items の carry_empty を参照（scenario_for_dry_run 未渡し対策）。
   - 2026-08-26 デバッグ結果一覧: 前置保持(carry_empty)対象の項目名文頭に「・」（本番一括は対象外）。
-  - 2026-08-24 シナリオ結果一覧—フェーズ境界（_value_col_spans の先頭列）に太縦線（本体・列見出し）。行はフェーズ間で揃えない。
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ except Exception:
     _diag_logger = _logger
 
 from core.core_log import get_data_agg_diag_logger
-from ui_qt.ui_common import _deep_merge, _normalize_message_newlines
+from ui_qt.ui_common import _deep_merge, _normalize_tooltip_text, _normalize_message_newlines, set_widget_tooltip
 from ui_qt.ui_common import create_progress_dialog
 _data_agg_probe_log = get_data_agg_diag_logger()
 
@@ -296,6 +296,46 @@ def _parse_hash_bracket_column_values(colvals: list[str]) -> dict[str, list[str]
         tgt = (m.group(2) or "").strip() or "未指定"
         out.setdefault(tgt, []).append(str(m.group(3)))
     return out
+
+
+def expand_hash_bracket_value_groups(
+    colvals: list[str],
+) -> list[tuple[str, list[str]]] | None:
+    """
+    シナリオ結果の連携／結合列: #n[項目名] 値 を項目列へ展開する。
+
+    1 行でも形式外があると従来は展開全体を諦めて「連携キー」1 列のままになっていた。
+    形式に合う行だけを採用し、1 件でも取れれば展開する（形式外は無視）。
+    展開できないときは None。
+    """
+    groups: dict[str, tuple[str, list[str]]] = {}
+    skipped = 0
+    for v in colvals:
+        m = re.match(r"^#(\d+)\[([^\]]*)\]\s*(.*)$", str(v))
+        if not m:
+            skipped += 1
+            continue
+        key = m.group(1)
+        tgt = (m.group(2) or "").strip() or "未指定"
+        val = m.group(3)
+        if key not in groups:
+            groups[key] = (tgt, [])
+        groups[key][1].append(val)
+    if not groups:
+        return None
+    if skipped:
+        try:
+            _diag_logger.info(
+                "[DATA_AGG_DEBUG] hash_bracket_expand skip_non_matching=%s matched_keys=%s",
+                skipped,
+                len(groups),
+            )
+        except Exception:
+            pass
+    return [
+        (groups[k][0], list(groups[k][1]))
+        for k in sorted(groups.keys(), key=lambda x: int(x))
+    ]
 
 
 _CARRY_EMPTY_HEADER_MARK = "・"
@@ -1154,16 +1194,17 @@ class DataAggDebugDialog(QDialog):
 
     def _tip(self, key: str, default: str = "") -> str:
         """DEBUG 用ツールチップ文言（プレーン）。JSON の TIP_* を想定。"""
-        return _normalize_message_newlines(str(self._cfg.get(key) or default).strip())
+        raw = str(self._cfg.get(key) or default).strip()
+        return _normalize_tooltip_text(raw) if raw else ""
 
     def _set_tip(self, w: QWidget | None, key: str, default: str = "") -> None:
         if w is None:
             return
-        t = self._tip(key, default).strip()
+        t = self._tip(key, default)
         if not t and default:
-            t = _normalize_message_newlines(str(default).strip())
+            t = _normalize_tooltip_text(str(default).strip())
         if t:
-            w.setToolTip(t)
+            set_widget_tooltip(w, t)
 
     def _debug_window_title_for_mode(self) -> str:
         if self._mode == 0:
@@ -4350,7 +4391,9 @@ class DataAggDebugDialog(QDialog):
                     src = s.get("source")
                     if isinstance(src, dict):
                         it.setToolTip(
-                            scenario_source_tooltip_plain(src, dn, detail_cell_cfg=dcell)
+                            _normalize_tooltip_text(
+                                scenario_source_tooltip_plain(src, dn, detail_cell_cfg=dcell)
+                            )
                         )
                     self.left_table.setItem(i, 0, it)
                 self.left_table.selectRow(self._sc_idx)
@@ -4860,7 +4903,7 @@ class DataAggDebugDialog(QDialog):
             for c in range(nc):
                 tx = str(row[c]) if c < len(row) else ""
                 cell = QTableWidgetItem(tx)
-                cell.setToolTip(tx)
+                cell.setToolTip(_normalize_tooltip_text(tx))
                 self.value_grid.setItem(r, c, cell)
         for c in range(nc):
             hdr_v.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
@@ -5045,8 +5088,8 @@ class DataAggDebugDialog(QDialog):
                         row_tip = scenario_source_tooltip_plain(src0, dn, detail_cell_cfg=dcell)
                     else:
                         row_tip = _format_condition_step_tooltip(ckey, s)
-                    it0.setToolTip(row_tip)
-                    it1.setToolTip(row_tip)
+                    it0.setToolTip(_normalize_tooltip_text(row_tip))
+                    it1.setToolTip(_normalize_tooltip_text(row_tip))
                     self.left_steps.setItem(r, 0, it0)
                     self.left_steps.setItem(r, 1, it1)
             else:
@@ -5096,7 +5139,7 @@ class DataAggDebugDialog(QDialog):
                     else:
                         row_tip = _format_condition_step_tooltip(step_txt, slot)
                     for it in (it0, it1, it2):
-                        it.setToolTip(row_tip)
+                        it.setToolTip(_normalize_tooltip_text(row_tip))
                     self.left_steps.setItem(r, 0, it0)
                     self.left_steps.setItem(r, 1, it1)
                     self.left_steps.setItem(r, 2, it2)
@@ -5261,7 +5304,7 @@ class DataAggDebugDialog(QDialog):
                 self._tree_paint_parent_item_column(top, 1)
                 step_tip = _format_condition_step_tooltip(key, slot)
                 for col in range(3):
-                    top.setToolTip(col, step_tip)
+                    top.setToolTip(col, _normalize_tooltip_text(step_tip))
                 self._tree_add_slot_children(top, slot)
                 self.cond_tree.addTopLevelItem(top)
             self.cond_tree.collapseAll()
@@ -5296,7 +5339,7 @@ class DataAggDebugDialog(QDialog):
                 else:
                     row_tip = _format_condition_step_tooltip(step_txt, slot)
                 for col in range(3):
-                    top.setToolTip(col, row_tip)
+                    top.setToolTip(col, _normalize_tooltip_text(row_tip))
                 self._tree_add_slot_children(top, slot)
                 self.master_cond_tree.addTopLevelItem(top)
             self.master_cond_tree.collapseAll()
@@ -8878,7 +8921,7 @@ class DataAggDebugDialog(QDialog):
                 raw = _cell_raw(r, c)
                 tx = "" if raw is None else str(raw)
                 cell = QTableWidgetItem(tx)
-                cell.setToolTip(tx)
+                cell.setToolTip(_normalize_tooltip_text(tx))
                 self.value_grid.setItem(r, c, cell)
                 _pe_n += 1
                 if _pe_n % 48 == 0:
@@ -9127,25 +9170,16 @@ class DataAggDebugDialog(QDialog):
                 rt = list(self._value_col_tooltips[i])
                 if len(rt) == len(colvals):
                     row_tips = rt
-            groups: dict[str, tuple[str, list[str]]] = {}
+            groups_exp: list[tuple[str, list[str]]] | None = None
             if not (
                 self._mode == 0 and self._scenario_source_kind() == "name_extract"
             ):
-                for v in colvals:
-                    m = re.match(r"^#(\d+)\[([^\]]*)\]\s*(.*)$", str(v))
-                    if not m:
-                        groups = {}
-                        break
-                    key = m.group(1)
-                    tgt = (m.group(2) or "").strip() or "未指定"
-                    val = m.group(3)
-                    if key not in groups:
-                        groups[key] = (tgt, [])
-                    groups[key][1].append(val)
-            if groups:
+                groups_exp = expand_hash_bracket_value_groups(
+                    [str(x) for x in colvals]
+                )
+            if groups_exp:
                 start = len(expanded)
-                for k in sorted(groups.keys(), key=lambda x: int(x)):
-                    tgt, vals = groups[k]
+                for tgt, vals in groups_exp:
                     expanded.append((tgt, vals, None))
                 self._value_col_spans.append((start, len(expanded) - 1))
             else:
@@ -9206,7 +9240,7 @@ class DataAggDebugDialog(QDialog):
                     tip = coltips[r]
                     if tip:
                         tip_txt = str(tip)
-                it.setToolTip(tip_txt)
+                it.setToolTip(_normalize_tooltip_text(tip_txt))
                 self.value_grid.setItem(r, ci, it)
                 _pe_n += 1
                 if _pe_n % 48 == 0:
