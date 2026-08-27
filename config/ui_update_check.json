@@ -116,7 +116,7 @@
         "SHOW_MINIMIZE": false,
         "SHOW_MAXIMIZE": false,
         "DEFAULT_WIDTH": 600,
-        "DEFAULT_HEIGHT": 360,
+        "DEFAULT_HEIGHT": 480,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
         "TOPMOST": true

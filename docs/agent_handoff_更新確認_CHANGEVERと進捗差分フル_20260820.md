@@ -7,10 +7,10 @@
 | 系統 | 版 | 今回配るか |
 |------|-----|------------|
 | **APL（bin）** | **1.1.9.4**（`VERSION.txt`） | **配る** |
-| **config** | catalog の `config.latest_version` を **現行より上げる** | **配る**（`ui_update_check.json` の窓 600×360） |
-| **bootstrap** | **1.0.8**（`BOOTSTRAP_VERSION.txt`） | **配らない**（1 番のバックアップ廃止は 1.1.8.4 / 1.0.8 で済み） |
+| **config** | catalog の `config.latest_version` を **現行より上げる** | **配る**（`ui_update_check.json` の窓 600×480） |
+| **bootstrap** | **1.0.9**（`BOOTSTRAP_VERSION.txt`） | **配らない**（1 番のバックアップ廃止は 1.1.8.4 / 1.0.8 で済み。現行リポジトリは 1.0.9） |
 
-`catalog.bin.latest_version` = `1.1.9.4`。`catalog.bootstrap.latest_version` は現場の **1.0.8 のまま**。
+`catalog.bin.latest_version` = `1.1.9.4`。`catalog.bootstrap.latest_version` は現場の現行（例: **1.0.8 / 1.0.9**）のまま上げない。
 
 ---
 
@@ -27,7 +27,7 @@
 
 ### 2.1 確認 UI（APL）
 
-起動時またはリボン「更新確認」。窓 **600×360**（新 config 適用後）、本文はスクロール。1 行は幅まかせ（日本語おおよそ 40 字）。
+起動時またはリボン「更新確認」。窓 **600×480**（新 config 適用後）、本文はスクロール。1 行は幅まかせ（日本語おおよそ 40 字）。
 
 ```
 新しいバージョンがあります。
@@ -41,7 +41,7 @@
 ```
 
 - 出すのは **今の版より新しく、配布版以下** の節だけ。
-- 履歴ブロックは最大 **8 行**（版番号行＋箇条書き。見出し「変更内容:」は含まない）。超えたら `（続きは CHANGEVER.txt）`。
+- 履歴ブロックは **該当節の行をすべて表示**（行数は CHANGEVER.txt の内容に追従。見出し「変更内容:」は含まない）。任意で `max_lines>0` を渡したときだけ打ち切り、`（続きは CHANGEVER.txt）` を付与。
 - ファイルが無い／読めないときは、今どおり版番号だけ。
 - **bin 確認には `[1.x.x.x]`（APL）の節だけ。** `[bootstrap x.y.z]` は bootstrap 単独確認のときだけ。
 
@@ -52,7 +52,7 @@
 | 何 | 1.1.8.4 → 1.1.9.4 | 1.1.9.4 が入ったあとの **次の** APL 更新 |
 |--|--|--|
 | 確認の履歴 | 出ない（読む APL が旧） | 出る（CHANGEVER.txt があれば） |
-| 確認窓 600×360 | config が先に入れば大きくなるが、本文は旧 UI | 新 UI |
+| 確認窓 600×480 | config が先に入れば大きくなるが、本文は旧 UI | 新 UI |
 | 進捗の差分／フル | 出ない（適用するのは旧 `hc_updater`） | 出る |
 
 別 PC で履歴・進捗を見るには、**1.1.9.4 を入れたあと**、catalog の bin を仮にさらに上げて 2 回目の更新を走らせる。
@@ -89,7 +89,7 @@ Nuitka / `pack.bat` / インストーラは **`CHANGEVER.txt` を自動生成し
 
 1. **APL `1.1.9.4`** をビルドし、`catalog.bin.latest_version` を `1.1.9.4` にする。
 2. **config zip を作り直す**（中に新しい `ui_update_check.json`）。`catalog.config.latest_version` を現行より上げる。`config.min_bin_version` は `1.1.9.4` 以下（推奨: `1.1.9.4`。新 JSON を旧 APL に先に入れない）。
-3. **bootstrap zip は触らない。** `BOOTSTRAP_VERSION.txt` は **1.0.8**。catalog の bootstrap 版も 1.0.8 のまま。
+3. **bootstrap zip は触らない。** リポジトリの `BOOTSTRAP_VERSION.txt` は **1.0.9**。catalog の bootstrap 版も現場現行のまま上げない。
 4. **§3.1 のとおり `CHANGEVER.txt` を手で用意し**、`catalog.json` と同じフォルダに置く。
 5. catalog に次を足す（省略時は同フォルダの `CHANGEVER.txt` を探す）。
 
@@ -109,7 +109,7 @@ Nuitka / `pack.bat` / インストーラは **`CHANGEVER.txt` を自動生成し
 - 進捗で差分／フルを区別
 ```
 
-bootstrap を将来上げるときだけ `[bootstrap 1.0.x]` を足す。
+bootstrap の変更履歴は `CHANGEVER.txt` の `[bootstrap 1.0.9]` のように **`BOOTSTRAP_VERSION.txt` と揃えた版** で書く。将来上げて変更があるときだけ新しい節を足す。
 
 ---
 
@@ -118,11 +118,11 @@ bootstrap を将来上げるときだけ `[bootstrap 1.0.x]` を足す。
 | ファイル | 内容 |
 |----------|------|
 | `VERSION.txt` | `1.1.9.4` |
-| `BOOTSTRAP_VERSION.txt` | `1.0.8`（上げない） |
-| `core/changever.py` | 読み取り・節解析・8 行整形 |
+| `BOOTSTRAP_VERSION.txt` | `1.0.9`（このリリースでは上げない／配らない） |
+| `core/changever.py` | 読み取り・節解析・該当節の全行整形（任意 max_lines） |
 | `core/packaged_update.py` | 確認文面に履歴ブロックを連結 |
 | `ui_qt/ui_update_check.py` | CONFIRM をスクロール可能な本文に |
-| `config/ui_update_check.json` | 窓 600×360、進捗の差分／フルキー |
+| `config/ui_update_check.json` | 窓 600×480、進捗の差分／フルキー |
 | `hc_updater.py` | `updater_busy_title` / `updater_busy_body` |
 | `installer/catalog.sample.json` | `release_notes.relative_path` |
 | `installer/CHANGEVER.sample.txt` | 雛形 |
@@ -145,5 +145,5 @@ python -m pytest tests/test_changever.py tests/test_hc_updater_progress_text.py 
 - **`CHANGEVER.txt` はビルド成果物ではない。** 配布前に手で用意し、catalog と同じフォルダへ置く（§3.1）。
 - 履歴は **zip 内ではなく配布ルート**。更新前の APL が次の更新で読む。
 - 確認 UI は APL。進捗の差分／フルは `hc_updater.exe`（bin）。窓サイズは **config**。
-- 進捗文言は JSON が古くても `hc_updater` 内のフォールバックで出る。窓 600×360 は **新 config が必要**。
+- 進捗文言は JSON が古くても `hc_updater` 内のフォールバックで出る。窓 600×480 は **新 config が必要**。
 - `{changelog}` を format に載せると `CHANGEVER.txt` 内の `{` で壊れるので、本文の後ろに連結している。

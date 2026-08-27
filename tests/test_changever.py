@@ -45,7 +45,19 @@ def test_format_bin_range_only() -> None:
     assert block.startswith("変更内容:")
 
 
-def test_format_truncate_max_lines() -> None:
+def test_format_shows_all_lines_by_default() -> None:
+    """既定は上限なし。CHANGEVER に書いた該当行をすべて表示する。"""
+    lines = "\n".join(f"- item{i}" for i in range(1, 14))
+    text = f"[1.1.9.4]\n{lines}\n"
+    block = format_changever_block(
+        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+    )
+    assert "item1" in block
+    assert "item13" in block
+    assert "（続きは CHANGEVER.txt）" not in block
+
+
+def test_format_truncate_when_max_lines_set() -> None:
     lines = "\n".join(f"- item{i}" for i in range(1, 12))
     text = f"[1.1.9.4]\n{lines}\n"
     block = format_changever_block(
@@ -53,6 +65,23 @@ def test_format_truncate_max_lines() -> None:
     )
     assert "（続きは CHANGEVER.txt）" in block
     assert "item9" not in block
+
+
+def test_format_current_changever_file() -> None:
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "CHANGEVER.txt").read_text(
+        encoding="utf-8"
+    )
+    block = format_changever_block(
+        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+    )
+    assert "1.1.9.4" in block
+    assert "複数セル結合" in block
+    assert "blank singleton" in block
+    assert "（続きは CHANGEVER.txt）" not in block
+    # bootstrap は bin 確認には出ない
+    assert "旧版バックアップ" not in block
 
 
 def test_format_empty_when_file_blank() -> None:

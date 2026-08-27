@@ -11,7 +11,8 @@ from packaging.version import InvalidVersion, Version
 
 CHANGEVER_DEFAULT_NAME = "CHANGEVER.txt"
 CHANGEVER_MAX_BYTES = 16384
-CHANGEVER_MAX_LINES = 8
+# 0 以下 = 該当節をすべて表示（行数は CHANGEVER.txt の内容に追従）
+CHANGEVER_MAX_LINES = 0
 
 _HEADER_BRACKET = re.compile(
     r"^\s*\[(?:(?P<kind>bootstrap|apl|bin)\s+)?(?P<ver>[0-9]+(?:\.[0-9]+)+)\]\s*$",
@@ -127,7 +128,11 @@ def format_changever_block(
     header: str = "変更内容:",
     more: str = "（続きは CHANGEVER.txt）",
 ) -> str:
-    """installed < section <= latest の行だけ。空なら空文字。"""
+    """installed < section <= latest の行だけをすべて返す。空なら空文字。
+
+    max_lines > 0 のときだけ行数上限をかけ、超過分は more 文言に置き換える。
+    既定（CHANGEVER_MAX_LINES=0）は CHANGEVER.txt の該当行数に追従して全表示。
+    """
     want = "bootstrap" if str(kind or "").strip().lower() == "bootstrap" else "bin"
     inst = str(installed or "").strip()
     lat = str(latest or "").strip()
@@ -148,9 +153,18 @@ def format_changever_block(
                 out_lines.append(f"- {s}")
     if not out_lines:
         return ""
-    cap = max(1, int(max_lines or CHANGEVER_MAX_LINES))
-    truncated = len(out_lines) > cap
-    body = out_lines[:cap]
+    # max_lines <= 0: 上限なし（CHANGEVER に書いた該当行をすべて出す）
+    try:
+        cap_raw = int(max_lines) if max_lines is not None else 0
+    except (TypeError, ValueError):
+        cap_raw = 0
+    if cap_raw <= 0:
+        truncated = False
+        body = out_lines
+    else:
+        cap = max(1, cap_raw)
+        truncated = len(out_lines) > cap
+        body = out_lines[:cap]
     parts = [str(header or "変更内容:").strip() or "変更内容:"]
     parts.extend(body)
     if truncated:
