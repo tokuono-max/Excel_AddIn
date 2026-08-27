@@ -227,6 +227,34 @@ def _compact_spin(sb: QSpinBox, max_width: int = 76) -> None:
     sb.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
 
+def ascii_upper_cell_ref(text: str) -> str:
+    """セル座標用: ASCII 小文字 a–z のみ大文字化する（他の文字はそのまま）。"""
+    return "".join(ch.upper() if "a" <= ch <= "z" else ch for ch in str(text))
+
+
+def bind_cell_ref_uppercase(
+    edit: QLineEdit,
+    *,
+    enabled_when: Any | None = None,
+) -> None:
+    """
+    座標入力欄で英小文字を入力したら即座に大文字表示へ直す。
+    enabled_when が callable のときは True のときだけ変換（連携の固定値モード用）。
+    """
+
+    def _on_text_changed(text: str) -> None:
+        if callable(enabled_when) and not bool(enabled_when()):
+            return
+        up = ascii_upper_cell_ref(text)
+        if up == text:
+            return
+        pos = edit.cursorPosition()
+        edit.setText(up)
+        edit.setCursorPosition(min(pos, len(up)))
+
+    edit.textChanged.connect(_on_text_changed)
+
+
 def _tight_form(form: QFormLayout, cfg: dict[str, Any] | None = None) -> None:
     c = cfg if isinstance(cfg, dict) else {}
     form.setContentsMargins(0, 0, 0, 0)
@@ -265,11 +293,13 @@ def _apply_form_width_policy(form: QFormLayout, cfg: dict[str, Any] | None) -> N
     field_min = int(_dc(cfg, "DETAIL_FIELD_MIN_WIDTH", 0) or 0)
     for row in range(form.rowCount()):
         li = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
-        if li is not None and li.widget() is not None and label_min > 0:
-            li.widget().setMinimumWidth(label_min)
+        lw = li.widget() if li is not None else None
+        if lw is not None and label_min > 0:
+            lw.setMinimumWidth(label_min)
         fi = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
-        if fi is not None and fi.widget() is not None and field_min > 0:
-            fi.widget().setMinimumWidth(field_min)
+        fw = fi.widget() if fi is not None else None
+        if fw is not None and field_min > 0:
+            fw.setMinimumWidth(field_min)
 
 
 def _add_form_row_combo(
@@ -941,6 +971,7 @@ def build_scenario_detail_cell_scroll(
     le_cell = QLineEdit(str(_dc(cfg, "DEFAULT_CELL_REF", "")))
     le_cell.setMinimumWidth(0)
     le_cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    bind_cell_ref_uppercase(le_cell)
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_CELL_REF", "セル座標")), le_cell)
     refs["cell_ref"] = le_cell
 
@@ -1227,6 +1258,7 @@ def build_scenario_detail_cell_scroll(
         le_lc = QLineEdit("")
         le_lc.setMinimumWidth(0)
         le_lc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bind_cell_ref_uppercase(le_lc, enabled_when=lambda: bool(rad_link_cell.isChecked()))
         gf.addRow(lbl_cell_or_fixed, le_lc)
         sj = QSpinBox()
         sj.setRange(-999, 999)
@@ -1295,11 +1327,17 @@ def build_scenario_detail_cell_scroll(
                 is_fixed = bool(rad_link_fixed.isChecked()) and not is_cell
             else:
                 is_fixed = bool(force_fixed)
+                is_cell = not is_fixed
             lbl_cell_or_fixed.setText(
                 _field_lbl(mode_items[1] if is_fixed else mode_items[0])
             )
             sj.setEnabled(not is_fixed)
             sk.setEnabled(not is_fixed)
+            if is_cell:
+                cur = le_lc.text()
+                up = ascii_upper_cell_ref(cur)
+                if up != cur:
+                    le_lc.setText(up)
         ld["sync_mode_state"] = _sync_link_mode_state
         rad_link_cell.toggled.connect(_sync_link_mode_state)
         rad_link_fixed.toggled.connect(_sync_link_mode_state)
@@ -1543,6 +1581,7 @@ def build_scenario_detail_cell_scroll(
         le_kc = QLineEdit("")
         le_kc.setMinimumWidth(0)
         le_kc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bind_cell_ref_uppercase(le_kc)
         gf_key.addRow(_field_lbl(_dcp(cfg, "LABEL_JOIN_CELL", "セル座標")), le_kc)
         sj = QSpinBox()
         sj.setRange(-999, 999)

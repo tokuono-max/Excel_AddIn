@@ -1515,19 +1515,24 @@ def _append_merged_rows_to_table_chunked(
     n_total = len(merged_rows)
     step = chunk_size if chunk_size is not None else _table_assembly_chunk_size()
     step = max(100, int(step))
-    capped = max_table_rows is not None and max_table_rows > 0
+    if max_table_rows is not None and max_table_rows > 0:
+        capped = True
+        cap_n = int(max_table_rows)
+    else:
+        capped = False
+        cap_n = 0
     offset = 0
     while offset < n_total:
         if cancel_poll is not None:
             cancel_poll(force=True)
-        if capped and len(table_rows) >= max_table_rows:
+        if capped and len(table_rows) >= cap_n:
             return True
         end = min(offset + step, n_total)
         chunk = merged_rows[offset:end]
         kept: list[dict[str, Any]] = []
         for iter_i, r in enumerate(chunk):
             global_i = offset + iter_i
-            if capped and len(table_rows) + len(kept) >= max_table_rows:
+            if capped and len(table_rows) + len(kept) >= cap_n:
                 break
             if not isinstance(r, dict):
                 continue
@@ -1540,7 +1545,7 @@ def _append_merged_rows_to_table_chunked(
             table_rows.extend(_merged_dict_rows_to_table_rows(kept, headers))
         if progress_ph is not None and progress_detail is not None and n_total > 0:
             progress_ph(progress_detail(end, n_total))
-        if capped and len(table_rows) >= max_table_rows:
+        if capped and len(table_rows) >= cap_n:
             return True
         if end >= n_total:
             break
@@ -6271,7 +6276,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     register_batch_worker_pid(sheet_id, ipc_root)
     _finish_release = _finish
 
-    def _finish(  # noqa: F811
+    def _finish_with_pid_clear(
         msg: str,
         *,
         ok: bool,
@@ -6283,6 +6288,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         except Exception:
             pass
         _finish_release(msg, ok=ok, title=title, elapsed_ms=elapsed_ms)
+
+    _finish = _finish_with_pid_clear
 
     batch_sheet_pending_delete: list[Any] = []
 
@@ -6299,6 +6306,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
 
     from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
 
+    if write_pickle is None:
+        raise RuntimeError("write_pickle is not available")
     _prog_write = make_throttled_progress_writer(
         prog_path,
         write_pickle,

@@ -493,9 +493,7 @@ def _normalize_matrix_dates_for_csv(matrix_2d: list[list[Any]]) -> list[list[Any
         return matrix_2d
     out: list[list[Any]] = []
     for row in matrix_2d:
-        if isinstance(row, list):
-            out.append([_normalize_csv_date_cell(v) for v in row])
-        elif isinstance(row, tuple):
+        if isinstance(row, (list, tuple)):
             out.append([_normalize_csv_date_cell(v) for v in row])
         else:
             out.append([_normalize_csv_date_cell(row)])

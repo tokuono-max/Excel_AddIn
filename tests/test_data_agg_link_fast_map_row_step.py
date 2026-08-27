@@ -27,6 +27,7 @@ def _strip_excel_text(v: object) -> str:
 def _make_three_row_xlsx(tmp_path: Path, *, n_units: int = 8) -> Path:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "管理表"
     for i in range(n_units):
         r = 6 + i * 3

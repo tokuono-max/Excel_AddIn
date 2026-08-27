@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 
 def make_throttled_progress_writer(
     prog_path: Path,
-    write_pickle: Callable[[Path, dict[str, Any]], None],
+    write_pickle: Callable[[Path, Any], None],
     *,
     min_interval_sec: float = 0.35,
 ) -> Callable[..., None]:

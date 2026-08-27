@@ -63,6 +63,7 @@ def test_master_preview_mi_idx_skips_future_name_extract_column(tmp_path) -> Non
     p = tmp_path / "ODN_seg2_seg3_tail.xlsx"
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "PN"
     wb.save(p)
@@ -315,6 +316,7 @@ def test_compute_batch_empty_sources_column_not_filename(tmp_path) -> None:
     p = tmp_path / "ODN375_A0512M000001.xlsx"
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "PN123"
     wb.save(p)

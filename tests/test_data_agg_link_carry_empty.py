@@ -140,6 +140,7 @@ def test_apply_carry_empty_leading_blank_stays() -> None:
 def test_same_sheet_fills_blank_with_previous(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     prim = ["P1", "P2", "P3", "P4", "P5"]
     links = ["A", None, "", "B", None]
@@ -172,6 +173,7 @@ def test_same_sheet_fills_blank_with_previous(tmp_path: Path) -> None:
 def test_carry_empty_off_keeps_blanks(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     for i, (p, ln) in enumerate([("P1", "A"), ("P2", None), ("P3", "")], start=1):
         ws[f"A{i}"] = p
@@ -190,7 +192,9 @@ def test_carry_empty_off_keeps_blanks(tmp_path: Path) -> None:
 def test_multi_sheet_does_not_carry_across_sheets(tmp_path: Path) -> None:
     fp = tmp_path / "carry_multi.xlsx"
     wb = Workbook()
-    wb.active.title = "Other"
+    _wb_active = wb.active
+    assert _wb_active is not None
+    _wb_active.title = "Other"
     s1 = wb.create_sheet("R_1")
     s1["A1"] = "P1"
     s1["A2"] = "P2"
@@ -227,6 +231,7 @@ def test_skip_empty_primary_then_carry_does_not_use_dropped_seed(
     """主キースキップ後に前埋め。落ちた行の連携値は種にしない（skip_carry_seed OFF）。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     # 主: P1, 空(skip), P3  / 連携: L1, L2(落ちる), 空
     ws["A1"] = "P1"
@@ -253,6 +258,7 @@ def test_skip_carry_seed_on_uses_dropped_row_link(tmp_path: Path) -> None:
     """skip_carry_seed ON: スキップ行の非空連携値を次行の前置種にする。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["A2"] = None
@@ -278,6 +284,7 @@ def test_skip_carry_seed_on_blank_skip_keeps_previous_last(tmp_path: Path) -> No
     """skip_carry_seed ON でもスキップ行の連携が空なら last を上書きしない。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["A2"] = None
@@ -305,6 +312,7 @@ def test_scenario_debug_skip_carry_seed_on(tmp_path: Path) -> None:
 
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["A2"] = None
@@ -343,7 +351,9 @@ def test_debug_link_phase_applies_carry_per_sheet(tmp_path: Path) -> None:
 
     fp = tmp_path / "carry_debug.xlsx"
     wb = Workbook()
-    wb.active.title = "Other"
+    _wb_active = wb.active
+    assert _wb_active is not None
+    _wb_active.title = "Other"
     s1 = wb.create_sheet("R_1")
     s1["A1"] = "P1"
     s1["A2"] = "P2"

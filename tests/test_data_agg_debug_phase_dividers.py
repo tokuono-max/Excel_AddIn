@@ -18,13 +18,14 @@ if str(_root) not in sys.path:
 
 from ui_qt.ui_data_agg_debug import (  # noqa: E402
     DataAggDebugDialog,
+    _ValueGridPhaseHeader,
     phase_start_columns_from_spans,
 )
 
 
 def _app() -> QApplication:
     app = QApplication.instance()
-    if app is None:
+    if not isinstance(app, QApplication):
         app = QApplication([])
     return app
 
@@ -86,5 +87,6 @@ def test_scenario_value_grid_syncs_phase_starts() -> None:
     assert starts == frozenset({1, 2, 3})
     assert dlg._value_grid_delegate.phase_start_cols == starts
     hdr = dlg.value_grid.horizontalHeader()
+    assert isinstance(hdr, _ValueGridPhaseHeader)
     assert hdr.phase_start_cols == starts
     dlg.close()

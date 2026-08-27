@@ -107,7 +107,7 @@ class DoneDialog(QDialog):
                 self.setWindowModality(Qt.WindowModality.WindowModal)
             except Exception:
                 try:
-                    self.setWindowModality(Qt.WindowModal)
+                    self.setWindowModality(Qt.WindowModality.WindowModal)
                 except Exception:
                     pass
         # 変数: Excel の HWND（閉じるときに操作を有効化するために保持）
@@ -121,7 +121,7 @@ class DoneDialog(QDialog):
             except (TypeError, ValueError):
                 pass
         try:
-            self.setAttribute(Qt.WA_DeleteOnClose, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         except Exception:
             pass
 
@@ -378,7 +378,7 @@ class DoneDialog(QDialog):
         # 文字は上寄せ・ボタンは下寄せ。LIST_STRETCH_BEFORE_BUTTONS=false で余白ストレッチを付けずコンパクトに
         if bool(_cfg.get("LIST_STRETCH_BEFORE_BUTTONS", True)):
             lay.addStretch(1)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         _ok_std = btns.button(QDialogButtonBox.StandardButton.Ok)
         _ok_lbl = str(_cfg.get("BTN_OK") or "").strip()
         if _ok_lbl:
@@ -515,7 +515,7 @@ def _ensure_done_native_window(dlg: DoneDialog) -> None:
         dlg.winId()
     except Exception:
         try:
-            dlg.setAttribute(Qt.WA_NativeWindow, True)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
             dlg.winId()
         except Exception:
             pass

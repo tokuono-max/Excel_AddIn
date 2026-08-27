@@ -609,7 +609,7 @@ def _excel_com_is_busy(exc: BaseException) -> bool:
         return False
     if not isinstance(exc, com_error):
         return False
-    hr = int(exc.hresult)
+    hr = int(getattr(exc, "hresult", 0) or 0)
     if _hresult_u32(hr) in _BUSY_HRESULT_U32:
         return True
     # pywin32 により hresult が符号付き・符号なしでブレるため DISP_E は U32 で判定
@@ -1347,7 +1347,7 @@ def _sheet_id_resolve(ptr_s: Any, sheet_id: str) -> str:
     return f"dupli_{abs(id(ptr_s))}"
 
 
-def check_duplicates(
+def check_duplicates(  # pyright: ignore[reportGeneralTypeIssues]
     target_hwnd: Optional[int] = None,
     sheet_id: str = "",
     selection_areas: Optional[list[str]] = None,

@@ -1182,6 +1182,7 @@ def test_stacked_join_odn375_like_same_file(tmp_path: Path) -> None:
     p = tmp_path / "ODN375_sample.xlsx"
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "ユニット実装チェック"
     ws["P14"] = "UNIT-A"
     ws["P16"] = "DEV-001"
@@ -1305,6 +1306,7 @@ def test_stacked_join_seed_join_matches_as30_without_patch(
     p = tmp_path / "ODN375_pt_match.xlsx"
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "ユニット実装チェック"
     ws["P14"] = "UNIT-A"
     ws["P16"] = "PT4400243759"

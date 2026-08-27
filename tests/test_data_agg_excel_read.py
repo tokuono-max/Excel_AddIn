@@ -60,6 +60,7 @@ def test_xlsx_text_padding_and_general_float(tmp_path) -> None:
     p = tmp_path / "pad.xlsx"
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "00123"
     ws["A2"] = 123

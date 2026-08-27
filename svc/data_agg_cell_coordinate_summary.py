@@ -55,7 +55,8 @@ def cell_coordinate_setting_lines(
     fr = str(pb.get("file_name_rule") or "—")
     fp = str(pb.get("file_pattern") or "").strip()
     fp_disp = fp if fp else "（全件）"
-    ext_tags = pb.get("ext_checked") if isinstance(pb.get("ext_checked"), list) else []
+    _ext_tags = pb.get("ext_checked")
+    ext_tags = _ext_tags if isinstance(_ext_tags, list) else []
     ext_s = "、".join(str(x) for x in ext_tags if str(x).strip()) or "—"
     lines.append(
         "%s%s: %s" % (pfx, _lbl(dc, "LABEL_FILE_NAME_RULE", "ファイル名判定"), fr)
@@ -120,7 +121,8 @@ def cell_coordinate_setting_lines(
             )
         )
 
-    nchk = pb.get("cell_checks") if isinstance(pb.get("cell_checks"), list) else []
+    _nchk = pb.get("cell_checks")
+    nchk = _nchk if isinstance(_nchk, list) else []
     proc = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_CHECKS", "加工"), proc))
 
@@ -141,7 +143,8 @@ def cell_coordinate_setting_lines(
         "%s%s: %s" % (pfx, _lbl(dc, "LABEL_WRITE_MODE_DETAIL", "書込みモード"), wm_txt)
     )
 
-    ldefs = pb.get("link_defs") if isinstance(pb.get("link_defs"), list) else []
+    _ldefs = pb.get("link_defs")
+    ldefs = _ldefs if isinstance(_ldefs, list) else []
     lfmt = str(dc.get("LINK_GROUP_TITLE_FMT") or "連携キー定義 #%d").strip()
     if ldefs:
         for i, ld in enumerate(ldefs):
@@ -164,7 +167,8 @@ def cell_coordinate_setting_lines(
             "%s%s: （なし）" % (pfx, _lbl(dc, "SEC_LINK_TITLE", "4. 連携キー"))
         )
 
-    jdefs = pb.get("join_defs") if isinstance(pb.get("join_defs"), list) else []
+    _jdefs = pb.get("join_defs")
+    jdefs = _jdefs if isinstance(_jdefs, list) else []
     jfmt = str(dc.get("JOIN_GROUP_TITLE_FMT") or "結合キー定義 #%d").strip()
     if jdefs:
         for i, jd in enumerate(jdefs):
@@ -224,7 +228,8 @@ def cell_coordinate_full_detail_lines(
     fr = str(pb.get("file_name_rule") or "—")
     fp = str(pb.get("file_pattern") or "").strip()
     fp_disp = fp if fp else "（全件）"
-    ext_tags = pb.get("ext_checked") if isinstance(pb.get("ext_checked"), list) else []
+    _ext_tags = pb.get("ext_checked")
+    ext_tags = _ext_tags if isinstance(_ext_tags, list) else []
     ext_s = "、".join(str(x) for x in ext_tags if str(x).strip()) or "—"
     _append_section(
         "SEC_FILE_TITLE",
@@ -265,7 +270,8 @@ def cell_coordinate_full_detail_lines(
     else:
         rm = src.get("repeat_max")
         end_disp = "%s: %s" % (n_lbl, rm if rm is not None else "—")
-    nchk = pb.get("cell_checks") if isinstance(pb.get("cell_checks"), list) else []
+    _nchk = pb.get("cell_checks")
+    nchk = _nchk if isinstance(_nchk, list) else []
     proc = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     vss = str(pb.get("value_shape_script") or "").strip()
     wm_txt = fmt_ne_write_mode(dc, pb.get("write_mode_cell_idx"))
@@ -318,7 +324,8 @@ def cell_coordinate_full_detail_lines(
     _append_section("SEC_VALUE_TITLE", "3. 主キー", sec3)
 
     # 4. 連携キー
-    ldefs = pb.get("link_defs") if isinstance(pb.get("link_defs"), list) else []
+    _ldefs = pb.get("link_defs")
+    ldefs = _ldefs if isinstance(_ldefs, list) else []
     link_bodies: list[str] = []
     for i, ld in enumerate(ldefs):
         if not isinstance(ld, dict):
@@ -337,7 +344,8 @@ def cell_coordinate_full_detail_lines(
     _append_section("SEC_LINK_TITLE", "4. 連携キー", link_bodies)
 
     # 5. 結合キー
-    jdefs = pb.get("join_defs") if isinstance(pb.get("join_defs"), list) else []
+    _jdefs = pb.get("join_defs")
+    jdefs = _jdefs if isinstance(_jdefs, list) else []
     join_bodies: list[str] = []
     for i, jd in enumerate(jdefs):
         if not isinstance(jd, dict):

@@ -94,7 +94,7 @@ def com_excel_scalar_int(val: Any, default: int = 0) -> int:
     if isinstance(val, numbers.Integral):
         return int(val)
     if isinstance(val, numbers.Real) and not isinstance(val, bool):
-        return int(val)
+        return int(float(val))
     try:
         inner = getattr(val, "Value", val)
         if inner is None:
@@ -102,7 +102,7 @@ def com_excel_scalar_int(val: Any, default: int = 0) -> int:
         if isinstance(inner, numbers.Integral):
             return int(inner)
         if isinstance(inner, numbers.Real) and not isinstance(inner, bool):
-            return int(inner)
+            return int(float(inner))
         return int(inner)
     except (TypeError, ValueError, AttributeError):
         return default
@@ -247,7 +247,7 @@ def excel_try_set_main_commandbars_enabled(xw_app: Any, enabled: bool) -> None:
         for name in names:
             try:
                 bar = item(name)
-                bar.Enabled = bool(enabled)
+                setattr(bar, "Enabled", bool(enabled))
                 parts.append("%s=ok" % name)
             except Exception as ex:
                 parts.append("%s=fail:%s" % (name, ex))

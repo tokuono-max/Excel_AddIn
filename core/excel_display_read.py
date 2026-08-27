@@ -21,7 +21,7 @@ def use_display_text_for_csv_save() -> bool:
         return False
     if core_env.truthy(core_env.get("HC_CSV_SV_USE_DISPLAY_TEXT")):
         return True
-    if core_env.get("HC_CSV_SV_USE_DISPLAY_TEXT", "").strip().lower() in ("0", "false", "no"):
+    if (core_env.get("HC_CSV_SV_USE_DISPLAY_TEXT") or "").strip().lower() in ("0", "false", "no"):
         return False
     return True
 

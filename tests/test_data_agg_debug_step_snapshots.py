@@ -23,7 +23,7 @@ from ui_qt.ui_data_agg_debug import DataAggDebugDialog  # noqa: E402
 
 def _app() -> QApplication:
     app = QApplication.instance()
-    if app is None:
+    if not isinstance(app, QApplication):
         app = QApplication([])
     return app
 
@@ -108,6 +108,7 @@ def test_master_step_snapshot_uses_table_rows_from_step_cache() -> None:
         assert snap["grid_rows"][0][dummy_mi] == "T4220526000002301O-MHMU"
         assert snap["grid_rows"][0][5] == "2024-01-01"
         assert snap["grid_rows"][1][dummy_mi] == "T4220526000002302O-MHMU"
+        assert dlg._mpv_grid is not None
         assert dlg._mpv_grid[0][pt_mi] == "PT420001"
         assert dlg._mpv_grid[0][dummy_mi] == "T4220526000002301O-MHMU"
     finally:
@@ -159,7 +160,9 @@ def test_master_step_snapshot_restores_summary_and_grid(monkeypatch) -> None:
         assert dlg._value_cols == [["A-001"]]
         assert dlg.value_grid.columnCount() == 1
         assert dlg.value_grid.rowCount() == 1
-        assert dlg.value_grid.item(0, 0).text() == "R1C1"
+        _it0 = dlg.value_grid.item(0, 0)
+        assert _it0 is not None
+        assert _it0.text() == "R1C1"
         assert dlg._mpv_grid == [["R1C1"]]
     finally:
         dlg.close()
@@ -217,7 +220,9 @@ def test_render_mpv_grid_keeps_last_valid_table_rows_when_prog_empty_during_run(
         dlg._render_mpv_grid()
 
         assert dlg._mpv_grid == [["LAST-VALID"]]
-        assert dlg.value_grid.item(0, 0).text() == "LAST-VALID"
+        _it_lv = dlg.value_grid.item(0, 0)
+        assert _it_lv is not None
+        assert _it_lv.text() == "LAST-VALID"
     finally:
         dlg.close()
 
@@ -464,6 +469,7 @@ def test_master_run_blocking_drains_external_hook_queue(monkeypatch) -> None:
 
         hook_q: queue.SimpleQueue = queue.SimpleQueue()
         bridged = dlg._master_bridge_progress_hook(real_hook, hook_q)
+        assert bridged is not None
 
         def worker_fn() -> str:
             bridged(6, "ファイル 3/10: sample.xlsx（候補 100 行）", 3, 10)

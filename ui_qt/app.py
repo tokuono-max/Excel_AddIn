@@ -28,7 +28,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import QApplication
 
-from ui_qt.ui_csv_mg import CsvCsvMergeDialog
+from ui_qt.ui_csv_mg import CsvMergeDialog
 
 _app: Optional[QApplication] = None
 
@@ -64,6 +64,6 @@ def run_merge_dialog(parent_hwnd: int) -> dict:
         dict: accepted/paths/header_mode を含む辞書
     """
     _ = get_qapp()
-    dlg = CsvCsvMergeDialog(parent_hwnd=parent_hwnd, sheet_id='')
+    dlg = CsvMergeDialog(parent_hwnd=parent_hwnd)
     dlg.exec()
     return dlg.get_result()

@@ -47,7 +47,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QEventLoop, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 __version__ = "1.4.65"
@@ -186,7 +186,7 @@ def _quit_nested_event_loops() -> None:
 
 def _close_all_toplevel_widgets() -> None:
     inst = QApplication.instance()
-    if inst is None:
+    if not isinstance(inst, QApplication):
         return
     for w in list(inst.topLevelWidgets()):
         try:
@@ -335,7 +335,7 @@ def _ensure_qapp() -> QApplication:
     """QApplication を必ず1つだけ用意する。"""
     global _QAPP
     inst = QApplication.instance()
-    if inst is not None:
+    if isinstance(inst, QApplication):
         _QAPP = inst
         return inst
     if _QAPP is None:
@@ -507,7 +507,9 @@ def _error_result(message: str, exc: BaseException | None = None) -> dict[str, A
     return {"status": "ERROR", "message": message, "traceback": tb}
 
 
-def _pump_deferred_deletes(app: QApplication, *, max_rounds: int = 40, max_sec: float = 0.25) -> None:
+def _pump_deferred_deletes(
+    app: QCoreApplication, *, max_rounds: int = 40, max_sec: float = 0.25
+) -> None:
     """deleteLater 等の遅延削除をイベントループで消化する（回数・時間の上限付き）。"""
     t0 = time.perf_counter()
     for _ in range(max_rounds):
@@ -1079,7 +1081,6 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
                     _app_sp = QApplication.instance()
                     if _app_sp is not None:
                         _pump_deferred_deletes(_app_sp)
-                    from PySide6.QtCore import QTimer
 
                     def _do_csv_sp_progress_show() -> None:
                         try:

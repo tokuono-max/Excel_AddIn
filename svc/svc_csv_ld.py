@@ -1039,6 +1039,8 @@ def _execute_jit_import(
 
     # 一括書込みは表示停止で高速化（ScreenUpdating 復帰は DONE 後に ACK 待ちで遅延）
     t_csv_read_wait0 = time.perf_counter()
+    if xlc is None:
+        raise RuntimeError("core_xlc is not available")
     with xlc.suspend_sheet_updates(book, restore_on_exit=False):
         for df_chunk in reader:
             ms_csv_read_wait += _elapsed_ms(t_csv_read_wait0)

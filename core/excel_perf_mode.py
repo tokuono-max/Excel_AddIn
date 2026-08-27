@@ -50,11 +50,11 @@ def set_excel_performance_mode(app: Any, on: bool, *, disable_events: bool = Tru
                 api.EnableEvents = False
             api.DisplayAlerts = False
         else:
-            saved = _PERF_MODE_SAVED.pop(key, None)
-            if saved is not None:
-                api.ScreenUpdating = saved.get("ScreenUpdating", True)
-                api.Calculation = saved.get("Calculation", _XL_CALC_AUTO)
-                api.DisplayAlerts = saved.get("DisplayAlerts", True)
+            saved_prev = _PERF_MODE_SAVED.pop(key, None)
+            if saved_prev is not None:
+                api.ScreenUpdating = saved_prev.get("ScreenUpdating", True)
+                api.Calculation = saved_prev.get("Calculation", _XL_CALC_AUTO)
+                api.DisplayAlerts = saved_prev.get("DisplayAlerts", True)
             else:
                 api.ScreenUpdating = True
                 api.Calculation = _XL_CALC_AUTO

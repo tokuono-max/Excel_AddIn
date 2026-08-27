@@ -174,9 +174,10 @@ def _datetime_from_excel_serial(n: float) -> datetime | None:
         import pandas as pd  # type: ignore
 
         ts = pd.Timestamp("1899-12-30") + pd.Timedelta(days=float(n))
-        if pd.isna(ts):
+        if bool(pd.isna(ts)):
             return None
-        return ts.to_pydatetime()
+        dt = ts.to_pydatetime()
+        return dt if isinstance(dt, datetime) else None
     except Exception:
         return None
 

@@ -223,7 +223,8 @@ def _append_cell_source_rows(
     fp = str(pb.get("file_pattern") or "").strip()
     r0[3] = fp if fp else "（全件）"
     r0[4] = fr
-    ext_tags = pb.get("ext_checked") if isinstance(pb.get("ext_checked"), list) else []
+    _ext_tags = pb.get("ext_checked")
+    ext_tags = _ext_tags if isinstance(_ext_tags, list) else []
     r0[5] = "、".join(str(x) for x in ext_tags if str(x).strip()) or "—"
     r0[6] = str(pb.get("sheet_rule") or "—")
     r0[7] = str(src.get("sheet_name") or "").strip() or "—"
@@ -246,7 +247,8 @@ def _append_cell_source_rows(
         r0[11] = n_lbl
         rm = src.get("repeat_max")
         r0[12] = "" if rm is None else str(rm)
-    nchk = pb.get("cell_checks") if isinstance(pb.get("cell_checks"), list) else []
+    _nchk = pb.get("cell_checks")
+    nchk = _nchk if isinstance(_nchk, list) else []
     r0[13] = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     r0[14] = str(pb.get("value_shape_script") or "").strip()
     r0[15] = fmt_ne_write_mode(detail_cell, pb.get("write_mode_cell_idx"))
@@ -296,7 +298,8 @@ def _append_name_source_rows(
     cond = ja_search_cond_static(src.get("search_condition"))
     stx = str(src.get("search_text") or "").strip()
     r0[4] = "%s / %s / %s" % (tgt, cond, stx if stx else "—")
-    ext_tags = pb.get("ext_checked") if isinstance(pb.get("ext_checked"), list) else []
+    _ext_tags = pb.get("ext_checked")
+    ext_tags = _ext_tags if isinstance(_ext_tags, list) else []
     r0[5] = "、".join(str(x) for x in ext_tags if str(x).strip()) or "—"
     # シート列は名前取得では未使用
     r0[6] = ""
@@ -349,7 +352,8 @@ def _append_name_source_rows(
             r0[15] = "%s; %s" % (sm_ja, "; ".join(extra))
         else:
             r0[15] = sm_ja
-    nchk = pb.get("name_checks") if isinstance(pb.get("name_checks"), list) else []
+    _nchk = pb.get("name_checks")
+    nchk = _nchk if isinstance(_nchk, list) else []
     r0[13] = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     r0[14] = str(pb.get("value_shape_script") or "").strip()
     if ex_mode == "fixed":

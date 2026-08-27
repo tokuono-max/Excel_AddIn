@@ -529,6 +529,8 @@ class _TrmExDoneDialog(QDialog):
     メッセージは req の "message" で渡され、改行は _normalize_message_newlines で縦並び表示される。
     """
 
+    _hc_notification_sound_kind: str = "done"
+
     def __init__(
         self,
         req: dict[str, Any],

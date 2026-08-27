@@ -509,13 +509,14 @@ def _name_extract_debug_phase_result(
     n_hit = len(hit_files)
 
     def _cap_with_tips(
-        vals: list[str], tips: list[str | None]
+        vals: list[str], tips: list[str] | list[str | None]
     ) -> tuple[list[str], list[str | None]]:
+        tip_list: list[str | None] = list(tips)
         if len(vals) <= max_rows:
-            return vals, tips
+            return vals, tip_list
         return (
             vals[:max_rows] + ["…（以降省略・上限%d件）" % max_rows],
-            tips[:max_rows] + [None],
+            tip_list[:max_rows] + [None],
         )
 
     if phase_slot_index == 0:
@@ -703,8 +704,10 @@ def scenario_debug_phase_result(
         for v in b.get("primary_values") or []:
             prim.append("" if v is None else str(v))
     p = source_ui_block(s0) or {}
-    link_defs = p.get("link_defs") if isinstance(p.get("link_defs"), list) else []
-    join_defs = p.get("join_defs") if isinstance(p.get("join_defs"), list) else []
+    _link_defs = p.get("link_defs")
+    link_defs = _link_defs if isinstance(_link_defs, list) else []
+    _join_defs = p.get("join_defs")
+    join_defs = _join_defs if isinstance(_join_defs, list) else []
     nl = len(link_defs)
     nj = len(join_defs)
 

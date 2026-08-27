@@ -128,6 +128,7 @@ def test_card_only_link_stays_off_unit_row_when_skip_drops_blank(tmp_path: Path)
     """カード主キーの空行スキップ後も、SYS / 結合はユニット行に載らない。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "UNIT"
     ws["B1"] = "UNIT_PT"
@@ -164,7 +165,9 @@ def test_card_only_link_stays_off_unit_row_multi_sheet(tmp_path: Path) -> None:
     """含む＋2シート連結でも、カード専用 SYS は各シートのユニット行に載らない。"""
     fp = tmp_path / "unit_card_sheets.xlsx"
     wb = Workbook()
-    wb.active.title = "Other"
+    _wb_active = wb.active
+    assert _wb_active is not None
+    _wb_active.title = "Other"
     for sh, pfx in (("R_1", "T"), ("R_2", "M")):
         s = wb.create_sheet(sh)
         s["A1"] = f"{pfx}U"
@@ -193,6 +196,7 @@ def test_card_sys_carry_empty_does_not_fill_unit_row(tmp_path: Path) -> None:
     """カード区間の carry_empty はユニット行へ伝播しない。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "UNIT"
     ws["B1"] = "UNIT_PT"

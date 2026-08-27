@@ -405,16 +405,17 @@ def apply_common_window_flags(w: QWidget) -> None:
     """
     # 変数: 共通UI設定辞書
     ui = getattr(cst, "UI_COMMON", {}) or {}
-    win = ui.get("WINDOW") if isinstance(ui.get("WINDOW"), dict) else {}
+    _win = ui.get("WINDOW") if isinstance(ui, dict) else None
+    win = _win if isinstance(_win, dict) else {}
     # 変数: 最前面フラグの真偽値（旧 JSON キー ALWAYS_IN_FRONT_OF_EXCEL も読み取り互換）
     topmost = bool(win.get("TOPMOST", False) or win.get("ALWAYS_IN_FRONT_OF_EXCEL", False))
     # 変数: ウィンドウフラグのベース
-    flags = Qt.Dialog
+    flags = Qt.WindowType.Dialog
 
     # 判定コメント: TOPMOSTが要求されている場合
     if topmost:
         # 【目的】対象ウィンドウをOSの最前面に固定するため
-        flags |= Qt.WindowStaysOnTopHint
+        flags |= Qt.WindowType.WindowStaysOnTopHint
 
     # 命令分離: ウィンドウへのフラグ適用
     w.setWindowFlags(flags)
@@ -430,7 +431,8 @@ def apply_common_window_style(w: QWidget, parent_hwnd: int) -> None:
     # 【目的】共通フラグの適用と中央配置を一括で行うため
     apply_common_window_flags(w)
     ui = getattr(cst, "UI_COMMON", {}) or {}
-    win = ui.get("WINDOW") if isinstance(ui.get("WINDOW"), dict) else {}
+    _win = ui.get("WINDOW") if isinstance(ui, dict) else None
+    win = _win if isinstance(_win, dict) else {}
     if bool(win.get("CENTER_ON_EXCEL", False)):
         center_on_excel(w, int(parent_hwnd or 0))
 
@@ -586,23 +588,23 @@ def apply_window_config(
     show_close = bool(win.get("SHOW_CLOSE_BUTTON", True))
 
     # 変数: ウィンドウフラグの設定
-    flags = Qt.Dialog
+    flags = Qt.WindowType.Dialog
     # 親付き QDialog でも Windows で最小化/最大化ヒントをタイトルバーに出しやすくする
     if show_min or show_max:
-        flags |= Qt.Window
-    flags |= Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+        flags |= Qt.WindowType.Window
+    flags |= Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowSystemMenuHint
     if show_close:
-        flags |= Qt.WindowCloseButtonHint
+        flags |= Qt.WindowType.WindowCloseButtonHint
 
     # 判定コメント: 最小化ボタン表示
     if show_min:
-        flags |= Qt.WindowMinimizeButtonHint
+        flags |= Qt.WindowType.WindowMinimizeButtonHint
     # 判定コメント: 最大化ボタン表示
     if show_max:
-        flags |= Qt.WindowMaximizeButtonHint
+        flags |= Qt.WindowType.WindowMaximizeButtonHint
     # 判定コメント: 最前面表示
     if topmost:
-        flags |= Qt.WindowStaysOnTopHint
+        flags |= Qt.WindowType.WindowStaysOnTopHint
 
     # NOTE:
     #  - タスクバー非表示は主に Win32 owner（_set_owner_hwnd）。WS_EX_TOOLWINDOW はタイトルバー min/max を
@@ -632,6 +634,7 @@ def apply_window_config(
 
     # 【目的】最小化/最大化ボタンを確実に非表示にするため（Qtフラグだけでは出る環境がある）
     if schedule_remove_min_max:
+        w32_cap = _w32
         try:
             from PySide6.QtCore import QTimer
 
@@ -640,7 +643,7 @@ def apply_window_config(
             def _remove_min_max() -> None:
                 try:
                     hwnd = int(w.winId()) if hasattr(w, "winId") else 0
-                    if hwnd:
+                    if hwnd and w32_cap is not None:
                         if _ui_caption_diag_enabled():
                             try:
                                 from core.core_log import get_diag_logger
@@ -652,7 +655,7 @@ def apply_window_config(
                                 )
                             except Exception:
                                 pass
-                        _w32.set_window_style_remove_min_max(hwnd)
+                        w32_cap.set_window_style_remove_min_max(hwnd)
                 except Exception:
                     pass
 
@@ -1499,6 +1502,10 @@ def get_ui_config2(feature_key: str, screen_key: str) -> dict:
                 _log.error("[get_ui_config2] CSV_MG requires get_ui_config_from_file_required")
             return _deep_merge(base, {})
         feature = load_required("CSV_MG")
+        if not isinstance(feature, dict):
+            if _log is not None:
+                _log.error("[get_ui_config2] CSV_MG config is not a dict")
+            return _deep_merge(base, {})
     else:
         screens = getattr(cst, "UI_SCREENS", {}) or {}
         feature = screens.get(fk) if isinstance(screens, dict) else None
@@ -1506,9 +1513,11 @@ def get_ui_config2(feature_key: str, screen_key: str) -> dict:
             if _log is not None:
                 _log.debug("[get_ui_config2] no feature for fk=%s", fk)
             return _deep_merge(base, {})
-    common = feature.get("COMMON") if isinstance(feature.get("COMMON"), dict) else {}
-    screen = feature.get(sk) if isinstance(feature.get(sk), dict) else {}
-    if not isinstance(screen, dict) and _log is not None:
+    _common = feature.get("COMMON")
+    common = _common if isinstance(_common, dict) else {}
+    _screen = feature.get(sk)
+    screen = _screen if isinstance(_screen, dict) else {}
+    if not screen and _log is not None:
         _log.debug("[get_ui_config2] no screen for sk=%s feature_keys=%s", sk, list(feature.keys()))
     out = _deep_merge(base, common)
     out = _deep_merge(out, screen)
@@ -1648,7 +1657,7 @@ def center_on_excel(
                 w.adjustSize()
         except Exception:
             pass
-        center_on_rect(w, tuple(rect))
+        center_on_rect(w, (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])))
 
     _with_thread_dpi_physical(_do_center)
 
@@ -1897,18 +1906,20 @@ def focus_excel_after_modal_close(parent_hwnd: int) -> None:
     if not ph or os.name != "nt" or _w32 is None:
         return
 
+    w32 = _w32
+
     def _nudge() -> None:
         try:
             root = int(ph)
-            if hasattr(_w32, "get_root_window"):
+            if hasattr(w32, "get_root_window"):
                 try:
-                    root = int(_w32.get_root_window(ph))
+                    root = int(w32.get_root_window(ph))
                 except Exception:
                     pass
-            if hasattr(_w32, "nudge_top_level_to_foreground"):
-                _w32.nudge_top_level_to_foreground(root)  # type: ignore[attr-defined]
+            if hasattr(w32, "nudge_top_level_to_foreground"):
+                w32.nudge_top_level_to_foreground(root)  # type: ignore[attr-defined]
             else:
-                _w32.bring_to_front(root)
+                w32.bring_to_front(root)
         except Exception:
             pass
 
@@ -2063,7 +2074,7 @@ class UiShutdownGuard(QObject):
 from PySide6.QtWidgets import QStyle  # noqa: E402
 
 # 変数: モデルレスダイアログをガベージコレクションから保護するリスト
-_MODELLESS_DIALOGS: list[object] = []
+_MODELLESS_DIALOGS: list[Any] = []
 
 
 def _keep_modeless(obj: object, *, exclude_from_bulk_close: bool = False) -> None:
@@ -2119,7 +2130,7 @@ def close_stale_done_dialogs(*, parent_hwnd: int = 0) -> None:
         from ui_qt.ui_dialog_done import DoneDialog
 
         app = QApplication.instance()
-        if app is None:
+        if not isinstance(app, QApplication):
             return
         ph = int(parent_hwnd or 0)
         for w in list(app.topLevelWidgets()):

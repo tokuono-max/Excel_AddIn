@@ -164,6 +164,9 @@ class _SplitDialog(QDialog):
         分割範囲をテーブルで表示・編集し、分割開始でフォルダ選択後に結果を返すダイアログ。
     """
 
+    _ranges: List[Tuple[Optional[int], Optional[int]]]
+    _btn_remove: Optional[QPushButton]
+
     def __init__(
         self,
         req_dict: dict[str, Any],
@@ -185,7 +188,7 @@ class _SplitDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_DeleteOnClose, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             except Exception:
                 pass
 
@@ -199,7 +202,7 @@ class _SplitDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
             except Exception:
                 pass
 
@@ -454,14 +457,15 @@ class _SplitDialog(QDialog):
 
     def _update_remove_button_state(self) -> None:
         """選択行があるときだけ削減ボタンを有効にする。"""
-        if getattr(self, "_btn_remove", None) is None:
+        btn = getattr(self, "_btn_remove", None)
+        if btn is None:
             return
         try:
             sel = self._table.selectedIndexes()
             rows = {idx.row() for idx in sel}
-            self._btn_remove.setEnabled(len(rows) > 0 and len(self._ranges) > 1)
+            btn.setEnabled(len(rows) > 0 and len(self._ranges) > 1)
         except Exception:
-            self._btn_remove.setEnabled(False)
+            btn.setEnabled(False)
 
     def _on_remove(self) -> None:
         """選択された行を削除する。選択がなければ何もしない。"""
@@ -540,7 +544,9 @@ class _SplitDialog(QDialog):
         if not ranges_payload:
             show_warning_notice(self, self._title, "有効な分割範囲がありません。開始行・終了行を確認してください。")
             return
-        self._ranges = [(int(r.get("start_row")), int(r.get("end_row"))) for r in ranges_payload]
+        self._ranges = [
+            (int(r.get("start_row") or 0), int(r.get("end_row") or 0)) for r in ranges_payload
+        ]
         self._file_names = [str(r.get("file_name") or f"{self._sheet_name}_{i + 1}") for i, r in enumerate(ranges_payload)]
 
         initial_dir = str(self._req_dict.get("initial_dir") or "").strip() or os.path.expanduser("~")
@@ -652,7 +658,7 @@ class _ConflictDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_DeleteOnClose, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             except Exception:
                 pass
         try:

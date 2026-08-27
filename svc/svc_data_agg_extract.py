@@ -26,7 +26,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 _path_svc = Path(__file__).resolve().parent
 _root = _path_svc.parent
@@ -194,8 +194,8 @@ def close_workbook_cache_frame(frame: Optional[dict[str, Any]]) -> None:
 
 
 def _xlsx_scope_stack() -> list[dict[str, Any]]:
-    stack: list[dict[str, Any]] = getattr(_tls_wb_scope, "stack", None)
-    if stack is None:
+    stack = getattr(_tls_wb_scope, "stack", None)
+    if not isinstance(stack, list):
         stack = []
         _tls_wb_scope.stack = stack
     return stack
@@ -1713,7 +1713,11 @@ def _xlsx_cell_value_open_workbook_rc(
     store_key: Any = None
 
     if frame is not None:
-        mats_store = frame.setdefault("sheet_mats", {})
+        raw_store = frame.setdefault("sheet_mats", {})
+        if not isinstance(raw_store, dict):
+            raw_store = {}
+            frame["sheet_mats"] = raw_store
+        mats_store = raw_store
         store_key = (path_key, resolved_name)
         mat = mats_store.get(store_key)
     elif ephemeral_sheet_cache:
@@ -3115,7 +3119,7 @@ def _extract_cell_rule_series_fast(
             limit=n_src,
             repeat_until_empty=False,
         )
-        out = postprocess_link_rule_value_batch(raw, rule)
+        out: list[Any] = list(postprocess_link_rule_value_batch(raw, rule))
         if len(out) < n_src:
             out.extend([None] * (n_src - len(out)))
         return out[:n_src]
@@ -3146,7 +3150,7 @@ def _extract_cell_rule_series_fast(
                 repeat_until_empty=False,
                 cancel_check=cancel_check,
             )
-        out = postprocess_link_rule_value_batch(raw, rule)
+        out = list(postprocess_link_rule_value_batch(raw, rule))
         if len(out) < n_src:
             out.extend([None] * (n_src - len(out)))
         return out[:n_src]

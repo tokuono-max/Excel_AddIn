@@ -31,11 +31,27 @@ import ctypes
 from ctypes import wintypes
 
 from core import core_env
+from core.core_log import get_logger
+
+_logger = get_logger(__name__)
 
 # NOTE:
 #  - UIサーバは別プロセスのため、TEMP が別になる事故を避ける。
 #  - IPC ルートは core.core_env.ipc_dir_raw()（HC_IPC_ROOT / HC_QT_IPC_DIR）で解決。
 #  - 未設定の場合も、%TEMP%\\csv_tool に固定して双方で一致させる。
+
+
+def log_module_loaded(module_name: str, file_path: str, version: str = "") -> None:
+    """モジュール読込の診断ログ（ベストエフォート）。"""
+    try:
+        _logger.debug(
+            "[IPC] module_loaded name=%s version=%s file=%s",
+            module_name,
+            version or "-",
+            file_path,
+        )
+    except Exception:
+        pass
 
 # Windows named mutex（多重起動防止）
 _MUTEX_NAME = "Global\\HC_QT_UI_SERVER"

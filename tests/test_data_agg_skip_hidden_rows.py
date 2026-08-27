@@ -69,6 +69,7 @@ def test_source_wants_skip_hidden_rows() -> None:
 def test_get_hidden_excel_rows_xlsx(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["A2"] = "P2"
@@ -86,6 +87,7 @@ def test_get_hidden_excel_rows_xlsx(tmp_path: Path) -> None:
 def test_skip_hidden_rows_excludes_primary_and_aligns_link(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["B1"] = "L1"
@@ -108,6 +110,7 @@ def test_skip_hidden_rows_excludes_primary_and_aligns_link(tmp_path: Path) -> No
 def test_skip_hidden_off_keeps_all(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "P1"
     ws["A2"] = "P2"

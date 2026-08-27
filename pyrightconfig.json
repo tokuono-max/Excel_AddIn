@@ -14,7 +14,8 @@
     "VBA",
     "tools/nuitka",
     "dist",
-    "build"
+    "build",
+    "**/Old/**"
   ],
   "pythonVersion": "3.12",
   "venvPath": ".",

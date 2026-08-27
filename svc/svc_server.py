@@ -1047,8 +1047,12 @@ def _process_one(req_path: Path) -> None:
     handler_exc: Exception | None = None
     try:
         req = _read_pickle(req_path)
+        if not isinstance(req, dict):
+            raise TypeError("request pickle must be a dict")
         action = str(req.get("action", "")).strip()
         kwargs = req.get("kwargs", {})
+        if not isinstance(kwargs, dict):
+            kwargs = {}
 
         handler = _load_handler(action)
 

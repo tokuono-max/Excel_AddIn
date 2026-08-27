@@ -83,6 +83,8 @@ from ui_qt.ui_common import (
 )
 from ui_qt.ui_data_agg_scenario_layout import (
     apply_link_def_mode_widgets,
+    ascii_upper_cell_ref,
+    bind_cell_ref_uppercase,
     build_scenario_detail_cell_scroll,
     build_scenario_detail_name_scroll,
 )
@@ -1535,6 +1537,7 @@ class _DataAggMainWindow(QDialog):
         )
         self._edit_excel_anchor_cell = QLineEdit()
         self._edit_excel_anchor_cell.setPlaceholderText("A1")
+        bind_cell_ref_uppercase(self._edit_excel_anchor_cell)
         _excel_compact_control(self._edit_excel_anchor_cell, _EXCEL_EDIT_ANCHOR_W)
         _apply_tip(
             self._edit_excel_anchor_cell,
@@ -1920,7 +1923,9 @@ class _DataAggMainWindow(QDialog):
         return {
             "output_target": out_target,
             "write_mode": write_mode,
-            "anchor_cell": (self._edit_excel_anchor_cell.text() or "").strip(),
+            "anchor_cell": ascii_upper_cell_ref(
+                (self._edit_excel_anchor_cell.text() or "").strip()
+            ),
             "new_sheet_name_rule": ns_rule,
             "new_sheet_custom_name": (
                 (self._edit_excel_custom_sheet_name.text() or "").strip()
@@ -1953,7 +1958,9 @@ class _DataAggMainWindow(QDialog):
             wi = self._combo_excel_write_mode.findData(opt["write_mode"])
             if wi >= 0:
                 self._combo_excel_write_mode.setCurrentIndex(wi)
-            self._edit_excel_anchor_cell.setText(str(opt.get("anchor_cell") or ""))
+            self._edit_excel_anchor_cell.setText(
+                ascii_upper_cell_ref(str(opt.get("anchor_cell") or ""))
+            )
             ni = self._combo_excel_sheet_name_rule.findData(opt["new_sheet_name_rule"])
             if ni < 0:
                 ni = self._combo_excel_sheet_name_rule.findData("scenario_name_seq")
@@ -4989,7 +4996,8 @@ class _ScenarioEditDialog(QDialog):
                 else None
             )
             if callable(rescan):
-                scan_paths = list(rescan())
+                _scanned = rescan()
+                scan_paths = list(_scanned) if isinstance(_scanned, (list, tuple)) else list(scan_paths)
             elif not scan_paths:
                 mw = parent
                 while mw is not None:
@@ -5909,7 +5917,7 @@ class _ScenarioEditDialog(QDialog):
                 rule = str(p.get("sheet_rule") or "左端シート")
                 ri = r["sheet_rule"].findText(rule)
                 r["sheet_rule"].setCurrentIndex(ri if ri >= 0 else 0)
-                r["cell_ref"].setText(str(src.get("cell_ref") or ""))
+                r["cell_ref"].setText(ascii_upper_cell_ref(str(src.get("cell_ref") or "")))
                 r["row_offset"].setValue(int(src.get("row_offset") or 0))
                 r["col_offset"].setValue(int(src.get("col_offset") or 0))
                 ru = bool(src.get("repeat_until_empty", True))
@@ -5988,8 +5996,11 @@ class _ScenarioEditDialog(QDialog):
                 fixed_mode_lbl = link_mode_items[1]
                 for i2, ld in enumerate(r["link_defs"]):
                     if i2 < len(llist) and isinstance(llist[i2], dict):
-                        ld["cell"].setText(str(llist[i2].get("cell") or ""))
                         mode_txt = str(llist[i2].get("mode") or "セル座標").strip()
+                        cell_raw = str(llist[i2].get("cell") or "")
+                        if mode_txt != fixed_mode_lbl:
+                            cell_raw = ascii_upper_cell_ref(cell_raw)
+                        ld["cell"].setText(cell_raw)
                         apply_link_def_mode_widgets(
                             ld, mode_txt, fixed_label=fixed_mode_lbl
                         )
@@ -6021,7 +6032,9 @@ class _ScenarioEditDialog(QDialog):
                         rj(r["join_defs"][-1])
                 for i2, jd in enumerate(r["join_defs"]):
                     if i2 < len(jlist) and isinstance(jlist[i2], dict):
-                        jd["cell"].setText(str(jlist[i2].get("cell") or ""))
+                        jd["cell"].setText(
+                            ascii_upper_cell_ref(str(jlist[i2].get("cell") or ""))
+                        )
                         jd["row"].setValue(int(jlist[i2].get("row") or 0))
                         jd["col"].setValue(int(jlist[i2].get("col") or 0))
                         self._combo_select_saved_master_item(
@@ -6232,7 +6245,7 @@ class _ScenarioEditDialog(QDialog):
         if stype == "cell":
             r = self._cell_refs
             src["sheet_name"] = r["sheet_name"].text().strip()
-            src["cell_ref"] = r["cell_ref"].text().strip()
+            src["cell_ref"] = ascii_upper_cell_ref(r["cell_ref"].text().strip())
             src["row_offset"] = int(r["row_offset"].value())
             src["col_offset"] = int(r["col_offset"].value())
             elabels = r.get("end_mode_labels") or ["N件", "空白まで", "終端"]
@@ -6295,7 +6308,14 @@ class _ScenarioEditDialog(QDialog):
 
             p["link_defs"] = [
                 {
-                    "cell": ld["cell"].text(),
+                    "cell": (
+                        ascii_upper_cell_ref(ld["cell"].text())
+                        if not (
+                            ld.get("mode_fixed") is not None
+                            and ld["mode_fixed"].isChecked()
+                        )
+                        else ld["cell"].text()
+                    ),
                     "mode": _link_mode_persist(ld),
                     "row": ld["row"].value(),
                     "col": ld["col"].value(),
@@ -6317,7 +6337,7 @@ class _ScenarioEditDialog(QDialog):
             ]
             p["join_defs"] = [
                 {
-                    "cell": jd["cell"].text(),
+                    "cell": ascii_upper_cell_ref(jd["cell"].text()),
                     "row": jd["row"].value(),
                     "col": jd["col"].value(),
                     "item": jd["item_combo"].currentText().strip(),

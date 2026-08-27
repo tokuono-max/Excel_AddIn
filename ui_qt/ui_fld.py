@@ -67,7 +67,7 @@ class _TreeHeaderProxy(QIdentityProxyModel):
             val = self.sourceModel().data(src, role)
             if val is None or (isinstance(val, QIcon) and val.isNull()):
                 app = QApplication.instance()
-                if app and app.style():
+                if isinstance(app, QApplication) and app.style():
                     return app.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
             return val
         return super().data(index, role)
@@ -88,7 +88,11 @@ class _ListHeaderProxy(QIdentityProxyModel):
         src_model = self.sourceModel()
         if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
             app = QApplication.instance()
-            if app and app.style() and hasattr(src_model, "fileInfo"):
+            if (
+                isinstance(app, QApplication)
+                and app.style()
+                and isinstance(src_model, QFileSystemModel)
+            ):
                 fi = src_model.fileInfo(src)
                 if fi.exists():
                     if fi.isDir():
@@ -98,7 +102,7 @@ class _ListHeaderProxy(QIdentityProxyModel):
                         return app.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
                     return val
         if role == Qt.ItemDataRole.DisplayRole and index.column() == 1:
-            if hasattr(src_model, "fileInfo"):
+            if isinstance(src_model, QFileSystemModel):
                 fi = src_model.fileInfo(src)
                 if fi.exists():
                     return _format_file_size_bytes(fi.size())

@@ -69,7 +69,7 @@ except Exception:  # pragma: no cover
     def get_last_folder() -> str:
         return ""
 
-    def set_last_folder(_dir_path: str) -> None:
+    def set_last_folder(dir_path: str) -> None:
         return
 
 
@@ -142,18 +142,25 @@ def _get_cfg() -> Dict[str, Any]:
                 logger.error("[CSV_MG] get_ui_config_from_file_required not available")
             return {}
         feature = load_required("CSV_MG")
+        if not isinstance(feature, dict):
+            if logger:
+                logger.error("[CSV_MG] CSV_MG config is not a dict")
+            return {}
 
         main = feature.get("MAIN") or {}
         common = feature.get("COMMON") or {}
         base = getattr(cst, "UI_COMMON", {}) or {}
 
-        cfg = _deep_merge(base, common)
-        cfg = _deep_merge(cfg, main)
+        cfg = _deep_merge(base, common if isinstance(common, dict) else {})
+        cfg = _deep_merge(cfg, main if isinstance(main, dict) else {})
         # WINDOW は 優先順位 WINDOW < COMMON < 各画面(MAIN) でマージ（タスクバー非表示等を確実に継承）
         win_base = feature.get("WINDOW") or {}
-        win_common = (feature.get("COMMON") or {}).get("WINDOW") or {}
-        win_main = (feature.get("MAIN") or {}).get("WINDOW") or {}
-        cfg["WINDOW"] = _deep_merge(_deep_merge(win_base, win_common), win_main)
+        win_common = (feature.get("COMMON") or {}).get("WINDOW") or {} if isinstance(feature.get("COMMON"), dict) else {}
+        win_main = (feature.get("MAIN") or {}).get("WINDOW") or {} if isinstance(feature.get("MAIN"), dict) else {}
+        cfg["WINDOW"] = _deep_merge(
+            _deep_merge(win_base if isinstance(win_base, dict) else {}, win_common if isinstance(win_common, dict) else {}),
+            win_main if isinstance(win_main, dict) else {},
+        )
         if logger:
             logger.debug(
                 "[CSV_MG] _get_cfg: keys=%s has_RIBBON=%s (file overrides applied if config exists)",
@@ -508,7 +515,7 @@ class _DuplicateCheckDialog(QDialog):
             self.setWindowModality(Qt.WindowModality.WindowModal)
         except Exception:
             try:
-                self.setWindowModality(Qt.WindowModal)
+                self.setWindowModality(Qt.WindowModality.WindowModal)
             except Exception:
                 pass
         self._dup_cfg = dup_cfg or {}
@@ -524,7 +531,7 @@ class _DuplicateCheckDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
             except Exception:
                 pass
         try:
@@ -603,7 +610,7 @@ class _DuplicateCheckDialog(QDialog):
             self.winId()
         except Exception:
             try:
-                self.setAttribute(Qt.WA_NativeWindow, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
                 self.winId()
             except Exception:
                 pass
@@ -711,10 +718,9 @@ class _DuplicateCheckDialog(QDialog):
         super().showEvent(event)
         try:
             par = self.parent()
-            if par is not None and getattr(par, "raise_", None) is not None:
+            if isinstance(par, QWidget):
                 par.raise_()
-                if getattr(par, "activateWindow", None) is not None:
-                    par.activateWindow()
+                par.activateWindow()
             self.raise_()
             self.activateWindow()
         except Exception:
@@ -785,11 +791,14 @@ class CsvMergeDialog(QDialog):
     概要: CSV結合機能のメインダイアログ。ファイルの選択、並び替え、実行設定の入力を提供する。
     """
 
+    _excel_rect_override: Optional[Tuple[int, int, int, int]] = None
+    _hc_prepare_window_cfg: Optional[Dict[str, Any]] = None
+
     def __init__(self, parent_hwnd: int = 0, initial_files: Optional[Sequence[str]] = None) -> None:
         super().__init__()
         # ネイティブウィンドウを早期生成し、表示前の owner/前面設定を確実にする
         try:
-            self.setAttribute(Qt.WA_NativeWindow, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         except Exception:
             pass
         # 変数: UI設定と親ウィンドウ情報
@@ -914,12 +923,13 @@ class CsvMergeDialog(QDialog):
                 pass
         elif ph0 and bool(win.get("CENTER_ON_EXCEL", False)) and center_on_excel is not None:
             try:
+                _center = center_on_excel
                 er0 = getattr(self, "_excel_rect_override", None)
-                center_on_excel(self, ph0, er0)
+                _center(self, ph0, er0)
 
                 def _recenter_merge_main_fb() -> None:
                     try:
-                        center_on_excel(
+                        _center(
                             self,
                             ph0,
                             getattr(self, "_excel_rect_override", None),
@@ -973,7 +983,8 @@ class CsvMergeDialog(QDialog):
         try:
             ph = int(getattr(self, "_parent_hwnd", 0) or 0)
             if ph and ensure_front is not None:
-                QTimer.singleShot(120, lambda: ensure_front(self, ph))
+                _front = ensure_front
+                QTimer.singleShot(120, lambda: _front(self, ph))
         except Exception:
             pass
 
@@ -1040,7 +1051,7 @@ class CsvMergeDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
             except Exception:
                 pass
 

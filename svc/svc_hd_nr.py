@@ -520,7 +520,7 @@ def insert_header(
             # 行ごとに header_max_col に正規化した 2 次元配列を用意
             rows_norm: List[List[Any]] = []
             for r in data_2d:
-                row = list(r) if isinstance(r, (list, tuple)) else [r]
+                row: List[Any] = list(r) if isinstance(r, (list, tuple)) else [r]
                 if len(row) < header_max_col:
                     row.extend([None] * (header_max_col - len(row)))
                 rows_norm.append(row[:header_max_col])
@@ -556,7 +556,7 @@ def insert_header(
 
             row_data: List[Any] = []
             for r in chunk_rows:
-                row = list(r) if isinstance(r, (list, tuple)) else [r]
+                row: List[Any] = list(r) if isinstance(r, (list, tuple)) else [r]
                 if len(row) < header_max_col:
                     row.extend([None] * (header_max_col - len(row)))
                 row_data.extend(row)
@@ -575,8 +575,10 @@ def insert_header(
     data_start_write_row = header_first_row + 1
     out_rows = header_first_row + len(output_2d)
     try:
+        if xlc is None:
+            raise RuntimeError("core_xlc is not available")
         with xlc.suspend_sheet_updates(ptr_s, restore_on_exit=False):
-            if output_2d and xlc:
+            if output_2d:
                 try:
                     xlc.write_chunk(ptr_s, data_start_write_row, 1, output_2d)
                 except Exception as e:
@@ -664,7 +666,8 @@ def insert_header(
                 sheet_id=str(sheet_id or "_"),
             )
     finally:
-        xlc.restore_screen_updating(ptr_s)
+        if xlc is not None:
+            xlc.restore_screen_updating(ptr_s)
 
     _perf_nr("after_sheet_write_and_fit", t_flow, out_rows=out_rows)
     _trace_hd_nr("after_sheet_write_and_fit", t_flow, out_rows=out_rows)

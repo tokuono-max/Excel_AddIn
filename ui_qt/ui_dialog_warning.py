@@ -60,7 +60,7 @@ class WarningDialog(QDialog):
             self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         except Exception:
             try:
-                self.setAttribute(Qt.WA_DeleteOnClose, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             except Exception:
                 pass
 
@@ -106,7 +106,7 @@ class WarningDialog(QDialog):
             msg_lbl.setTextFormat(Qt.TextFormat.PlainText)
         except Exception:
             try:
-                msg_lbl.setTextFormat(Qt.PlainText)
+                msg_lbl.setTextFormat(Qt.TextFormat.PlainText)
             except Exception:
                 pass
         lay.addWidget(msg_lbl)
@@ -146,7 +146,7 @@ class WarningDialog(QDialog):
             self.winId()
         except Exception:
             try:
-                self.setAttribute(Qt.WA_NativeWindow, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
                 self.winId()
             except Exception:
                 pass

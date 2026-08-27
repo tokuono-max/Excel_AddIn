@@ -235,7 +235,8 @@ def _goto_scroll_margins_from_cfg() -> tuple[int, int]:
 
 def _goto_highlight_bgr_from_cfg(cfg: dict[str, Any]) -> int:
     """ジャンプ先の一時グレー（BGR 整数）。GOTO_HIGHLIGHT.BGR 未指定時は薄いグレー。"""
-    gh = cfg.get("GOTO_HIGHLIGHT") if isinstance(cfg.get("GOTO_HIGHLIGHT"), dict) else {}
+    _gh = cfg.get("GOTO_HIGHLIGHT")
+    gh = _gh if isinstance(_gh, dict) else {}
     try:
         v = int(gh.get("BGR", 0) or 0)
     except (TypeError, ValueError):
@@ -1213,7 +1214,8 @@ class DupliReportDialog(QDialog):
         メインレイアウトの左右マージン＋DIALOG_WIDTH_FUDGE。Qt ヘッダ length() や説明文幅は使わない。
         MIN〜MAX に収める。intro_text/count_line は呼び出し互換のため残す（幅計算には使わない）。
         """
-        win = rep.get("WINDOW") if isinstance(rep.get("WINDOW"), dict) else {}
+        _win = rep.get("WINDOW")
+        win = _win if isinstance(_win, dict) else {}
         try:
             wmax = int(win.get("MAX_WIDTH") or 0)
         except (TypeError, ValueError):
@@ -1530,7 +1532,8 @@ class DupliReportDialog(QDialog):
             except Exception:
                 pass
             try:
-                self._vp_timer.start()
+                if self._vp_timer is not None:
+                    self._vp_timer.start()
             except Exception:
                 pass
 
@@ -1899,7 +1902,7 @@ class DupliReportDialog(QDialog):
                 pass
             ph = int(self._parent_hwnd or 0)
             sid = str(self._sheet_id or "").strip() or "_"
-            pl_copy: dict[str, Any] = dict(pl0)
+            pl_copy: dict[str, Any] = dict(pl0) if isinstance(pl0, dict) else {}
             dlg = self
             if ph:
                 try:
@@ -2110,7 +2113,7 @@ def create_dialog(
     req_dict: dict[str, Any] | None,
     parent_hwnd: int,
     sheet_id: str,
-) -> _DupliProgressWrapper | DupliReportDialog:
+) -> _DupliProgressWrapper | DupliReportDialog | _DupliDoneDialog:
     """
     【概要】
         ui_server から呼ばれ、action に応じて進捗・完了通知・レポートのいずれかのダイアログを生成する。

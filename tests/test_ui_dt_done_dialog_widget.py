@@ -13,7 +13,7 @@ QApplication = QtWidgets.QApplication
 @pytest.fixture(scope="module")
 def _app() -> QApplication:
     app = QApplication.instance()
-    if app is None:
+    if not isinstance(app, QApplication):
         app = QApplication([])
     return app
 

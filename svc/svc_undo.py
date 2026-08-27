@@ -748,7 +748,7 @@ def exec_undo(
                 except Exception:
                     pass
                 try:
-                    from svc import hc_hd_rs  # noqa: F401
+                    from svc import hc_hd_rs  # type: ignore[attr-defined]
 
                     if prog_path_undo is not None:
                         _undo_progress_phase(

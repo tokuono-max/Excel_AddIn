@@ -85,6 +85,8 @@ class _UndoDoneDialog(QDialog):
     WINDOW.CENTER_ON_EXCEL / TOPMOST / EXCEL_FRONT_FOLLOW を反映する。
     """
 
+    _hc_notification_sound_kind: str = "done"
+
     def __init__(
         self,
         req: dict[str, Any],

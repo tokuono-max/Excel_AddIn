@@ -410,7 +410,9 @@ def scenario_for_stepped_preview(
     new_items: list[dict[str, Any]] = []
     active = list(active_slot_indices)
     for j, it in enumerate(items_orig):
-        itc = copy.deepcopy(it) if isinstance(it, dict) else {"name": "?"}
+        itc: dict[str, Any] = (
+            copy.deepcopy(it) if isinstance(it, dict) else {"name": "?"}
+        )
         if not isinstance(itc, dict):
             itc = {"name": "?"}
         sources = list(itc.get("sources") or [])

@@ -108,7 +108,7 @@ def create_dialog(
     req_dict: dict[str, Any] | None,
     parent_hwnd: int,
     sheet_id: str,
-) -> _CsvSaveFileDialog | _CsvSvProgressWrapper:
+) -> _CsvSaveFileDialog | _CsvSvProgressWrapper | Any:
     """ui_server からのディスパッチ用。action により保存先選択・進捗・ワーニングのいずれかを返す。"""
     req = req_dict or {}
     action = str(req.get("action", "") or "").strip().lower()

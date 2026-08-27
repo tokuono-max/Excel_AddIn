@@ -1001,7 +1001,7 @@ def _merge_files_to_sheet(
                             value = existing + "＋" + new_part
                         core_stat.set_status_info(sht, value)
                         try:
-                            app.api.StatusBar = value
+                            wb.app.api.StatusBar = value
                         except Exception:
                             pass
                 except Exception:

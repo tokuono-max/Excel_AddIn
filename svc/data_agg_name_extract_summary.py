@@ -141,7 +141,8 @@ def name_extract_setting_lines(
             )
         elif lm_raw == "count":
             lines.append("%s%s: %s" % (pfx, lbl_lv, lv if lv is not None else "—"))
-    nchk = pb.get("name_checks") if isinstance(pb.get("name_checks"), list) else []
+    _nchk = pb.get("name_checks")
+    nchk = _nchk if isinstance(_nchk, list) else []
     proc = [str(x) for x in nchk if x]
     lines.append("%s加工: %s" % (pfx, "、".join(proc) if proc else "（なし）"))
     vss = str(pb.get("value_shape_script") or "").strip()

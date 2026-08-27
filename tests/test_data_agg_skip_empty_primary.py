@@ -17,6 +17,7 @@ from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope  #
 def _make_xlsx(tmp_path: Path) -> Path:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     # A1=A, A2=空, A3=B  / B1=L1, B2=L2, B3=L3  / C1=J1, C2=J2, C3=J3
     ws["A1"] = "A"
@@ -137,7 +138,9 @@ def test_skip_empty_multi_sheet_oneshot_link_context_iter_offset(tmp_path: Path)
 
     fp = tmp_path / "multi_oneshot.xlsx"
     wb = Workbook()
-    wb.active.title = "Other"
+    _wb_active = wb.active
+    assert _wb_active is not None
+    _wb_active.title = "Other"
     for sh, pfx in (("R_1", "T"), ("R_2", "M")):
         s = wb.create_sheet(sh)
         rows = [
@@ -213,8 +216,10 @@ def test_skip_empty_primary_phased_multi_sheet_keeps_link_join_aligned(
 
     fp = tmp_path / "multi_skip.xlsx"
     wb = Workbook()
-    wb.active.title = "Other"
-    wb.active["A1"] = "X"
+    _wb_active = wb.active
+    assert _wb_active is not None
+    _wb_active.title = "Other"
+    _wb_active["A1"] = "X"
     s1 = wb.create_sheet("R_1")
     s1["A1"] = "A"
     s1["A2"] = None
@@ -311,6 +316,7 @@ def test_skip_empty_primary_phased_multi_sheet_keeps_link_join_aligned(
 def test_skip_primary_match_token_not_blank(tmp_path: Path) -> None:
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "A"
     ws["A2"] = "-"
@@ -386,6 +392,7 @@ def test_until_empty_skip_token_keeps_blank_as_stop(tmp_path: Path) -> None:
     """空白までは空欄で停止。スキップ文字のみ落とす（空欄トークンは無効）。"""
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = "A"
     ws["A2"] = "-"
@@ -448,6 +455,7 @@ def test_scenario_debug_skip_n1_hides_row(tmp_path: Path) -> None:
 
     wb = Workbook()
     ws = wb.active
+    assert ws is not None
     ws.title = "S"
     ws["A1"] = None
     fp = tmp_path / "skip_n1.xlsx"
@@ -523,6 +531,7 @@ def test_scenario_debug_skipped_file_hides_link(tmp_path: Path) -> None:
     fp1 = tmp_path / "skip.xlsx"
     wb1 = Workbook()
     ws1 = wb1.active
+    assert ws1 is not None
     ws1.title = "S"
     ws1["A1"] = None
     ws1["B1"] = "HIDE"
@@ -531,6 +540,7 @@ def test_scenario_debug_skipped_file_hides_link(tmp_path: Path) -> None:
     fp2 = tmp_path / "keep.xlsx"
     wb2 = Workbook()
     ws2 = wb2.active
+    assert ws2 is not None
     ws2.title = "S"
     ws2["A1"] = "P"
     ws2["B1"] = "Lkeep"
@@ -602,6 +612,7 @@ def test_scenario_debug_stops_at_display_row_cap(tmp_path: Path) -> None:
         fp = tmp_path / ("f%d.xlsx" % i)
         wb = Workbook()
         ws = wb.active
+        assert ws is not None
         ws.title = "S"
         ws["A1"] = "P%d_1" % i
         ws["A2"] = "P%d_2" % i

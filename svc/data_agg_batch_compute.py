@@ -339,6 +339,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
 
+    if write_pickle is None:
+        raise RuntimeError("write_pickle is not available")
     _prog_write = make_throttled_progress_writer(
         prog_path,
         write_pickle,
