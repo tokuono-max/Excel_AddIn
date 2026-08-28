@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Qt, QEvent
-from PySide6.QtWidgets import QMessageBox, QWidget
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtWidgets import QComboBox, QMessageBox, QSpinBox, QWidget
 
 from ui_qt import ipc_file
 
@@ -394,6 +395,24 @@ def set_widget_tooltip(widget: Any, text: str | None) -> None:
         widget.setToolTip(tip)
     except Exception:
         pass
+
+
+class _FocusWheelGuardMixin:
+    """SpinBox / ComboBox: フォーカス中のみマウスホイールで値を変更する。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)  # type: ignore[misc]
+
+
+class FocusWheelSpinBox(_FocusWheelGuardMixin, QSpinBox):
+    """フォーカス中のみホイールで値変更する QSpinBox。"""
+
+
+class FocusWheelComboBox(_FocusWheelGuardMixin, QComboBox):
+    """フォーカス中のみホイールで選択変更する QComboBox。"""
 
 
 def apply_common_window_flags(w: QWidget) -> None:

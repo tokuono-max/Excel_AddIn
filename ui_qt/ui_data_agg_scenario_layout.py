@@ -17,7 +17,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from ui_qt.ui_common import _normalize_message_newlines, _normalize_tooltip_text, set_widget_tooltip, show_warning_notice
+from ui_qt.ui_common import (
+    FocusWheelComboBox,
+    FocusWheelSpinBox,
+    _normalize_message_newlines,
+    _normalize_tooltip_text,
+    set_widget_tooltip,
+    show_warning_notice,
+)
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel
@@ -308,7 +315,7 @@ def _add_form_row_combo(
     items: list[str],
     default_index: int = 0,
 ) -> QComboBox:
-    cb = QComboBox()
+    cb = FocusWheelComboBox()
     cb.addItems(items)
     cb.setCurrentIndex(min(max(default_index, 0), max(len(items) - 1, 0)))
     _combo_fit_viewport(cb)
@@ -461,7 +468,7 @@ def _write_mode_combo_from_config(
         wm_keys = list(default_keys[: len(wm_items)])
     else:
         wm_keys = [str(x) for x in wm_keys]
-    wm = QComboBox()
+    wm = FocusWheelComboBox()
     for lab, key in zip(wm_items, wm_keys):
         wm.addItem(lab, key)
     _combo_fit_viewport(wm)
@@ -979,14 +986,14 @@ def build_scenario_detail_cell_scroll(
     w_n = int(_dc(cfg, "SPIN_WIDTH_N", 110))
     w_join = int(_dc(cfg, "SPIN_WIDTH_JOIN", 76))
 
-    sp_row = QSpinBox()
+    sp_row = FocusWheelSpinBox()
     sp_row.setRange(-999, 999)
     sp_row.setValue(0)
     _compact_spin(sp_row, w_row_col)
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_ROW_OFFSET", "行移動オフセット")), sp_row)
     refs["row_offset"] = sp_row
 
-    sp_col = QSpinBox()
+    sp_col = FocusWheelSpinBox()
     sp_col.setRange(-999, 999)
     sp_col.setValue(0)
     _compact_spin(sp_col, w_row_col)
@@ -997,14 +1004,14 @@ def build_scenario_detail_cell_scroll(
     if not isinstance(end_items, list) or len(end_items) < 2:
         end_items = ["N件", "空白まで", "終端"]
     end_items = [_normalize_message_newlines(str(x).strip()) for x in end_items]
-    cb_end = QComboBox()
+    cb_end = FocusWheelComboBox()
     cb_end.addItems(end_items)
     _combo_fit_viewport(cb_end)
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_END_MODE", "終結モード")), cb_end)
     refs["end_mode"] = cb_end
     refs["end_mode_labels"] = end_items
 
-    sp_n = QSpinBox()
+    sp_n = FocusWheelSpinBox()
     sp_n.setRange(1, 999999)
     sp_n.setValue(int(_dc(cfg, "DEFAULT_N_COUNT", 1) or 1))
     _compact_spin(sp_n, w_n)
@@ -1237,7 +1244,7 @@ def build_scenario_detail_cell_scroll(
         if not isinstance(mode_items, list) or len(mode_items) < 2:
             mode_items = ["セル座標", "固定値"]
         mode_items = [_normalize_message_newlines(str(x).strip()) for x in mode_items]
-        cb_link_item = QComboBox()
+        cb_link_item = FocusWheelComboBox()
         cb_link_item.addItems(path_items)
         _combo_fit_viewport(cb_link_item)
         gf.addRow(_field_lbl(_dcp(cfg, "LABEL_LINK_ITEM", "連携項目")), cb_link_item)
@@ -1260,12 +1267,12 @@ def build_scenario_detail_cell_scroll(
         le_lc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         bind_cell_ref_uppercase(le_lc, enabled_when=lambda: bool(rad_link_cell.isChecked()))
         gf.addRow(lbl_cell_or_fixed, le_lc)
-        sj = QSpinBox()
+        sj = FocusWheelSpinBox()
         sj.setRange(-999, 999)
         sj.setValue(0)
         _compact_spin(sj, w_link_spin)
         gf.addRow(_field_lbl(_dcp(cfg, "LABEL_LINK_ROW", "行移動オフセット")), sj)
-        sk = QSpinBox()
+        sk = FocusWheelSpinBox()
         sk.setRange(-999, 999)
         sk.setValue(0)
         _compact_spin(sk, w_link_spin)
@@ -1574,7 +1581,7 @@ def build_scenario_detail_cell_scroll(
         gf_key.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         gf_key.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         gf_key.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        cb_join_item = QComboBox()
+        cb_join_item = FocusWheelComboBox()
         cb_join_item.addItems(path_items)
         _combo_fit_viewport(cb_join_item)
         gf_key.addRow(_field_lbl(_dcp(cfg, "LABEL_JOIN_ITEM", "結合項目")), cb_join_item)
@@ -1583,14 +1590,14 @@ def build_scenario_detail_cell_scroll(
         le_kc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         bind_cell_ref_uppercase(le_kc)
         gf_key.addRow(_field_lbl(_dcp(cfg, "LABEL_JOIN_CELL", "セル座標")), le_kc)
-        sj = QSpinBox()
+        sj = FocusWheelSpinBox()
         sj.setRange(-999, 999)
         sj.setValue(0)
         _compact_spin(sj, w_join)
         gf_key.addRow(
             _field_lbl(_dcp(cfg, "LABEL_JOIN_ROW", "行移動オフセット")), sj
         )
-        sk = QSpinBox()
+        sk = FocusWheelSpinBox()
         sk.setRange(-999, 999)
         sk.setValue(0)
         _compact_spin(sk, w_join)
@@ -1796,7 +1803,7 @@ def build_scenario_detail_name_scroll(
     sc_items = _dc(cfg, "SEARCH_COND_ITEMS", ["完全一致", "含む", "含まない"])
     if not isinstance(sc_items, list):
         sc_items = ["完全一致", "含む", "含まない"]
-    cb_search_target = QComboBox()
+    cb_search_target = FocusWheelComboBox()
     cb_search_target.addItems(
         [_normalize_message_newlines(str(x).strip()) for x in st_items]
     )
@@ -1878,7 +1885,7 @@ def build_scenario_detail_name_scroll(
         int(_dc(cfg, "SPIN_WIDTH_BLOCK", 120)),
         int(_dc(cfg, "SPIN_WIDTH_POS", 120)),
     )
-    sp_start_or_block = QSpinBox()
+    sp_start_or_block = FocusWheelSpinBox()
     sp_start_or_block.setRange(1, 9999)
     sp_start_or_block.setValue(1)
     _compact_spin(sp_start_or_block, w_sob)
@@ -1998,7 +2005,7 @@ def build_scenario_detail_name_scroll(
     path_items.extend(extras)
     if primary_label and primary_label not in path_items:
         path_items.append(primary_label)
-    cb_path = QComboBox()
+    cb_path = FocusWheelComboBox()
     cb_path.addItems(path_items)
     if cb_path.count() > 0:
         cb_path.setCurrentIndex(0)

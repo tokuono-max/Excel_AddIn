@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
 
 from core import core_env
 from ui_qt.ui_common import (
+    FocusWheelComboBox,
     _normalize_message_newlines,
     _normalize_tooltip_text,
     excel_rect_tuple_from_req as _excel_rect_tuple_from_req,
@@ -1479,7 +1480,7 @@ class _DataAggMainWindow(QDialog):
         row_rad = QHBoxLayout()
         self._rad_excel_active = QRadioButton(_u("RADIO_EXCEL_ACTIVE_SHEET", "アクティブシート"))
         self._rad_excel_new = QRadioButton(_u("RADIO_EXCEL_NEW_SHEET", "新規シート"))
-        self._rad_excel_active.setChecked(True)
+        self._rad_excel_new.setChecked(True)
         self._excel_output_group.addButton(self._rad_excel_active)
         self._excel_output_group.addButton(self._rad_excel_new)
         _apply_tip(
@@ -1504,7 +1505,7 @@ class _DataAggMainWindow(QDialog):
             "TOOLTIP_EXCEL_LABEL_WRITE_MODE",
             "アクティブシート出力時の書き込み方式のラベルです。",
         )
-        self._combo_excel_write_mode = QComboBox()
+        self._combo_excel_write_mode = FocusWheelComboBox()
         self._combo_excel_write_mode.addItem(
             _u("EXCEL_WRITE_MODE_APPEND", "追加"), "append"
         )
@@ -1556,7 +1557,7 @@ class _DataAggMainWindow(QDialog):
             "TOOLTIP_EXCEL_LABEL_SHEET_RULE",
             "新規シート作成時のシート名ルールのラベルです。",
         )
-        self._combo_excel_sheet_name_rule = QComboBox()
+        self._combo_excel_sheet_name_rule = FocusWheelComboBox()
         self._combo_excel_sheet_name_rule.addItem(
             _u("EXCEL_SHEET_NAME_SCENARIO_NAME_SEQ", "シナリオ名_連番"),
             "scenario_name_seq",
@@ -1817,8 +1818,8 @@ class _DataAggMainWindow(QDialog):
         hl = QHBoxLayout(row)
         hl.setContentsMargins(0, 2, 0, 2)
         lbl = QLabel(_u("LABEL_EXCEL_SORT_ITEM", "項目") + ":")
-        cb_item = QComboBox()
-        cb_order = QComboBox()
+        cb_item = FocusWheelComboBox()
+        cb_order = FocusWheelComboBox()
         cb_order.addItem(_u("EXCEL_SORT_ORDER_ASC", "昇順"), "asc")
         cb_order.addItem(_u("EXCEL_SORT_ORDER_DESC", "降順"), "desc")
         chk_nat = QCheckBox(_u("CHK_EXCEL_SORT_NATURAL", "自然順"))
@@ -4582,7 +4583,7 @@ class _ScenarioEditDialog(QDialog):
             "セル座標から取得か名前から取得か。同一項目内では混在できません。",
         )
         kind_row_top.addWidget(lbl_kind)
-        self._form_combo_type = QComboBox()
+        self._form_combo_type = FocusWheelComboBox()
         self._form_combo_type.addItem(_u("SOURCE_TYPE_CELL", "セル座標から取得"), "cell")
         self._form_combo_type.addItem(_u("SOURCE_TYPE_NAME_EXTRACT", "名前から取得"), "name_extract")
         self._form_combo_type.currentIndexChanged.connect(self._on_form_type_changed)

@@ -6,6 +6,7 @@ Purpose:
   データ集約の「整形」DSL。先頭レベルはカンマまたはセミコロンでトークン分割、CSV 方式の "" クォート。
   rep は部分文字列のすべてを置換（str.replace、先頭 N 回のみのモードはない）。
   split は行分割（str.splitlines）で N 行目（1 始まり）を返す。改行文字は結果に含めない。
+  left/right/mid/cut/ins の位置・長さ引数は整数または式（len(), len("…"), pos("…"), + - ()）。
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ _EXCEL_SERIAL_INT_MIN = 10000
 from core.core_log import get_logger
 
 logger = get_logger(__name__)
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def tokenize_shape_script(script: str) -> list[str]:
@@ -68,6 +69,12 @@ def tokenize_shape_script(script: str) -> list[str]:
     return tokens
 
 
+SHAPE_EXPR_MAX_LEN = 200
+SHAPE_EXPR_MAX_DEPTH = 8
+
+_INT_LITERAL_RE = re.compile(r"^-?\d+$")
+
+
 def _parse_int(tok: str) -> int | None:
     t = tok.strip()
     if not t:
@@ -76,6 +83,179 @@ def _parse_int(tok: str) -> int | None:
         return int(t, 10)
     except ValueError:
         return None
+
+
+class _ShapeExprError(Exception):
+    pass
+
+
+class _ShapeExprParser:
+    """left/right/mid/cut/ins の数値引数用式: len(), len(\"…\"), pos(\"…\"), + - ()。"""
+
+    def __init__(self, s: str, text: str, *, validate_only: bool = False) -> None:
+        self.s = s
+        self.text = text
+        self.validate_only = validate_only
+        self.i = 0
+        self.n = len(s)
+        self.paren_depth = 0
+
+    def parse(self) -> int:
+        if len(self.s) > SHAPE_EXPR_MAX_LEN:
+            raise _ShapeExprError("式が長すぎます（上限 %d 文字）" % SHAPE_EXPR_MAX_LEN)
+        if not self.s.strip():
+            raise _ShapeExprError("空の式")
+        v = self._expr()
+        self._skip_ws()
+        if self.i < self.n:
+            raise _ShapeExprError("式の解析に失敗しました")
+        return v
+
+    def _skip_ws(self) -> None:
+        while self.i < self.n and self.s[self.i] in " \t":
+            self.i += 1
+
+    def _expr(self) -> int:
+        v = self._term()
+        while True:
+            self._skip_ws()
+            if self.i >= self.n:
+                break
+            ch = self.s[self.i]
+            if ch == "+":
+                self.i += 1
+                v += self._term()
+            elif ch == "-":
+                self.i += 1
+                v -= self._term()
+            else:
+                break
+        return v
+
+    def _term(self) -> int:
+        self._skip_ws()
+        if self.i >= self.n:
+            raise _ShapeExprError("式が不完全です")
+        ch = self.s[self.i]
+        if ch == "(":
+            self.paren_depth += 1
+            if self.paren_depth > SHAPE_EXPR_MAX_DEPTH:
+                raise _ShapeExprError(
+                    "括弧の入れ子が深すぎます（上限 %d）" % SHAPE_EXPR_MAX_DEPTH
+                )
+            self.i += 1
+            v = self._expr()
+            self._skip_ws()
+            if self.i >= self.n or self.s[self.i] != ")":
+                raise _ShapeExprError(") がありません")
+            self.i += 1
+            self.paren_depth -= 1
+            return v
+        if ch.isdigit():
+            start = self.i
+            while self.i < self.n and self.s[self.i].isdigit():
+                self.i += 1
+            return int(self.s[start : self.i], 10)
+        if self._match_keyword("len"):
+            return self._call_len()
+        if self._match_keyword("pos"):
+            return self._call_pos()
+        raise _ShapeExprError("式の解析に失敗しました")
+
+    def _match_keyword(self, kw: str) -> bool:
+        if self.i + len(kw) > self.n:
+            return False
+        chunk = self.s[self.i : self.i + len(kw)]
+        if chunk.lower() != kw.lower():
+            return False
+        if self.i + len(kw) < self.n:
+            nxt = self.s[self.i + len(kw)]
+            if nxt.isalnum() or nxt == "_":
+                return False
+        self.i += len(kw)
+        return True
+
+    def _expect(self, ch: str) -> None:
+        self._skip_ws()
+        if self.i >= self.n or self.s[self.i] != ch:
+            raise _ShapeExprError("式の解析に失敗しました")
+        self.i += 1
+
+    def _read_quoted_string(self) -> str:
+        self._skip_ws()
+        if self.i >= self.n or self.s[self.i] != '"':
+            raise _ShapeExprError('文字列は " で囲んでください')
+        self.i += 1
+        buf: list[str] = []
+        while self.i < self.n:
+            c = self.s[self.i]
+            if c == '"':
+                if self.i + 1 < self.n and self.s[self.i + 1] == '"':
+                    buf.append('"')
+                    self.i += 2
+                else:
+                    self.i += 1
+                    return "".join(buf)
+            else:
+                buf.append(c)
+                self.i += 1
+        raise _ShapeExprError("文字列が閉じていません")
+
+    def _call_len(self) -> int:
+        self._expect("(")
+        self._skip_ws()
+        if self.i < self.n and self.s[self.i] == '"':
+            lit = self._read_quoted_string()
+            self._skip_ws()
+            self._expect(")")
+            return len(lit)
+        self._expect(")")
+        return len(self.text)
+
+    def _call_pos(self) -> int:
+        self._expect("(")
+        marker = self._read_quoted_string()
+        self._skip_ws()
+        self._expect(")")
+        if self.validate_only:
+            return 1
+        if not marker:
+            raise _ShapeExprError("pos の引数が空です")
+        idx = self.text.find(marker)
+        if idx < 0:
+            raise _ShapeExprError("pos が見つかりません")
+        return idx + 1
+
+
+def evaluate_shape_expr(expr: str, text: str) -> int | None:
+    """式を評価。失敗時は None（コマンドスキップ用）。"""
+    raw = str(expr or "").strip()
+    if not raw:
+        return None
+    if _INT_LITERAL_RE.fullmatch(raw):
+        return _parse_int(raw)
+    try:
+        return _ShapeExprParser(raw, text).parse()
+    except _ShapeExprError:
+        return None
+
+
+def validate_shape_expr_syntax(expr: str) -> tuple[bool, str]:
+    """検証用: 式の構文のみ確認（pos の一致は不要）。"""
+    raw = str(expr or "").strip()
+    if not raw:
+        return (False, "空の式")
+    if _INT_LITERAL_RE.fullmatch(raw):
+        return (True, "")
+    try:
+        _ShapeExprParser(raw, "", validate_only=True).parse()
+        return (True, "")
+    except _ShapeExprError as ex:
+        return (False, str(ex))
+
+
+def _parse_numeric_arg(tok: str, text: str) -> int | None:
+    return evaluate_shape_expr(tok, text)
 
 
 def _shape_split(t: str, line_1: int) -> str:
@@ -335,14 +515,14 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
     if c == "left":
         if len(args) < 1:
             return t
-        n = _parse_int(args[0])
+        n = _parse_numeric_arg(args[0], t)
         if n is None:
             return t
         return _shape_left(t, n)
     if c == "right":
         if len(args) < 1:
             return t
-        n = _parse_int(args[0])
+        n = _parse_numeric_arg(args[0], t)
         if n is None:
             return t
         return _shape_right(t, n)
@@ -353,23 +533,23 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
     if c == "mid":
         if len(args) < 2:
             return t
-        a = _parse_int(args[0])
-        b = _parse_int(args[1])
+        a = _parse_numeric_arg(args[0], t)
+        b = _parse_numeric_arg(args[1], t)
         if a is None or b is None:
             return t
         return _shape_mid(t, a, b)
     if c == "cut":
         if len(args) < 2:
             return t
-        a = _parse_int(args[0])
-        b = _parse_int(args[1])
+        a = _parse_numeric_arg(args[0], t)
+        b = _parse_numeric_arg(args[1], t)
         if a is None or b is None:
             return t
         return _shape_cut(t, a, b)
     if c == "ins":
         if len(args) < 2:
             return t
-        pos = _parse_int(args[0])
+        pos = _parse_numeric_arg(args[0], t)
         if pos is None:
             return t
         return _shape_ins(t, pos, args[1])
@@ -485,6 +665,13 @@ def apply_value_shape(text: Any, script: str | None) -> str:
         return s
 
 
+def _validate_shape_numeric_token(tok: str, cmd: str) -> tuple[bool, str]:
+    ok, err = validate_shape_expr_syntax(tok)
+    if ok:
+        return (True, "")
+    return (False, "%s の引数が不正です: %s" % (cmd, err))
+
+
 def compile_shape_script(script: str | None) -> tuple[bool, str]:
     """
     検証用: トークン化と空でないコマンド名の存在だけ確認。
@@ -545,14 +732,39 @@ def compile_shape_script(script: str | None) -> tuple[bool, str]:
         elif cmd in ("left", "right"):
             if i + 1 > n_tok:
                 return (False, "%s の引数が不足しています" % cmd)
+            ok, err = _validate_shape_numeric_token(tokens[i], cmd)
+            if not ok:
+                return (False, err)
             i += 1
-        elif cmd in ("mid", "cut", "padr", "padl", "pad_r", "pad_l", "padright", "padleft"):
+        elif cmd in (
+            "mid",
+            "cut",
+            "padr",
+            "padl",
+            "pad_r",
+            "pad_l",
+            "padright",
+            "padleft",
+        ):
             if i + 2 > n_tok:
                 return (False, "%s の引数が不足しています" % cmd)
+            if cmd in ("mid", "cut"):
+                ok, err = _validate_shape_numeric_token(tokens[i], cmd)
+                if not ok:
+                    return (False, err)
+                ok2, err2 = _validate_shape_numeric_token(tokens[i + 1], cmd)
+                if not ok2:
+                    return (False, err2)
+            elif cmd in ("padr", "padl", "pad_r", "pad_l", "padright", "padleft"):
+                if _parse_int(tokens[i]) is None:
+                    return (False, "%s の引数が不正です" % cmd)
             i += 2
         elif cmd == "ins":
             if i + 2 > n_tok:
                 return (False, "ins の引数が不足しています")
+            ok, err = _validate_shape_numeric_token(tokens[i], cmd)
+            if not ok:
+                return (False, err)
             i += 2
         elif cmd == "case":
             if i + 1 > n_tok:

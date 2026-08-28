@@ -61,6 +61,8 @@ def test_normalize_excel_options_clear_write() -> None:
 
 def test_normalize_excel_options_new_sheet_view_defaults() -> None:
     d = normalize_excel_options({})
+    assert d["output_target"] == "new_sheet"
+    assert d["new_sheet_name_rule"] == "scenario_name_seq"
     assert d["freeze_header_row"] is True
     assert d["autofilter"] is True
     d2 = normalize_excel_options({"freeze_header_row": False, "autofilter": False})
@@ -275,6 +277,15 @@ def test_normalize_excel_options_custom_sheet_name() -> None:
     )
     assert d["new_sheet_name_rule"] == "custom_sheet_name"
     assert d["new_sheet_custom_name"] == "MyTab"
+
+
+def test_create_empty_scenario_excel_defaults() -> None:
+    d = create_empty_scenario()
+    ex = d.get("excel_options") or {}
+    assert ex.get("output_target") == "new_sheet"
+    assert ex.get("new_sheet_name_rule") == "scenario_name_seq"
+    assert ex.get("freeze_header_row") is True
+    assert ex.get("autofilter") is True
 
 
 def test_validate_scenario_custom_sheet_name_empty() -> None:

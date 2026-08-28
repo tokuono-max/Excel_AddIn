@@ -513,7 +513,7 @@ def save_scenario(path: str | Path, data: dict[str, Any]) -> None:
 def default_excel_options() -> dict[str, Any]:
     """メイン画面 Excel タブの既定値（保存 JSON の excel_options と一致）。"""
     return {
-        "output_target": "active_sheet",
+        "output_target": "new_sheet",
         "write_mode": "append",
         "anchor_cell": "",
         "new_sheet_name_rule": "scenario_name_seq",

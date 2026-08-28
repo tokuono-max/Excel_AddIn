@@ -12,9 +12,69 @@ if str(_root) not in sys.path:
 from core.core_value_shape import (  # noqa: E402
     apply_value_shape,
     compile_shape_script,
+    evaluate_shape_expr,
     parse_and_apply_commands,
     tokenize_shape_script,
+    validate_shape_expr_syntax,
 )
+
+_SAMPLE = "ABCDEFGHIJK"
+
+
+def test_expr_left_pos_examples() -> None:
+    assert apply_value_shape(_SAMPLE, 'left,pos("GH")') == "ABCDEFG"
+    assert apply_value_shape(_SAMPLE, 'left,pos("GH")-1') == "ABCDEF"
+    assert apply_value_shape(_SAMPLE, 'left,len()-pos("I")') == "AB"
+
+
+def test_expr_len_literal() -> None:
+    assert evaluate_shape_expr('len("GH")', _SAMPLE) == 2
+    assert evaluate_shape_expr("len()", _SAMPLE) == len(_SAMPLE)
+
+
+def test_expr_ins_before_after() -> None:
+    assert apply_value_shape(_SAMPLE, 'ins,pos("G"),"123"') == "ABCDEF123GHIJK"
+    assert apply_value_shape(_SAMPLE, 'ins,pos("G")+1,"123"') == "ABCDEFG123HIJK"
+    assert apply_value_shape(_SAMPLE, 'ins,pos("GH")+len("GH"),"123"') == "ABCDEFGH123IJK"
+
+
+def test_expr_mid_cut() -> None:
+    assert apply_value_shape(_SAMPLE, 'mid,pos("E")+1,pos("I")-pos("E")-1') == "FGH"
+    assert apply_value_shape(_SAMPLE, 'cut,pos("B"),pos("I")-pos("B")+1') == "AJK"
+
+
+def test_expr_right_after_marker() -> None:
+    assert apply_value_shape(_SAMPLE, 'right,len()-pos("G")') == "HIJK"
+
+
+def test_expr_pos_not_found_skips_command() -> None:
+    assert apply_value_shape(_SAMPLE, 'left,pos("ZZZ")') == _SAMPLE
+    assert apply_value_shape(_SAMPLE, 'trim,left,pos("ZZZ")') == _SAMPLE
+
+
+def test_expr_case_sensitive_pos() -> None:
+    assert apply_value_shape("abcDef", 'left,pos("D")') == "abcD"
+    assert apply_value_shape("abcDef", 'left,pos("d")') == "abcDef"
+
+
+def test_compile_expr_ok() -> None:
+    ok, msg = compile_shape_script('left,pos("GH")-1')
+    assert ok and msg == ""
+
+
+def test_compile_expr_bad() -> None:
+    ok, msg = compile_shape_script("left,pos(")
+    assert not ok
+    assert "不正" in msg
+
+
+def test_validate_expr_syntax() -> None:
+    assert validate_shape_expr_syntax('pos("G")+1')[0]
+    assert not validate_shape_expr_syntax("pos(G)")[0]
+
+
+def test_tokenize_expr_arg() -> None:
+    assert tokenize_shape_script('left,pos("GH")-1') == ["left", 'pos("GH")-1']
 
 
 def test_tokenize_quoted_comma() -> None:
