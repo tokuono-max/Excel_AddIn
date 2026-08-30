@@ -471,6 +471,10 @@ def _write_mode_combo_from_config(
     wm = FocusWheelComboBox()
     for lab, key in zip(wm_items, wm_keys):
         wm.addItem(lab, key)
+    # セル系の既定は行追加 (append)。並びは既存 write_mode_cell_idx 互換のため変えない。
+    default_key = "fill_in" if for_name_detail else "append"
+    dix = wm.findData(default_key)
+    wm.setCurrentIndex(dix if dix >= 0 else 0)
     _combo_fit_viewport(wm)
     return wm
 
@@ -909,6 +913,16 @@ def build_scenario_detail_cell_scroll(
     f2.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
     f2.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
     f2.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    le_sheet = QLineEdit("")
+    le_sheet.setMinimumWidth(0)
+    le_sheet.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    ph_sheet = _dcp(cfg, "PLACEHOLDER_SHEET_NAME", "")
+    if ph_sheet:
+        le_sheet.setPlaceholderText(ph_sheet)
+    tip_sheet = _dcp(cfg, "TOOLTIP_SHEET_NAME", "")
+    if tip_sheet:
+        set_widget_tooltip(le_sheet, tip_sheet)
+    f2.addRow(_field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")), le_sheet)
     sheet_rule_items = _dc(
         cfg, "SHEET_RULE_ITEMS", ["左端シート", "完全一致", "含む", "含まない"]
     )
@@ -921,16 +935,6 @@ def build_scenario_detail_cell_scroll(
         sheet_rule_items,
         0,
     )
-    le_sheet = QLineEdit("")
-    le_sheet.setMinimumWidth(0)
-    le_sheet.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    ph_sheet = _dcp(cfg, "PLACEHOLDER_SHEET_NAME", "")
-    if ph_sheet:
-        le_sheet.setPlaceholderText(ph_sheet)
-    tip_sheet = _dcp(cfg, "TOOLTIP_SHEET_NAME", "")
-    if tip_sheet:
-        set_widget_tooltip(le_sheet, tip_sheet)
-    f2.addRow(_field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")), le_sheet)
     _csv_note = QLabel(_dch(cfg, "SHEET_CSV_NOTE_HTML", ""))
     _csv_note.setWordWrap(True)
     f2.addRow(_csv_note)
@@ -1550,6 +1554,18 @@ def build_scenario_detail_cell_scroll(
     join_fmt = _dcp(cfg, "JOIN_GROUP_TITLE_FMT", "結合キー定義 #%d")
     msg_title_join = _dcp(cfg, "MSGBOX_TITLE", "シナリオ編集")
 
+    def _renumber_join_groups() -> None:
+        for i, one in enumerate(join_defs, start=1):
+            gb0 = one.get("group_box")
+            if gb0 is not None:
+                gb0.setTitle(join_fmt % i)
+
+    def _sync_empty_join_add_controls() -> None:
+        """結合キー 0 件のときだけ末尾「＋ 結合キー追加」を出す（1 件以上は各定義の下に挿入）。"""
+        btn = refs.get("btn_add_join")
+        if btn is not None:
+            btn.setVisible(len(join_defs) == 0)
+
     def remove_join_group(jd: dict[str, Any]) -> None:
         if jd not in join_defs:
             return
@@ -1558,6 +1574,8 @@ def build_scenario_detail_cell_scroll(
         if gb is not None:
             v4.removeWidget(gb)
             gb.deleteLater()
+        _renumber_join_groups()
+        _sync_empty_join_add_controls()
         cb_rm = refs.get("on_join_group_removed")
         if callable(cb_rm):
             cb_rm(jd)
@@ -1630,6 +1648,7 @@ def build_scenario_detail_cell_scroll(
         gv.addLayout(gf_key)
         row_jbtn = QHBoxLayout()
         row_jbtn.addStretch(1)
+        btn_ins_j = QPushButton(_dcp(cfg, "BTN_JOIN_INSERT", "下に挿入"))
         btn_rm_j = QPushButton(_dcp(cfg, "BTN_JOIN_REMOVE", "削除"))
         jd: dict[str, Any] = {
             "cell": le_kc,
@@ -1639,8 +1658,12 @@ def build_scenario_detail_cell_scroll(
             "checks": join_checks,
             "value_shape_script": le_join_shape,
             "group_box": gb,
+            "btn_insert": btn_ins_j,
+            "btn_remove": btn_rm_j,
         }
+        btn_ins_j.clicked.connect(lambda _=False, J=jd: insert_join_group_after(J))
         btn_rm_j.clicked.connect(lambda _=False, J=jd: remove_join_group(J))
+        row_jbtn.addWidget(btn_ins_j)
         row_jbtn.addWidget(btn_rm_j)
         gv.addLayout(row_jbtn)
         _apply_cfg_tip_force(
@@ -1674,6 +1697,12 @@ def build_scenario_detail_cell_scroll(
             "結合キー基準セルからの列オフセットです。",
         )
         _apply_cfg_tip_force(
+            btn_ins_j,
+            cfg,
+            "TIP_BTN_JOIN_INSERT",
+            "この結合キー定義の直後に、新しい定義を差し込みます。末尾に足すときも一番下の定義で挿入します。",
+        )
+        _apply_cfg_tip_force(
             btn_rm_j,
             cfg,
             "TIP_BTN_JOIN_REMOVE",
@@ -1696,6 +1725,28 @@ def build_scenario_detail_cell_scroll(
             )
         return gb, jd
 
+    def _place_join_group_widget(gb: QGroupBox, *, after_gb: Any = None) -> None:
+        """after_gb の直後、無ければ末尾追加アンカー直前へ group_box を置く。"""
+        if after_gb is not None:
+            ix = v4.indexOf(after_gb)
+            if ix >= 0:
+                v4.insertWidget(ix + 1, gb)
+                return
+        anchor = refs.get("_join_group_insert_anchor") or refs.get("btn_add_join")
+        ix = v4.indexOf(anchor) if anchor is not None else -1
+        if ix < 0:
+            ix = max(0, v4.count())
+        v4.insertWidget(ix, gb)
+
+    def _notify_join_group_added(jd: dict[str, Any]) -> None:
+        cb = refs.get("on_join_group_added")
+        if callable(cb):
+            cb(jd)
+        # 追加直後は dirty のみ（即 apply すると結合項目未選択の定義が保存から落ちる）
+        cb_st = refs.get("on_join_group_structure_changed")
+        if callable(cb_st):
+            cb_st(jd)
+
     def append_join_group() -> None:
         max_join = int(_dc(cfg, "MAX_JOIN_DEFS", 50))
         if len(join_defs) >= max_join:
@@ -1707,20 +1758,40 @@ def build_scenario_detail_cell_scroll(
             return
         n = len(join_defs) + 1
         gb, jd = _build_one_join_group(n)
-        anchor = refs.get("_join_group_insert_anchor") or refs.get("btn_add_join")
-        ix = v4.indexOf(anchor) if anchor is not None else -1
-        if ix < 0:
-            ix = max(0, v4.count() - 1)
-        v4.insertWidget(ix, gb)
+        _place_join_group_widget(gb)
         join_defs.append(jd)
-        cb = refs.get("on_join_group_added")
-        if callable(cb):
-            cb(jd)
+        _renumber_join_groups()
+        _sync_empty_join_add_controls()
+        _notify_join_group_added(jd)
+
+    def insert_join_group_after(after_jd: dict[str, Any]) -> None:
+        """指定グループの直後（次定義の直前）へ割り込み追加する。"""
+        max_join = int(_dc(cfg, "MAX_JOIN_DEFS", 50))
+        if len(join_defs) >= max_join:
+            show_warning_notice(
+                None,
+                msg_title_join,
+                _dcp(cfg, "MSG_JOIN_KEY_MAX", "結合キー定義は最大50件までです。"),
+            )
+            return
+        try:
+            at = join_defs.index(after_jd)
+        except ValueError:
+            return
+        gb, jd = _build_one_join_group(at + 2)
+        after_gb = after_jd.get("group_box")
+        _place_join_group_widget(gb, after_gb=after_gb)
+        join_defs.insert(at + 1, jd)
+        _renumber_join_groups()
+        _sync_empty_join_add_controls()
+        _notify_join_group_added(jd)
 
     refs["join_defs"] = join_defs
     refs["join_section_vlayout"] = v4
     refs["append_join_group"] = append_join_group
+    refs["insert_join_group_after"] = insert_join_group_after
     refs["remove_join_group"] = remove_join_group
+    refs["sync_empty_join_add_controls"] = _sync_empty_join_add_controls
     _and_hint = QLabel(_dch(cfg, "JOIN_AND_HINT_HTML", ""))
     _and_hint.setWordWrap(True)
     _join_insert_anchor: QWidget | None = None
@@ -1739,11 +1810,12 @@ def build_scenario_detail_cell_scroll(
         btn_add_key,
         cfg,
         "TIP_BTN_JOIN_ADD",
-        "結合キー定義（AND ブロック）を 1 件追加します。",
+        "結合キーがまだ無いとき、最初の1件を追加します。2件目以降は各定義の「下に挿入」を使います。",
     )
     v4.addWidget(btn_add_key, 0, Qt.AlignmentFlag.AlignLeft)
     refs["btn_add_join"] = btn_add_key
     refs["_join_group_insert_anchor"] = _join_insert_anchor or btn_add_key
+    _sync_empty_join_add_controls()
     sec_join = CollapsibleSection(
         _dcp(cfg, "SEC_JOIN_TITLE", "5. 結合キー"),
         w4,

@@ -19,7 +19,7 @@ def scenario_source_kind_label_and_summary(
     detail_cell_cfg: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
-    種別ラベルと要約本文（シナリオ編集テーブルのツールチップ inner と同じ）。
+    種別ラベルと要約本文（メイン要約列ツールチップ・デバッグ等で共用）。
     名前から取得・セル座標から取得とも、種別の次行から「・」付き行を改行区切り。
     """
     stype = (src.get("type") or "cell").strip().lower()
@@ -45,7 +45,7 @@ def scenario_source_tooltip_html(
     *,
     detail_cell_cfg: dict[str, Any] | None = None,
 ) -> str:
-    """シナリオ編集ソース行と同一の Rich ツールチップ HTML。"""
+    """メイン要約列等向け Rich ツールチップ HTML。"""
     label, summary = scenario_source_kind_label_and_summary(
         src, detail_name_cfg, detail_cell_cfg=detail_cell_cfg
     )

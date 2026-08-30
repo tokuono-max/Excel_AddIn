@@ -1,11 +1,13 @@
 {
   "_header": {
     "File": "ui_help.json",
-    "Function": "操作マニュアル（埋め込み＋VERSION.txt）表示",
-    "Shared_UI": "ヘルプ窓は SCREENS.HELP で表示。モーダルで閉じるまで待機。",
-    "Description": "本文テンプレ HELP_BODY_TEMPLATE（文字列 or 文字列配列）と版プレースホルダは MESSAGES に定義。svc_help が連結・format し、PySide6 のモーダルで表示。TITLE, BTN_CLOSE, WINDOW は config で定義。",
-    "MESSAGES": "FILE_NOT_FOUND=本文組み立て失敗時。HELP_BODY_TEMPLATE=ヘルプ本文（{version},{bootstrap_version}）。文字列1本または文字列配列（要素を\\n連結）。HELP_VERSION_*=版不明時。HELP_CONTENT_EMPTY=本文が空のとき。",
-    "SCREENS_HELP": "ヘルプ窓。TITLE, BTN_CLOSE, WINDOW。SHOW_IN_TASKBAR 既定 false、CENTER_ON_EXCEL 既定 true、TOPMOST・EXCEL_FRONT_FOLLOW で前面化。apply_window_config・prepare_dialog・showEvent で反映。",
+    "Function": "操作マニュアル＋版履歴（VER_HISTORY）",
+    "Shared_UI": "ヘルプ窓は SCREENS.HELP。変更履歴は SCREENS.VER_HISTORY をヘルプ前面の副画面で表示。",
+    "Description": "本文は MESSAGES.HELP_BODY_TEMPLATE。版履歴の正本は VER_HISTORY（BIN/BOOTSTRAP）。CHANGEVER.txt は使わない。",
+    "MESSAGES": "FILE_NOT_FOUND / HELP_BODY_TEMPLATE / HELP_VERSION_* / HELP_CONTENT_EMPTY / VER_HISTORY_EMPTY。",
+    "VER_HISTORY": "BIN・BOOTSTRAP 配列。各要素は version と items（文字列配列）。新しい版を先頭に追加。",
+    "SCREENS_HELP": "TITLE, BTN_CLOSE, BTN_VER_HISTORY, WINDOW。",
+    "SCREENS_VER_HISTORY": "TITLE, BTN_BACK, WINDOW。ヘルプ前面のスクロール専用副画面。",
     "Note": "_header と _separator は core_cst 読込時に除外され、実行時設定としては使用されない。"
   },
   "_separator": "-------------------",
@@ -43,7 +45,7 @@
       "  【アドイン元に戻す】 対象機能の直前操作を取り消します（1 手順分）。",
       "  【更新確認】       配布側の catalog.json とインストール版を照合し、",
       "                    新しい版がある場合に案内します（ファイルの自動更新はしません）。",
-      "  【ヘルプ】         本画面を表示します。",
+      "  【ヘルプ】         本画面を表示します。変更履歴ボタンから版履歴を参照できます。",
       "",
       "■ バージョン更新について",
       "  ・上記のCSV Toolバージョンは、インストール先ルートの VERSION.txt（bin）と",
@@ -51,6 +53,7 @@
       "  ・「更新確認」は通知のみです。更新する場合は Excel を終了し、表示の案内に従い",
       "    バージョン更新を行ってください。",
       "  ・更新確認の記録は、インストール先の logs\\hc_update.log に追記されます。",
+      "  ・版の変更内容は本画面の「変更履歴」から参照できます（config\\ui_help.json の VER_HISTORY）。",
       "",
       "■ ログ（トラブル時）",
       "  ・運用ログの既定:  %TEMP%\\csv_tool\\hc_csv.log",
@@ -65,19 +68,74 @@
     ],
     "HELP_VERSION_MISSING_BIN_CONFIG": "（bin/config のバージョン情報が見つかりません）",
     "HELP_VERSION_MISSING_BOOTSTRAP": "（bootstrap バージョン情報が見つかりません）",
-    "HELP_CONTENT_EMPTY": "（内容なし）"
+    "HELP_CONTENT_EMPTY": "（内容なし）",
+    "VER_HISTORY_EMPTY": "版履歴はまだ登録されていません。"
+  },
+  "VER_HISTORY": {
+    "BIN": [
+      {
+        "version": "1.1.9.4",
+        "items": [
+          "シナリオ編集：連携キー：空欄であった場合前置値代入機能追加",
+          "シナリオ編集：整形(DSL)：left/rightコマンド追加",
+          "シナリオ編集：整形(DSL)：mid/cut/insコマンド追加",
+          "シナリオ編集：整形(DSL)：left/right/mid/cut/insの位置・長さに式（pos(\"文字\")・len()・加減算）を指定可能",
+          "シナリオ編集：Spin/Comboのマウススクロール無効化（フォーカス中のみ有効）",
+          "シナリオ編集：座標入力の大文字化",
+          "シナリオ編集：連携キーの複数セル結合（D10+D11）追加",
+          "シナリオ編集：ファイル名条件をカンマ区切りで複数指定追加",
+          "シナリオ編集：シート名条件をカンマ区切りで複数指定追加",
+          "シナリオ編集：主キースキップ行の連携値を前置保持する機能を追加",
+          "シナリオ編集：非表示箇所を主キー走査から除外する機能を追加",
+          "シナリオ編集：連携キーの割込み挿入（下に挿入）追加",
+          "デバッグ：前置保持の項目名文頭に・を表示追加",
+          "シナリオデバッグ：連携キー結果を項目列へ展開できない場合の修正",
+          "抽出共通：セル内改行を除去（結合セルの折り返し等）",
+          "本番一括／マスタ：主キー全スキップ後の空行（blank singleton）を出さない",
+          "Ver履歴表示：Excel起動時Ver履歴の表示追加",
+          "ヘルプ：変更履歴（VER_HISTORY）副画面を追加"
+        ]
+      }
+    ],
+    "BOOTSTRAP": [
+      {
+        "version": "1.0.9",
+        "items": [
+          "旧版バックアップ削除",
+          "旧版復元機能削除",
+          "フル/差分インストール表示追加"
+        ]
+      }
+    ]
   },
   "SCREENS": {
     "HELP": {
       "TITLE": "ヘルプ",
       "BTN_CLOSE": "閉じる",
       "BTN_CLOSE_TOOLTIP": "ヘルプを閉じて Excel に戻ります。",
+      "BTN_VER_HISTORY": "変更履歴",
+      "BTN_VER_HISTORY_TOOLTIP": "版の変更履歴を表示します。",
       "WINDOW": {
         "RESIZABLE": true,
         "SHOW_MINIMIZE": false,
         "SHOW_MAXIMIZE": true,
         "DEFAULT_WIDTH": 510,
         "DEFAULT_HEIGHT": 420,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "VER_HISTORY": {
+      "TITLE": "変更履歴",
+      "BTN_BACK": "戻る",
+      "BTN_BACK_TOOLTIP": "ヘルプに戻ります。",
+      "WINDOW": {
+        "RESIZABLE": true,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": true,
+        "DEFAULT_WIDTH": 600,
+        "DEFAULT_HEIGHT": 480,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
         "TOPMOST": true

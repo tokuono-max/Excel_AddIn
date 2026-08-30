@@ -1,103 +1,133 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from pathlib import Path
-
 from core.changever import (
-    catalog_changever_relative_path,
-    format_changever_block,
-    parse_changever_sections,
-    resolve_changever_path,
+    format_ver_history_update_block,
+    format_ver_history_viewer_text,
+    parse_ver_history_sections,
+    ver_history_block_for_update,
 )
 
 
-def test_parse_bracket_and_kind() -> None:
-    text = (
-        "[1.1.8.4]\n"
-        "- バックアップ廃止\n"
-        "\n"
-        "[bootstrap 1.0.9]\n"
-        "- ランナー更新\n"
-        "[1.1.9.4]\n"
-        "進捗で差分とフルを区別\n"
-    )
-    secs = parse_changever_sections(text)
-    assert secs[0] == ("bin", "1.1.8.4", ["- バックアップ廃止"])
-    assert secs[1] == ("bootstrap", "1.0.9", ["- ランナー更新"])
-    assert secs[2][0] == "bin"
-    assert secs[2][1] == "1.1.9.4"
-    assert secs[2][2] == ["進捗で差分とフルを区別"]
+def _sample_cfg() -> dict:
+    return {
+        "VER_HISTORY": {
+            "BIN": [
+                {
+                    "version": "1.1.9.4",
+                    "items": ["履歴表示", "進捗文言"],
+                },
+                {
+                    "version": "1.1.8.4",
+                    "items": ["old"],
+                },
+                {
+                    "version": "1.2.0.0",
+                    "items": ["future"],
+                },
+            ],
+            "BOOTSTRAP": [
+                {
+                    "version": "1.0.9",
+                    "items": ["ランナー更新"],
+                }
+            ],
+        },
+        "MESSAGES": {"VER_HISTORY_EMPTY": "（空）"},
+    }
+
+
+def test_parse_ver_history_sections() -> None:
+    secs = parse_ver_history_sections(_sample_cfg())
+    assert secs[0] == ("bin", "1.1.9.4", ["履歴表示", "進捗文言"])
+    assert secs[1] == ("bin", "1.1.8.4", ["old"])
+    assert secs[2] == ("bin", "1.2.0.0", ["future"])
+    assert secs[3] == ("bootstrap", "1.0.9", ["ランナー更新"])
 
 
 def test_format_bin_range_only() -> None:
-    text = (
-        "[1.1.8.4]\n- old\n"
-        "[1.1.9.4]\n- 履歴表示\n- 進捗文言\n"
-        "[1.2.0.0]\n- future\n"
-    )
-    block = format_changever_block(
-        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+    block = format_ver_history_update_block(
+        _sample_cfg(), kind="bin", installed="1.1.8.4", latest="1.1.9.4"
     )
     assert "1.1.9.4" in block
     assert "履歴表示" in block
     assert "old" not in block
     assert "future" not in block
+    assert "ランナー更新" not in block
     assert block.startswith("変更内容:")
 
 
-def test_format_shows_all_lines_by_default() -> None:
-    """既定は上限なし。CHANGEVER に書いた該当行をすべて表示する。"""
-    lines = "\n".join(f"- item{i}" for i in range(1, 14))
-    text = f"[1.1.9.4]\n{lines}\n"
-    block = format_changever_block(
-        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+def test_format_shows_all_matching_lines() -> None:
+    lines = [f"item{i}" for i in range(1, 14)]
+    cfg = {"VER_HISTORY": {"BIN": [{"version": "1.1.9.4", "items": lines}]}}
+    block = format_ver_history_update_block(
+        cfg, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
     )
     assert "item1" in block
     assert "item13" in block
-    assert "（続きは CHANGEVER.txt）" not in block
+    assert "（続きはヘルプの変更履歴）" not in block
 
 
 def test_format_truncate_when_max_lines_set() -> None:
-    lines = "\n".join(f"- item{i}" for i in range(1, 12))
-    text = f"[1.1.9.4]\n{lines}\n"
-    block = format_changever_block(
-        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4", max_lines=8
+    lines = [f"item{i}" for i in range(1, 12)]
+    cfg = {"VER_HISTORY": {"BIN": [{"version": "1.1.9.4", "items": lines}]}}
+    block = format_ver_history_update_block(
+        cfg,
+        kind="bin",
+        installed="1.1.8.4",
+        latest="1.1.9.4",
+        max_lines=8,
     )
-    assert "（続きは CHANGEVER.txt）" in block
+    assert "（続きはヘルプの変更履歴）" in block
     assert "item9" not in block
 
 
-def test_format_current_changever_file() -> None:
+def test_format_from_ui_help_json() -> None:
+    import json
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "CHANGEVER.txt").read_text(
-        encoding="utf-8"
-    )
-    block = format_changever_block(
-        text, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+    path = Path(__file__).resolve().parents[1] / "config" / "ui_help.json"
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    block = format_ver_history_update_block(
+        cfg, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
     )
     assert "1.1.9.4" in block
     assert "複数セル結合" in block
     assert "blank singleton" in block
-    assert "（続きは CHANGEVER.txt）" not in block
-    # bootstrap は bin 確認には出ない
     assert "旧版バックアップ" not in block
+    viewer = format_ver_history_viewer_text(cfg)
+    assert "[CSV Tool 1.1.9.4]" in viewer
+    assert "[bootstrap 1.0.9]" in viewer
+    assert "旧版バックアップ" in viewer
 
 
-def test_format_empty_when_file_blank() -> None:
-    assert format_changever_block("", kind="bin", installed="1.0.0", latest="1.1.0") == ""
+def test_viewer_shows_all_kinds() -> None:
+    text = format_ver_history_viewer_text(_sample_cfg())
+    assert "[CSV Tool 1.1.9.4]" in text
+    assert "[CSV Tool 1.1.8.4]" in text
+    assert "[bootstrap 1.0.9]" in text
+    assert "履歴表示" in text
+    assert "ランナー更新" in text
 
 
-def test_resolve_default_and_catalog_relative(tmp_path: Path) -> None:
-    cat = tmp_path / "catalog.json"
-    cat.write_text("{}", encoding="utf-8")
-    notes = tmp_path / "CHANGEVER.txt"
-    notes.write_text("[1.0.0]\n- x\n", encoding="utf-8")
-    p = resolve_changever_path(cat, {})
-    assert p == notes
-    named = tmp_path / "notes" / "ver.txt"
-    named.parent.mkdir()
-    named.write_text("[1.0.0]\n- y\n", encoding="utf-8")
-    data = {"release_notes": {"relative_path": "notes/ver.txt"}}
-    assert catalog_changever_relative_path(data) == "notes/ver.txt"
-    assert resolve_changever_path(cat, data) == named
+def test_viewer_empty() -> None:
+    assert "登録されていません" in format_ver_history_viewer_text({})
+
+
+def test_update_block_empty() -> None:
+    assert (
+        format_ver_history_update_block(
+            {}, kind="bin", installed="1.0.0", latest="1.1.0"
+        )
+        == ""
+    )
+
+
+def test_ver_history_block_for_update_uses_cfg() -> None:
+    block = ver_history_block_for_update(
+        kind="bin",
+        installed="1.1.8.4",
+        latest="1.1.9.4",
+        cfg=_sample_cfg(),
+    )
+    assert "1.1.9.4" in block

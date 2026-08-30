@@ -29,8 +29,5 @@
       "relative_path": "releases/bootstrap_1.1.0_full.zip",
       "sha256": ""
     }
-  },
-  "release_notes": {
-    "relative_path": "CHANGEVER.txt"
   }
 }

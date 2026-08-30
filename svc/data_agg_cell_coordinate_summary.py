@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from svc.data_agg_name_extract_summary import fmt_ne_write_mode
+from svc.svc_data_agg_scenario import fmt_write_mode_from_ui_block
 
 
 def _lbl(dc: dict[str, Any], key: str, default: str) -> str:
@@ -138,7 +138,7 @@ def cell_coordinate_setting_lines(
             )
         )
 
-    wm_txt = fmt_ne_write_mode(dc, pb.get("write_mode_cell_idx"))
+    wm_txt = fmt_write_mode_from_ui_block(dc, pb, for_name=False)
     lines.append(
         "%s%s: %s" % (pfx, _lbl(dc, "LABEL_WRITE_MODE_DETAIL", "書込みモード"), wm_txt)
     )
@@ -274,7 +274,7 @@ def cell_coordinate_full_detail_lines(
     nchk = _nchk if isinstance(_nchk, list) else []
     proc = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     vss = str(pb.get("value_shape_script") or "").strip()
-    wm_txt = fmt_ne_write_mode(dc, pb.get("write_mode_cell_idx"))
+    wm_txt = fmt_write_mode_from_ui_block(dc, pb, for_name=False)
     sec3: list[str] = [
         "3.1 %s: %s" % (_lbl(dc, "LABEL_CELL_REF", "セル座標"), cref),
         "3.2 %s: %s" % (_lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro),

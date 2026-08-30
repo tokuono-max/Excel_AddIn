@@ -29,7 +29,7 @@
     "BIN_UPDATE_SINGLE_CONFIRM_TITLE": "CSV Tool の更新",
     "BIN_UPDATE_SINGLE_CONFIRM_TEMPLATE": "新しいバージョンがあります。\n\nお使いの版: {installed_bin}\n新しい版: {latest_bin}",
     "BIN_UPDATE_CHANGELOG_HEADER": "変更内容:",
-    "BIN_UPDATE_CHANGELOG_MORE": "（続きは CHANGEVER.txt）",
+    "BIN_UPDATE_CHANGELOG_MORE": "（続きはヘルプの変更履歴）",
     "BIN_UPDATE_SINGLE_BTN_APPLY_NOW": "すぐに更新",
     "BIN_UPDATE_SINGLE_BTN_LATER": "後で",
     "PROGRESS_PREPARE_TITLE": "準備中",

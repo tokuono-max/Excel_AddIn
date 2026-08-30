@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -97,6 +98,17 @@ from ui_qt.ipc_file import (
     try_read_batch_done_notify,
 )
 from svc.data_agg_source_ui import ensure_source_ui_block, source_ui_block
+from svc.svc_data_agg_scenario import (
+    count_incomplete_key_defs,
+    fmt_write_mode_from_ui_block,
+    resolve_source_write_mode_key,
+    scenario_edit_h_splitter_sizes,
+    scenario_edit_min_dialog_width,
+    scenario_edit_ops_row_content_width,
+    scenario_edit_parse_splitter_sizes,
+    scenario_edit_resolve_left_pane_width,
+    scenario_edit_should_reapply_h_splitter,
+)
 from svc.data_agg_name_extract_summary import (
     fmt_ne_length_mode as _fmt_ne_length_mode,
     fmt_ne_start_mode as _fmt_ne_start_mode,
@@ -225,7 +237,7 @@ def _log_data_agg_create_dialog_phase(
 
 
 def _data_agg_summary_table_tooltip(display: str) -> str:
-    """要約表ツールチップ: 区切り「 | 」を改行して複数行表示（メイン項目表・シナリオ編集一覧で共用）。"""
+    """要約表ツールチップ: 区切り「 | 」を改行して複数行表示（メイン項目表の要約列）。"""
     return _normalize_tooltip_text((display or "").replace(" | ", "\n"))
 
 
@@ -2139,7 +2151,7 @@ class _DataAggMainWindow(QDialog):
                         "id": "item_%s" % len(items),
                         "name": "項目_%s" % (len(items) + 1),
                         "sources": [],
-                        "write_mode": "fill_in",
+                        "write_mode": "append",
                     }
                 )
             items[r]["name"] = nm
@@ -2401,7 +2413,7 @@ class _DataAggMainWindow(QDialog):
                     "id": "item_%s" % len(items),
                     "name": "項目_%s" % (len(items) + 1),
                     "sources": [],
-                    "write_mode": "fill_in",
+                    "write_mode": "append",
                 }
             )
         nm = (name or "").strip() or str(items[row].get("name") or ("項目_%s" % (row + 1))).strip()
@@ -2442,7 +2454,7 @@ class _DataAggMainWindow(QDialog):
                 it = {
                     "name": disp or ("項目_%s" % (r + 1)),
                     "sources": [],
-                    "write_mode": "fill_in",
+                    "write_mode": "append",
                 }
             summary = self._format_item_summary(it)
             self._item_table.setItem(r, 2, self._create_summary_item(summary))
@@ -2546,8 +2558,8 @@ class _DataAggMainWindow(QDialog):
 
     def _main_summary_column_tooltip(self, row: int) -> str:
         """
-        シナリオ要約列のツールチップ。
-        取得ソースが登録されている行はシナリオ編集ソース列と同形式（scenario_source_tooltip_plain）。
+        シナリオ要約列のツールチップ（メイン画面タブ1）。
+        取得ソースが登録されている行は scenario_source_tooltip_plain 形式。
         連携先マスタ行・ソース未登録は従来どおり要約セルの「 | 」改行表示。
         """
         c2 = self._item_table.item(row, 2)
@@ -2776,7 +2788,7 @@ class _DataAggMainWindow(QDialog):
             "id": nid,
             "name": nm,
             "sources": [],
-            "write_mode": "fill_in",
+            "write_mode": "append",
         }
         items.insert(insert_at, new_item)
         self._scenario["items"] = items
@@ -3381,7 +3393,7 @@ class _DataAggMainWindow(QDialog):
                         "id": "item_%s" % len(items),
                         "name": "項目_%s" % (len(items) + 1),
                         "sources": [],
-                        "write_mode": "fill_in",
+                        "write_mode": "append",
                     }
                 )
                 self._scenario["items"] = items
@@ -3678,8 +3690,8 @@ class _DataAggMainWindow(QDialog):
         for s in sources[:6]:
             if isinstance(s, dict):
                 parts.append(self._format_one_source_summary(s))
-        wm = item.get("write_mode") or "fill_in"
-        if wm != "fill_in" and not inc and bool(sources):
+        wm = item.get("write_mode") or "append"
+        if wm != "append" and not inc and bool(sources):
             parts.append("書込:%s" % wm)
         out = " | ".join(parts) if parts else ""
         cap = 900
@@ -3788,7 +3800,7 @@ class _DataAggMainWindow(QDialog):
                 "id": prev.get("id") or "item_%s" % i,
                 "name": disp_name,
                 "sources": list(prev.get("sources") or []),
-                "write_mode": prev.get("write_mode") or "fill_in",
+                "write_mode": prev.get("write_mode") or "append",
             }
             items.append(it_ent)
         if items:
@@ -4274,7 +4286,7 @@ class _ScenarioEditDialog(QDialog):
         self._item_id = str(item_id or "")
         self._item_name = str(item_name or "項目").strip() or "項目"
         self._item_write_mode_hint = (
-            str((item_data or {}).get("write_mode") or "fill_in").strip() or "fill_in"
+            str((item_data or {}).get("write_mode") or "append").strip() or "append"
         )
         self._sources_data: list[dict[str, Any]] = []
         self._registered_display_snapshots: list[dict[str, Any] | None] = []
@@ -4297,19 +4309,20 @@ class _ScenarioEditDialog(QDialog):
                     break
         _u = lambda k, d: _ui_disp_str(self._screen_cfg, k, d)
         self.setWindowTitle(_u("TITLE", "シナリオ編集"))
-        mw = int(self._screen_cfg.get("DIALOG_MIN_WIDTH") or 700)
         mh = int(self._screen_cfg.get("DIALOG_MIN_HEIGHT") or 520)
-        # ダイアログの「下限」。ただし子レイアウトの最小サイズの方が大きいと実効最小幅はそちらになる
-        # （詳細ペインは ui_data_agg_scenario_layout の QScrollArea で横スクロール可とし、JSON の MIN が効きやすくする）。
-        if mw > 0:
-            self.setMinimumWidth(mw)
         if mh > 0:
             self.setMinimumHeight(mh)
+        self._scenario_left_pane_width = 0
+        self._scenario_ops_row_width = 0
         root_layout = QVBoxLayout(self)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left_wrap = QWidget()
         left_wrap.setMinimumWidth(0)
+        # 要約・操作ボタン行の sizeHint で左右スプリッタの左幅が押し広げられないよう横は Ignored。
+        left_wrap.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         left_lay = QVBoxLayout(left_wrap)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(4)
@@ -4317,6 +4330,10 @@ class _ScenarioEditDialog(QDialog):
         self._left_splitter.setChildrenCollapsible(False)
         left_top = QWidget()
         left_top.setMinimumHeight(0)
+        left_top.setMinimumWidth(0)
+        left_top.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         left_top_lay = QVBoxLayout(left_top)
         left_top_lay.setContentsMargins(0, 0, 0, 0)
         left_top_lay.setSpacing(4)
@@ -4343,7 +4360,7 @@ class _ScenarioEditDialog(QDialog):
             _normalize_tooltip_text(
                 _u(
                     "TIP_TABLE_HEADER_SCENARIO_NAME",
-                    "シナリオの表示名です。ツールチップで要約の一部を確認できます。",
+                    "シナリオの表示名です。",
                 )
             )
         )
@@ -4362,6 +4379,13 @@ class _ScenarioEditDialog(QDialog):
         )
         self._sources_table.setMinimumHeight(120)
         self._sources_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._sources_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._sources_table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._sources_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._scenario_set_tip(
             self._sources_table,
             "TIP_SCENARIO_SOURCES_TABLE",
@@ -4380,29 +4404,34 @@ class _ScenarioEditDialog(QDialog):
         )
         left_bottom = QWidget()
         left_bottom.setMinimumHeight(0)
+        left_bottom.setMinimumWidth(0)
+        left_bottom.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         left_bottom_lay = QVBoxLayout(left_bottom)
         left_bottom_lay.setContentsMargins(0, 0, 0, 0)
         left_bottom_lay.setSpacing(2)
-        self._summary_preview = QLabel()
-        self._summary_preview.setWordWrap(True)
-        self._summary_preview.setTextFormat(Qt.TextFormat.PlainText)
-        self._summary_preview.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        self._summary_preview = QTextEdit()
+        self._summary_preview.setReadOnly(True)
+        self._summary_preview.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._summary_preview.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
+        self._summary_preview.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._summary_preview.setFrameShape(QFrame.Shape.StyledPanel)
         self._summary_preview.setStyleSheet(
-            "font-size: 11px; color: #333; padding: 4px; background: #fafafa; "
-            "border: 1px solid #ddd; border-radius: 3px;"
+            "QTextEdit { font-size: 11px; color: #333; padding: 4px; "
+            "background: #fafafa; border: 1px solid #ddd; border-radius: 3px; }"
         )
         self._summary_preview.setMinimumHeight(48)
+        self._summary_preview.setMinimumWidth(0)
         self._summary_preview.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
         )
+        self._summary_preview.setTabChangesFocus(False)
         left_bottom_lay.addWidget(self._summary_preview, 1)
-        self._scenario_set_tip(
-            self._summary_preview,
-            "TIP_SCENARIO_SUMMARY_PREVIEW",
-            "選択中シナリオの設定要約（プレーンテキスト）です。",
-        )
 
         def _src_btn_min_w(btn: QPushButton) -> None:
             btn.setMinimumSize(0, 0)
@@ -4470,6 +4499,7 @@ class _ScenarioEditDialog(QDialog):
         _src_btn_min_w(self._btn_undo_remove)
         fr_ops = QFrame()
         fr_ops.setFrameShape(QFrame.Shape.StyledPanel)
+        fr_ops.setMinimumWidth(0)
         fr_ops.setSizePolicy(
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
@@ -4481,13 +4511,28 @@ class _ScenarioEditDialog(QDialog):
         row_ops = QHBoxLayout()
         row_ops.setSpacing(3)
         row_ops.setContentsMargins(0, 0, 0, 0)
-        row_ops.addWidget(btn_src_up)
-        row_ops.addWidget(btn_src_dn)
-        row_ops.addWidget(btn_add)
-        row_ops.addWidget(btn_dup)
-        row_ops.addWidget(btn_remove)
-        row_ops.addWidget(self._btn_undo_remove)
+        _ops_btns = (
+            btn_src_up,
+            btn_src_dn,
+            btn_add,
+            btn_dup,
+            btn_remove,
+            self._btn_undo_remove,
+        )
+        for _ob in _ops_btns:
+            row_ops.addWidget(_ob)
         fr_ops_l.addLayout(row_ops)
+        self._scenario_ops_frame = fr_ops
+        _ops_m = fr_ops_l.contentsMargins()
+        self._scenario_ops_row_width = scenario_edit_ops_row_content_width(
+            [b.width() for b in _ops_btns],
+            spacing=row_ops.spacing(),
+            frame_h_margin=_ops_m.left() + _ops_m.right(),
+        )
+        self._scenario_left_pane_width = scenario_edit_resolve_left_pane_width(
+            self._screen_cfg, self._scenario_ops_row_width
+        )
+        left_wrap.setMinimumWidth(self._scenario_left_pane_width)
         self._scenario_set_tip(
             fr_ops,
             "TIP_SCENARIO_OPS_FRAME",
@@ -4623,6 +4668,9 @@ class _ScenarioEditDialog(QDialog):
         self._cell_refs["on_link_group_structure_changed"] = (
             self._on_link_or_join_structure_changed
         )
+        self._cell_refs["on_join_group_structure_changed"] = (
+            self._on_link_or_join_structure_changed
+        )
         scroll_name, self._name_refs = build_scenario_detail_name_scroll(
             self._item_name, items or [], detail_name
         )
@@ -4643,37 +4691,21 @@ class _ScenarioEditDialog(QDialog):
             "TIP_SCENARIO_RIGHT_WRAP",
             "項目名・種別・取得詳細フォームをまとめた右ペインです。",
         )
-        sz = self._screen_cfg.get("SPLITTER_SIZES")
-        if isinstance(sz, list) and len(sz) >= 2:
-            try:
-                splitter.setSizes([int(sz[0]), int(sz[1])])
-            except (TypeError, ValueError):
-                splitter.setSizes([320, 340])
-        else:
-            splitter.setSizes([320, 340])
-        st0 = int(self._screen_cfg.get("SPLITTER_STRETCH_LEFT") or 1)
+        # 左幅＝操作ボタン行の実測、右幅＝SPLITTER_SIZES[1]。フォーム展開で自動 B 化しない。
+        # 境目ドラッグは可（手動後は再適用しない）。外枠横伸長は右だけ（STRETCH_LEFT=0）。
+        self._scenario_h_splitter_user_moved = False
+        self._scenario_right_wrap = right_wrap
+        st0 = int(self._screen_cfg.get("SPLITTER_STRETCH_LEFT") or 0)
         st1 = int(self._screen_cfg.get("SPLITTER_STRETCH_RIGHT") or 1)
         splitter.setStretchFactor(0, max(st0, 0))
         splitter.setStretchFactor(1, max(st1, 0))
         self._scenario_splitter = splitter
+        self._apply_scenario_h_splitter_sizes(force=True)
         self._scenario_set_tip(
             splitter,
             "TIP_SCENARIO_SPLITTER",
             "左のシナリオ一覧・要約と右の詳細フォームの幅を調整します。",
         )
-        self._scenario_right_wrap = right_wrap
-        rpref = self._screen_cfg.get("RIGHT_PANE_PREF_WIDTH")
-        try:
-            if rpref is not None and int(rpref) > 0:
-                right_wrap.setMinimumWidth(int(rpref))
-        except (TypeError, ValueError):
-            pass
-        rmax = self._screen_cfg.get("RIGHT_PANE_MAX_WIDTH")
-        try:
-            if rmax is not None and int(rmax) > 0:
-                right_wrap.setMaximumWidth(int(rmax))
-        except (TypeError, ValueError):
-            pass
         splitter.splitterMoved.connect(self._on_scenario_splitter_moved)
         root_layout.addWidget(splitter, 1)
         row_btn = QHBoxLayout()
@@ -4699,6 +4731,11 @@ class _ScenarioEditDialog(QDialog):
         row_btn.addWidget(self._btn_register)
         row_btn.addWidget(btn_cancel)
         root_layout.addLayout(row_btn)
+        mw = scenario_edit_min_dialog_width(
+            self._screen_cfg, left_width=self._scenario_left_pane_width
+        )
+        if mw > 0:
+            self.setMinimumWidth(mw)
         # 初期表示サイズ: MIN のみでは QLayout.sizeHint が大きいと開いたときの枠が変わらないことがある。
         # DIALOG_DEFAULT_* があれば優先、なければ DIALOG_MIN_* で resize する。
         dw = self._screen_cfg.get("DIALOG_DEFAULT_WIDTH")
@@ -4780,6 +4817,9 @@ class _ScenarioEditDialog(QDialog):
         QTimer.singleShot(160, self._center_on_parent_widget)
         QTimer.singleShot(0, self._sync_left_splitter_sizes)
         QTimer.singleShot(80, self._sync_left_splitter_sizes)
+        QTimer.singleShot(0, lambda: self._apply_scenario_h_splitter_sizes(force=False))
+        QTimer.singleShot(80, lambda: self._apply_scenario_h_splitter_sizes(force=False))
+        QTimer.singleShot(160, lambda: self._apply_scenario_h_splitter_sizes(force=False))
         QTimer.singleShot(0, self._clear_initial_button_focus)
 
     def _center_on_parent_widget(self) -> None:
@@ -4791,6 +4831,76 @@ class _ScenarioEditDialog(QDialog):
         x = pr.x() + (pr.width() - gr.width()) // 2
         y = pr.y() + (pr.height() - gr.height()) // 2
         self.move(x, y)
+
+    def _scenario_h_splitter_sizes_from_cfg(self) -> tuple[int, int]:
+        """左右スプリッタ初期幅。左は操作ボタン行幅、右は SPLITTER_SIZES[1]。"""
+        _left_cfg, right = scenario_edit_parse_splitter_sizes(self._screen_cfg)
+        left = int(getattr(self, "_scenario_left_pane_width", 0) or 0)
+        if left <= 0:
+            left = _left_cfg
+        return left, right
+
+    def _apply_scenario_h_splitter_sizes(self, *, force: bool = False) -> None:
+        """
+        左右スプリッタを初期幅へ合わせる（左＝▲▼追加…行の実幅）。
+        ユーザーが境目をドラッグ済みなら force=False では触らない（自動 B 化だけ防ぐ）。
+        """
+        if not scenario_edit_should_reapply_h_splitter(
+            user_moved=bool(getattr(self, "_scenario_h_splitter_user_moved", False)),
+            force=force,
+        ):
+            return
+        sp = getattr(self, "_scenario_splitter", None)
+        if sp is None:
+            return
+        left, _right = self._scenario_h_splitter_sizes_from_cfg()
+        sp.setSizes(scenario_edit_h_splitter_sizes(left, _right, sp.width()))
+
+    def _count_incomplete_key_defs_on_form(self) -> tuple[int, int]:
+        """現在フォーム上の連携／結合で項目未選択の定義件数。"""
+        cur = self._current_source_index
+        if cur < 0 or cur >= len(self._sources_data):
+            return 0, 0
+        if (
+            str(self._sources_data[cur].get("type") or "cell").strip().lower()
+            != "cell"
+        ):
+            return 0, 0
+        r = self._cell_refs
+        ph = str(r.get("join_item_placeholder") or "").strip() or "（マスタ項目を選択）"
+        link_items = [
+            str(ld["item_combo"].currentText())
+            for ld in (r.get("link_defs") or [])
+            if ld.get("item_combo") is not None
+        ]
+        join_items = [
+            str(jd["item_combo"].currentText())
+            for jd in (r.get("join_defs") or [])
+            if jd.get("item_combo") is not None
+        ]
+        return count_incomplete_key_defs(link_items, join_items, ph)
+
+    def _combo_set_write_mode_from_ui_block(
+        self,
+        cb: Any,
+        pb: dict[str, Any],
+        *,
+        for_name: bool,
+        fallback_key: str,
+    ) -> None:
+        detail = (
+            self._scenario_edit_detail_name_cfg()
+            if for_name
+            else self._scenario_edit_detail_cell_cfg()
+        )
+        key = resolve_source_write_mode_key(
+            pb,
+            for_name=for_name,
+            detail_cfg=detail,
+            default=fallback_key,
+        )
+        kix = cb.findData(key)
+        cb.setCurrentIndex(kix if kix >= 0 else 0)
 
     def _sync_left_splitter_sizes(self) -> None:
         sp = getattr(self, "_left_splitter", None)
@@ -4901,6 +5011,28 @@ class _ScenarioEditDialog(QDialog):
             self._btn_step.setEnabled(self._is_selected_registered())
 
     def _on_register_clicked(self) -> None:
+        n_link_inc, n_join_inc = self._count_incomplete_key_defs_on_form()
+        if n_link_inc or n_join_inc:
+            t_reg = (
+                _ui_disp_str(self._screen_cfg, "MSGBOX_TITLE", "").strip()
+                or _ui_disp_str(self._screen_cfg, "TITLE", "シナリオ編集")
+            )
+            parts: list[str] = []
+            if n_join_inc:
+                fmt_j = _ui_disp_str(
+                    self._screen_cfg,
+                    "MSG_REGISTER_INCOMPLETE_JOIN_FMT",
+                    "結合項目が未選択の定義 %d 件は保存されません。",
+                )
+                parts.append(fmt_j % n_join_inc)
+            if n_link_inc:
+                fmt_l = _ui_disp_str(
+                    self._screen_cfg,
+                    "MSG_REGISTER_INCOMPLETE_LINK_FMT",
+                    "連携項目が未選択の定義 %d 件は保存されません。",
+                )
+                parts.append(fmt_l % n_link_inc)
+            show_warning_notice(self, t_reg, "\n".join(parts))
         if self._current_source_index >= 0:
             self._apply_form_to_source(self._current_source_index, include_scenario_name=True)
             from svc import svc_data_agg_scenario as _scenario_mod
@@ -5064,11 +5196,24 @@ class _ScenarioEditDialog(QDialog):
         super().reject()
 
     def _on_scenario_splitter_moved(self, _pos: int, _index: int) -> None:
-        """右ペイン幅変更に合わせてスクロール内レイアウトを再計算する。"""
+        """左右境目の手動ドラッグ後。以降の自動 setSizes は抑止し、右レイアウトだけ追従。"""
+        self._scenario_h_splitter_user_moved = True
         self._resync_right_pane_layout()
 
     def _resync_right_pane_layout(self) -> None:
         """右ペイン配下の詳細フォームを現在幅へ追従させる。"""
+        # フォーム展開で sizeHint が変わっても、手動未調整なら左右比を JSON 初期に戻す
+        self._apply_scenario_h_splitter_sizes(force=False)
+        allow_h = False
+        try:
+            dc = self._screen_cfg.get("DETAIL_CELL") or {}
+            dn = self._screen_cfg.get("DETAIL_NAME") or {}
+            allow_h = bool(
+                dc.get("DETAIL_ALLOW_HSCROLL_FALLBACK")
+                or dn.get("DETAIL_ALLOW_HSCROLL_FALLBACK")
+            )
+        except Exception:
+            allow_h = False
         for attr in ("_detail_scroll_cell", "_detail_scroll_name"):
             sc = getattr(self, attr, None)
             if sc is not None:
@@ -5076,8 +5221,11 @@ class _ScenarioEditDialog(QDialog):
                 cont = sc.widget()
                 if cont is not None and vw > 0:
                     cont.setMinimumWidth(0)
-                    # ビューポートより不必要に広がらないよう上限を合わせる。
-                    cont.setMaximumWidth(vw)
+                    if allow_h:
+                        # 横スクロール許可時はビューポート幅で上限を切らない
+                        cont.setMaximumWidth(16777215)
+                    else:
+                        cont.setMaximumWidth(vw)
                 sc.updateGeometry()
         self._form_stack.updateGeometry()
         rw = getattr(self, "_scenario_right_wrap", None)
@@ -5267,16 +5415,8 @@ class _ScenarioEditDialog(QDialog):
             self._sources_table.blockSignals(True)
             try:
                 self._sources_table.setRowCount(len(self._sources_data))
-                dc = self._screen_cfg.get("DETAIL_CELL")
-                dcell = dc if isinstance(dc, dict) else {}
-                dname = self._scenario_edit_detail_name_cfg()
                 disp_names = self._resolve_auto_scenario_display_names()
                 for i, src in enumerate(self._sources_data):
-                    snap_disp = (
-                        self._registered_display_snapshots[i]
-                        if i < len(self._registered_display_snapshots)
-                        else None
-                    )
                     num_it = QTableWidgetItem(str(i + 1))
                     num_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     num_it.setFlags(num_it.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -5287,18 +5427,7 @@ class _ScenarioEditDialog(QDialog):
                     cell_it = QTableWidgetItem(name_disp)
                     cell_it.setFlags(cell_it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     cell_it.setForeground(Qt.GlobalColor.black if sn else Qt.GlobalColor.darkGray)
-                    if snap_disp is None:
-                        cell_it.setToolTip(
-                            _data_agg_summary_table_tooltip("— | （未登録）")
-                        )
-                    else:
-                        cell_it.setToolTip(
-                            _normalize_tooltip_text(
-                                scenario_source_tooltip_plain(
-                                    snap_disp, dname, detail_cell_cfg=dcell
-                                )
-                            )
-                        )
+                    cell_it.setToolTip("")
                     self._sources_table.setItem(i, 1, cell_it)
                 self._sources_table.resizeRowsToContents()
             finally:
@@ -5435,16 +5564,17 @@ class _ScenarioEditDialog(QDialog):
                 pass
             raise
 
+    def _scroll_summary_preview_to_top(self) -> None:
+        sb = self._summary_preview.verticalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.minimum())
+
     def _update_summary_preview(self, row: int) -> None:
         """左ペイン下部の要約（一覧選択行の全文プレビュー）。"""
         _u = lambda k, d: _ui_disp_str(self._screen_cfg, k, d)
         if row < 0 or row >= len(self._sources_data):
             self._summary_preview.clear()
-            self._scenario_set_tip(
-                self._summary_preview,
-                "TIP_SCENARIO_SUMMARY_PREVIEW",
-                "選択中シナリオの設定要約（プレーンテキスト）です。",
-            )
+            self._summary_preview.setToolTip("")
             return
         disp = (
             self._registered_display_snapshots[row]
@@ -5453,27 +5583,15 @@ class _ScenarioEditDialog(QDialog):
         )
         if disp is None:
             full_text = "%s\n\n%s" % (_u("LABEL_SUMMARY_FULL", "要約（全文）"), "（未登録）")
-            self._summary_preview.setText(full_text)
-            self._scenario_set_tip(
-                self._summary_preview,
-                "TIP_SCENARIO_SUMMARY_PREVIEW",
-                "選択中シナリオの設定要約（プレーンテキスト）です。",
-            )
+            self._summary_preview.setPlainText(full_text)
+            self._scroll_summary_preview_to_top()
+            self._summary_preview.setToolTip("")
             return
         lines = self._detail_lines_for_source(disp, row)
         full_text = "%s\n\n%s" % (_u("LABEL_SUMMARY_FULL", "要約（全文）"), "\n".join(lines))
-        self._summary_preview.setText(full_text)
-        long_tip = _normalize_tooltip_text(
-            _normalize_message_newlines(full_text).strip()
-        )
-        if len(long_tip) > 200:
-            set_widget_tooltip(self._summary_preview, long_tip[:4096])
-        else:
-            self._scenario_set_tip(
-                self._summary_preview,
-                "TIP_SCENARIO_SUMMARY_PREVIEW",
-                "選択中シナリオの設定要約（プレーンテキスト）です。",
-            )
+        self._summary_preview.setPlainText(full_text)
+        self._scroll_summary_preview_to_top()
+        self._summary_preview.setToolTip("")
 
     def _make_new_source_template_row(self) -> dict[str, Any]:
         """新規ソース1行分の既定 dict（種別は先頭行の系統に追随）。"""
@@ -6049,13 +6167,13 @@ class _ScenarioEditDialog(QDialog):
                             chk_vals = []
                         for ci, cbx in enumerate(jd.get("checks") or []):
                             cbx.setChecked(self._saved_process_check_at_index(ci, chk_vals))
-                wm_idx = p.get("write_mode_cell_idx")
                 cb_wm = r["write_mode_cell"]
-                if isinstance(wm_idx, int) and 0 <= wm_idx < cb_wm.count():
-                    cb_wm.setCurrentIndex(wm_idx)
-                else:
-                    kix = cb_wm.findData(self._item_write_mode_hint)
-                    cb_wm.setCurrentIndex(kix if kix >= 0 else 0)
+                self._combo_set_write_mode_from_ui_block(
+                    cb_wm,
+                    p,
+                    for_name=False,
+                    fallback_key=self._item_write_mode_hint,
+                )
             elif stype == "name_extract":
                 nr = self._name_refs
                 src_type = str(src.get("source_type") or "file_name")
@@ -6115,12 +6233,13 @@ class _ScenarioEditDialog(QDialog):
                         nr["path_item"].setCurrentIndex(pix if pix >= 0 else 0)
                     else:
                         self._combo_select_saved_master_item(nr["path_item"], path_txt)
-                wm_n = p.get("write_mode_name_idx")
                 cb_wn = nr["write_mode_name"]
-                if isinstance(wm_n, int) and 0 <= wm_n < cb_wn.count():
-                    cb_wn.setCurrentIndex(wm_n)
-                else:
-                    cb_wn.setCurrentIndex(0)
+                self._combo_set_write_mode_from_ui_block(
+                    cb_wn,
+                    p,
+                    for_name=True,
+                    fallback_key="fill_in",
+                )
                 self._on_name_extract_mode_changed()
 
             sn = str(src.get("scenario_name") or "").strip()
@@ -6352,7 +6471,10 @@ class _ScenarioEditDialog(QDialog):
                 for jd in r["join_defs"]
                 if _item_ok(jd["item_combo"].currentText())
             ]
-            p["write_mode_cell_idx"] = int(r["write_mode_cell"].currentIndex())
+            wm_cell = r["write_mode_cell"].currentData()
+            if wm_cell is not None and str(wm_cell).strip():
+                p["write_mode_cell_key"] = str(wm_cell).strip().lower()
+            p.pop("write_mode_cell_idx", None)
         elif stype == "name_extract":
             nr = self._name_refs
             src["type"] = "name_extract"
@@ -6400,7 +6522,10 @@ class _ScenarioEditDialog(QDialog):
                 p["value_shape_script"] = vsn.text().strip()
             p["extract_mode"] = "fixed" if is_fixed else "extract"
             p["path_item"] = nr["path_item"].currentText()
-            p["write_mode_name_idx"] = int(nr["write_mode_name"].currentIndex())
+            wm_name = nr["write_mode_name"].currentData()
+            if wm_name is not None and str(wm_name).strip():
+                p["write_mode_name_key"] = str(wm_name).strip().lower()
+            p.pop("write_mode_name_idx", None)
 
     def get_item(self) -> dict[str, Any]:
         """編集結果の項目辞書を返す（sources・write_mode）。match_keys は更新しない。"""
@@ -6426,7 +6551,7 @@ class _ScenarioEditDialog(QDialog):
             return str(d) if d else "fill_in"
         cb = self._cell_refs["write_mode_cell"]
         d = cb.currentData()
-        return str(d) if d else "fill_in"
+        return str(d) if d else "append"
 
 
 class _DataAggDoneDialog(QDialog):

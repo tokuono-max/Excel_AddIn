@@ -14,11 +14,11 @@ from svc.data_agg_cell_coordinate_summary import (
 from svc.data_agg_name_extract_summary import (
     fmt_ne_length_mode,
     fmt_ne_start_mode,
-    fmt_ne_write_mode,
     ja_search_cond_static,
     ja_search_target_static,
     name_extract_full_detail_lines,
 )
+from svc.svc_data_agg_scenario import fmt_write_mode_from_ui_block
 from svc.data_agg_source_ui import source_ui_block
 
 _SCENARIO_EXPORT_NCOL = 16
@@ -251,7 +251,7 @@ def _append_cell_source_rows(
     nchk = _nchk if isinstance(_nchk, list) else []
     r0[13] = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     r0[14] = str(pb.get("value_shape_script") or "").strip()
-    r0[15] = fmt_ne_write_mode(detail_cell, pb.get("write_mode_cell_idx"))
+    r0[15] = fmt_write_mode_from_ui_block(detail_cell, pb, for_name=False)
     body.append(r0)
 
     for i, ld in enumerate(pb.get("link_defs") or []):
@@ -357,9 +357,9 @@ def _append_name_source_rows(
     r0[13] = "、".join(str(x) for x in nchk if str(x).strip()) or "（なし）"
     r0[14] = str(pb.get("value_shape_script") or "").strip()
     if ex_mode == "fixed":
-        r0[15] = fmt_ne_write_mode(detail_name, pb.get("write_mode_name_idx"))
+        r0[15] = fmt_write_mode_from_ui_block(detail_name, pb, for_name=True)
     else:
-        wm = fmt_ne_write_mode(detail_name, pb.get("write_mode_name_idx"))
+        wm = fmt_write_mode_from_ui_block(detail_name, pb, for_name=True)
         if r0[15]:
             r0[15] = "%s / %s" % (r0[15], wm)
         else:

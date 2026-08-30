@@ -97,14 +97,202 @@ WRITE_MODES = WRITE_MODES_CELL
 
 def normalize_item_write_mode(wm: Any, *, lineage: Optional[str] = None) -> str:
     """items[].write_mode を系統に応じて正規化する。lineage は LINEAGE_CELL / LINEAGE_PATH_NAME / None（セル扱い）。"""
-    s = (str(wm).strip().lower() if wm is not None else "") or "fill_in"
+    # セル系の空・未知は行追加 (append)、名前系は空き上書き (fill_in)。
+    cell_default = "append"
+    name_default = "fill_in"
+    raw = str(wm).strip().lower() if wm is not None else ""
+    s = raw or (name_default if lineage == LINEAGE_PATH_NAME else cell_default)
     if lineage == LINEAGE_PATH_NAME:
         if s in WRITE_MODES_NAME:
             return s
-        return "fill_in"
+        return name_default
     if s in WRITE_MODES_CELL:
         return s
-    return "fill_in"
+    return cell_default
+
+
+def write_mode_keys_from_detail_cfg(
+    detail_cfg: dict[str, Any] | None, *, for_name: bool
+) -> list[str]:
+    """DETAIL_CELL / DETAIL_NAME の WRITE_MODE_KEYS（欠損時は既定並び）。"""
+    if for_name:
+        default = ["overwrite", "fill_in", "prepend", "append_end"]
+    else:
+        default = ["fill_in", "overwrite", "append", "duplicate_append"]
+    if not isinstance(detail_cfg, dict):
+        return list(default)
+    keys = detail_cfg.get("WRITE_MODE_KEYS")
+    if isinstance(keys, list) and keys:
+        return [str(x).strip().lower() for x in keys]
+    return list(default)
+
+
+def resolve_source_write_mode_key(
+    pb: dict[str, Any],
+    *,
+    for_name: bool,
+    detail_cfg: dict[str, Any] | None = None,
+    default: str | None = None,
+) -> str:
+    """ui_scenario_source_v1 から書込みモード内部キーを解決（key 優先、idx は互換）。"""
+    allowed = WRITE_MODES_NAME if for_name else WRITE_MODES_CELL
+    fallback = default or ("fill_in" if for_name else "append")
+    key_field = "write_mode_name_key" if for_name else "write_mode_cell_key"
+    idx_field = "write_mode_name_idx" if for_name else "write_mode_cell_idx"
+    raw_k = pb.get(key_field)
+    if raw_k is not None and str(raw_k).strip():
+        s = str(raw_k).strip().lower()
+        if s in allowed:
+            return s
+    keys = write_mode_keys_from_detail_cfg(detail_cfg, for_name=for_name)
+    raw_idx = pb.get(idx_field)
+    if isinstance(raw_idx, int) and 0 <= raw_idx < len(keys):
+        s = str(keys[raw_idx]).strip().lower()
+        if s in allowed:
+            return s
+    return fallback
+
+
+def migrate_ui_block_write_mode_keys(
+    pb: dict[str, Any],
+    *,
+    for_name: bool,
+    detail_cfg: dict[str, Any] | None = None,
+) -> None:
+    """write_mode_*_idx を write_mode_*_key へ移行（インプレース）。key が正なら idx は除去。"""
+    key_field = "write_mode_name_key" if for_name else "write_mode_cell_key"
+    idx_field = "write_mode_name_idx" if for_name else "write_mode_cell_idx"
+    allowed = WRITE_MODES_NAME if for_name else WRITE_MODES_CELL
+    default = "fill_in" if for_name else "append"
+    resolved = resolve_source_write_mode_key(
+        pb, for_name=for_name, detail_cfg=detail_cfg, default=default
+    )
+    pb[key_field] = resolved
+    if resolved in allowed:
+        pb.pop(idx_field, None)
+
+
+def fmt_write_mode_from_ui_block(
+    detail_cfg: dict[str, Any],
+    pb: dict[str, Any],
+    *,
+    for_name: bool,
+) -> str:
+    """UI ブロックの書込みモードを表示ラベル（WRITE_MODE_ITEMS）に変換。"""
+    key = resolve_source_write_mode_key(
+        pb,
+        for_name=for_name,
+        detail_cfg=detail_cfg,
+        default="fill_in" if for_name else "append",
+    )
+    items = detail_cfg.get("WRITE_MODE_ITEMS")
+    keys = write_mode_keys_from_detail_cfg(detail_cfg, for_name=for_name)
+    if not isinstance(items, list) or not items:
+        return key
+    try:
+        ix = keys.index(key)
+    except ValueError:
+        return key
+    if 0 <= ix < len(items):
+        return str(items[ix])
+    return key
+
+
+def count_incomplete_key_defs(
+    link_item_texts: list[str],
+    join_item_texts: list[str],
+    placeholder: str,
+) -> tuple[int, int]:
+    """連携／結合の項目コンボが未選択（プレースホルダのみ）の件数。"""
+    ph = str(placeholder or "").strip() or "（マスタ項目を選択）"
+
+    def _incomplete(text: str) -> bool:
+        t = str(text or "").strip()
+        return not t or t == ph
+
+    n_link = sum(1 for t in link_item_texts if _incomplete(t))
+    n_join = sum(1 for t in join_item_texts if _incomplete(t))
+    return n_link, n_join
+
+
+def scenario_edit_parse_splitter_sizes(cfg: dict[str, Any]) -> tuple[int, int]:
+    """SCENARIO_EDIT.SPLITTER_SIZES を (左, 右) にパース。"""
+    left, right = 245, 435
+    sz = cfg.get("SPLITTER_SIZES")
+    if isinstance(sz, list) and len(sz) >= 2:
+        try:
+            left = max(1, int(sz[0]))
+            right = max(1, int(sz[1]))
+        except (TypeError, ValueError):
+            pass
+    return left, right
+
+
+def scenario_edit_ops_row_content_width(
+    button_widths: list[int],
+    *,
+    spacing: int = 3,
+    frame_h_margin: int = 8,
+) -> int:
+    """操作ボタン行（▲▼追加…）の内容幅（枠内余白込み、ボタン外側パディング除く）。"""
+    if not button_widths:
+        return 0
+    n = len(button_widths)
+    inner = sum(max(0, int(w)) for w in button_widths)
+    if n > 1:
+        inner += max(0, int(spacing)) * (n - 1)
+    return inner + max(0, int(frame_h_margin))
+
+
+def scenario_edit_resolve_left_pane_width(
+    cfg: dict[str, Any], ops_row_width: int
+) -> int:
+    """
+    左ペイン幅。操作ボタン行の実幅を正とし、SPLITTER_SIZES[0] は ops 未計測時のフォールバック。
+    """
+    cfg_left, _ = scenario_edit_parse_splitter_sizes(cfg)
+    try:
+        extra = int(cfg.get("LEFT_PANE_OPS_EXTRA_PAD") or 0)
+    except (TypeError, ValueError):
+        extra = 0
+    extra = max(0, extra)
+    if int(ops_row_width) > 0:
+        return max(1, int(ops_row_width) + extra)
+    return cfg_left
+
+
+def scenario_edit_min_dialog_width(
+    cfg: dict[str, Any], *, left_width: int | None = None
+) -> int:
+    """左右ペイン合計＋ハンドル余白と DIALOG_MIN_WIDTH の大きい方。"""
+    left_cfg, right = scenario_edit_parse_splitter_sizes(cfg)
+    left = max(1, int(left_width)) if left_width is not None else left_cfg
+    try:
+        margin = int(cfg.get("SPLITTER_HANDLE_MARGIN") or 12)
+    except (TypeError, ValueError):
+        margin = 12
+    margin = max(0, margin)
+    from_splitter = left + right + margin
+    try:
+        explicit = int(cfg.get("DIALOG_MIN_WIDTH") or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return max(from_splitter, explicit)
+    return from_splitter
+
+
+def scenario_edit_h_splitter_sizes(
+    left: int, right: int, total_width: int
+) -> list[int]:
+    """水平スプリッタ: 左幅を固定し、残りを右へ。"""
+    total = max(int(total_width), int(left) + int(right))
+    return [int(left), max(1, total - int(left))]
+
+
+def scenario_edit_should_reapply_h_splitter(*, user_moved: bool, force: bool) -> bool:
+    """自動再適用してよいか（手動ドラッグ後は force のみ）。"""
+    return bool(force) or not bool(user_moved)
 
 
 def _normalize_scenario_payload(data: dict[str, Any]) -> None:
@@ -126,12 +314,15 @@ def _normalize_scenario_payload(data: dict[str, Any]) -> None:
                 pb = source_ui_block(src)
                 if not isinstance(pb, dict):
                     continue
+                st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
+                for_name = st == SOURCE_TYPE_NAME_EXTRACT
                 wmc = pb.get("write_mode_cell_idx")
                 if isinstance(wmc, int) and wmc >= 4:
                     pb["write_mode_cell_idx"] = 0
                 wmn = pb.get("write_mode_name_idx")
                 if isinstance(wmn, int) and wmn >= len(WRITE_MODES_NAME):
                     pb["write_mode_name_idx"] = 0
+                migrate_ui_block_write_mode_keys(pb, for_name=for_name, detail_cfg=None)
 
 
 def load_scenario(path: str | Path) -> dict[str, Any]:

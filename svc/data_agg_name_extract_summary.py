@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from svc.svc_data_agg_scenario import fmt_write_mode_from_ui_block
+
 # --- セクション内の (インデックス, vals キー)（シナリオ編集要約と同一） ---
 NE_SECTION1_PAIRS: list[tuple[str, str]] = [
     ("1.1", "検索対象"),
@@ -150,7 +152,7 @@ def name_extract_setting_lines(
         cap = 80 if pfx else 48
         lines.append("%s整形（DSL）: %s" % (pfx, vss[:cap] + ("…" if len(vss) > cap else "")))
     lines.append(
-        "%s書込みモード: %s" % (pfx, fmt_ne_write_mode(detail_name, pb.get("write_mode_name_idx")))
+        "%s書込みモード: %s" % (pfx, fmt_write_mode_from_ui_block(detail_name, pb, for_name=True))
     )
     lines.append("%s関連付け: %s" % (pfx, str(pb.get("path_item") or "—")))
     return lines

@@ -32,7 +32,7 @@ from packaging.version import InvalidVersion, Version
 from core import core_env, runtime_layout
 from core.core_log import append_text_with_cap, get_logger
 from core.runtime_layout import packaged_spawn_requested
-from core.changever import changever_block_for_catalog
+from core.changever import ver_history_block_for_update
 from core.patch_manifest import materialize_manifest_patch_zip as _materialize_patch_zip_for_worker
 from core.update_state import build_paths, clear_pending, read_pending, write_pending
 try:
@@ -101,23 +101,19 @@ def _update_check_title() -> str:
 
 
 def _changever_block_for_status(st: dict[str, Any], *, kind: str) -> str:
-    cat_s = str(st.get("catalog_path") or "").strip()
-    cat_path = Path(cat_s) if cat_s else None
-    data = load_catalog(cat_path) if cat_path is not None and cat_path.is_file() else None
+    """ui_help.json の VER_HISTORY から差分履歴を組み立てる（CHANGEVER.txt は使わない）。"""
     if kind == "bootstrap":
         installed = str(st.get("installed_bootstrap_version") or "").strip()
         latest = str(st.get("latest_bootstrap_version") or "").strip()
     else:
         installed = str(st.get("installed_bin") or "").strip()
         latest = str(st.get("latest_bin_version") or "").strip()
-    block = changever_block_for_catalog(
-        cat_path,
-        data,
+    block = ver_history_block_for_update(
         kind=kind,
         installed=installed,
         latest=latest,
         header=_um("BIN_UPDATE_CHANGELOG_HEADER", "変更内容:"),
-        more=_um("BIN_UPDATE_CHANGELOG_MORE", "（続きは CHANGEVER.txt）"),
+        more=_um("BIN_UPDATE_CHANGELOG_MORE", "（続きはヘルプの変更履歴）"),
     )
     return ("\n\n" + block) if block else ""
 
