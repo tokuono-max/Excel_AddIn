@@ -811,6 +811,17 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
         req_dict = payload
 
     _req_action_block = str(req_dict.get("action", "") or "").strip().lower()
+    if (
+        module_name == "ui_qt.ui_update_check"
+        and _req_action_block == "update_check_busy_dismiss"
+    ):
+        try:
+            from ui_qt.ui_update_check import dismiss_update_check_busy
+
+            dismiss_update_check_busy()
+        except Exception:
+            pass
+        return {"status": "OK", "rc": 0, "button": "ok"}
     if _file_pick_blocked_by_active_modal(module_name, _req_action_block):
         logger.warning(
             "[UI_DISPATCH] file pick blocked by active modal module=%s action=%s sheet_id=%s",
@@ -1003,6 +1014,8 @@ def _dispatch(payload: dict[str, Any], *, source_req: str = "") -> dict[str, Any
             if a == "progress":
                 is_modeless = True
                 logger.debug("[CSV_LD_FLOW] ui_server: progress request received, creating dialog t=%.3f", time.time())
+            if a == "update_check_busy":
+                is_modeless = True
             # 明示指定も許可
             if bool(req_dict.get("modeless", False)):
                 is_modeless = True

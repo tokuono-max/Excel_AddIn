@@ -9,6 +9,7 @@
   "MESSAGES": {
     "UPDATE_CHECK_DIALOG_TITLE": "CSV Tool 更新",
     "UPDATE_CHECK_BUSY": "更新確認はすでに実行中です。\n\n完了してから再度お試しください。",
+    "UPDATE_CHECK_BUSY_CHECKING": "更新を確認しています…\nしばらくお待ちください。",
     "BIN_APPLY_SUCCESS_NOTIFY_TEMPLATE": "（未使用: defer 完了は更新ウィンドウで案内します）",
     "INTERACTIVE_ERROR_TEMPLATE": "更新確認中にエラーが発生しました。\nhc_csv.log および hc_update.log を参照し原因を特定してください。\n\n{error}",
     "SKIPPED_NO_CATALOG_TEMPLATE": "更新確認の対象が設定されていません。\n環境変数 HC_DEPLOY_ROOT（共有の配布ルート）または HC_CATALOG_PATH（catalog.json のフルパス）、\nまたはインストール先の config\\catalog_path.txt（1 行目に catalog.json のパス）を設定してください。\n\nログ: {log_path}",
@@ -117,6 +118,20 @@
         "SHOW_MAXIMIZE": false,
         "DEFAULT_WIDTH": 600,
         "DEFAULT_HEIGHT": 480,
+        "CENTER_ON_EXCEL": true,
+        "SHOW_IN_TASKBAR": false,
+        "TOPMOST": true
+      }
+    },
+    "BUSY": {
+      "TITLE": "CSV Tool 更新",
+      "MSG": "処理中…",
+      "WINDOW": {
+        "RESIZABLE": false,
+        "SHOW_MINIMIZE": false,
+        "SHOW_MAXIMIZE": false,
+        "DEFAULT_WIDTH": 420,
+        "DEFAULT_HEIGHT": 140,
         "CENTER_ON_EXCEL": true,
         "SHOW_IN_TASKBAR": false,
         "TOPMOST": true

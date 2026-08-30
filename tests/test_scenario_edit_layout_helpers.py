@@ -22,6 +22,7 @@ from svc.svc_data_agg_scenario import (  # noqa: E402
     scenario_edit_parse_splitter_sizes,
     scenario_edit_resolve_left_pane_width,
     scenario_edit_should_reapply_h_splitter,
+    scenario_name_for_form_display,
 )
 
 
@@ -47,6 +48,15 @@ def test_scenario_edit_min_dialog_width_with_ops_left() -> None:
         "DIALOG_MIN_WIDTH": 680,
     }
     assert scenario_edit_min_dialog_width(cfg, left_width=260) == 707
+
+
+def test_scenario_name_for_form_display_stored() -> None:
+    assert scenario_name_for_form_display("  既存名  ", "品名_シナリオ1") == "既存名"
+
+
+def test_scenario_name_for_form_display_default() -> None:
+    assert scenario_name_for_form_display("", "品名_シナリオ1") == "品名_シナリオ1"
+    assert scenario_name_for_form_display(None, "品名_シナリオ2") == "品名_シナリオ2"
 
 
 def test_scenario_edit_ops_row_content_width() -> None:

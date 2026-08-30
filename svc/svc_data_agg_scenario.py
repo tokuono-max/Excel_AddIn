@@ -215,6 +215,14 @@ def count_incomplete_key_defs(
     return n_link, n_join
 
 
+def scenario_name_for_form_display(stored_name: Any, default_name: str) -> str:
+    """シナリオ編集右ペイン: 未確定（空）なら一覧と同じ自動名、確定済みなら保存名。"""
+    sn = str(stored_name or "").strip()
+    if sn:
+        return sn
+    return str(default_name or "").strip()
+
+
 def scenario_edit_parse_splitter_sizes(cfg: dict[str, Any]) -> tuple[int, int]:
     """SCENARIO_EDIT.SPLITTER_SIZES を (左, 右) にパース。"""
     left, right = 245, 435

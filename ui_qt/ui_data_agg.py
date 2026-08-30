@@ -108,6 +108,7 @@ from svc.svc_data_agg_scenario import (
     scenario_edit_parse_splitter_sizes,
     scenario_edit_resolve_left_pane_width,
     scenario_edit_should_reapply_h_splitter,
+    scenario_name_for_form_display,
 )
 from svc.data_agg_name_extract_summary import (
     fmt_ne_length_mode as _fmt_ne_length_mode,
@@ -5472,7 +5473,7 @@ class _ScenarioEditDialog(QDialog):
         if row < 0 or row >= len(self._sources_data):
             return False
         if 0 <= self._current_source_index < len(self._sources_data) and self._current_source_index != row:
-            self._apply_form_to_source(self._current_source_index, include_scenario_name=True)
+            self._apply_form_to_source(self._current_source_index, include_scenario_name=False)
         self._current_source_index = row
         self._load_source_to_form(row)
         self._normalize_registered_snapshots_len()
@@ -5613,7 +5614,7 @@ class _ScenarioEditDialog(QDialog):
         insert_at = max(0, min(int(insert_at), len(self._sources_data)))
         if 0 <= self._current_source_index < len(self._sources_data):
             self._apply_form_to_source(
-                self._current_source_index, include_scenario_name=True
+                self._current_source_index, include_scenario_name=False
             )
         self._sources_data.insert(insert_at, self._make_new_source_template_row())
         self._registered_display_snapshots.insert(insert_at, None)
@@ -5684,10 +5685,10 @@ class _ScenarioEditDialog(QDialog):
         if row < 0 or row >= len(self._sources_data):
             return
         if 0 <= self._current_source_index < len(self._sources_data) and self._current_source_index != row:
-            self._apply_form_to_source(self._current_source_index, include_scenario_name=True)
+            self._apply_form_to_source(self._current_source_index, include_scenario_name=False)
         self._current_source_index = row
         self._load_source_to_form(row)
-        self._apply_form_to_source(row, include_scenario_name=True)
+        self._apply_form_to_source(row, include_scenario_name=False)
         insert_at = row + 1
         dup = copy.deepcopy(self._sources_data[row])
         dup["registered"] = False
@@ -6242,14 +6243,11 @@ class _ScenarioEditDialog(QDialog):
                 )
                 self._on_name_extract_mode_changed()
 
-            sn = str(src.get("scenario_name") or "").strip()
-            if not sn:
-                self._edit_scenario_ident.setPlaceholderText(self._default_scenario_name(idx))
-                self._edit_scenario_ident.setText("")
-            else:
-                self._edit_scenario_ident.setPlaceholderText(self._default_scenario_name(idx))
-                self._edit_scenario_ident.setText(sn)
-            self._on_scenario_name_text_changed(self._edit_scenario_ident.text())
+            default_nm = self._default_scenario_name(idx)
+            form_nm = scenario_name_for_form_display(src.get("scenario_name"), default_nm)
+            self._edit_scenario_ident.setPlaceholderText(default_nm)
+            self._edit_scenario_ident.setText(form_nm)
+            self._on_scenario_name_text_changed(form_nm)
 
             self._dirty = False
             self._update_register_button_state()
@@ -6297,6 +6295,10 @@ class _ScenarioEditDialog(QDialog):
 
     def _scenario_edit_detail_name_cfg(self) -> dict[str, Any]:
         d = self._screen_cfg.get("DETAIL_NAME")
+        return d if isinstance(d, dict) else {}
+
+    def _scenario_edit_detail_cell_cfg(self) -> dict[str, Any]:
+        d = self._screen_cfg.get("DETAIL_CELL")
         return d if isinstance(d, dict) else {}
 
     def _ja_display_start_mode(self, raw: Any) -> str:
@@ -6531,7 +6533,7 @@ class _ScenarioEditDialog(QDialog):
         """編集結果の項目辞書を返す（sources・write_mode）。match_keys は更新しない。"""
         cur = self._current_source_index
         if cur >= 0 and cur < len(self._sources_data):
-            self._apply_form_to_source(cur, include_scenario_name=True)
+            self._apply_form_to_source(cur, include_scenario_name=False)
         out_sources: list[dict[str, Any]] = []
         for s in self._sources_data:
             one = copy.deepcopy(s)

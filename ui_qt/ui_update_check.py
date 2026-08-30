@@ -6,13 +6,16 @@ ui_server からの IPC 要求で表示し、Excel 前面・中央表示を優�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
+
+_UPDATE_CHECK_BUSY_DIALOG: UpdateCheckBusyDialog | None = None
 
 
 def _get_cfg() -> dict[str, Any]:
@@ -27,7 +30,139 @@ def _screen_key_for_action(action: str) -> str:
         return "CONFIRM"
     if a == "update_check_warning":
         return "WARNING"
+    if a == "update_check_busy":
+        return "BUSY"
     return "DONE"
+
+
+def dismiss_update_check_busy() -> None:
+    global _UPDATE_CHECK_BUSY_DIALOG
+    dlg = _UPDATE_CHECK_BUSY_DIALOG
+    _UPDATE_CHECK_BUSY_DIALOG = None
+    if dlg is None:
+        return
+    try:
+        dlg.close()
+    except Exception:
+        pass
+    try:
+        dlg.deleteLater()
+    except Exception:
+        pass
+
+
+class UpdateCheckBusyDialog(QDialog):
+    """更新確認／準備中の modeless 表示（ボタンなし）。"""
+
+    def __init__(self, req: dict[str, Any], parent_hwnd: int, cfg: dict[str, Any]) -> None:
+        super().__init__()
+        self._req = req or {}
+        self._parent_hwnd = int(parent_hwnd or 0)
+        self._cfg = cfg or {}
+        self._ready_path = str(self._req.get("ready_path") or "").strip()
+        self._excel_unlocked = False
+
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        except Exception:
+            pass
+
+        screens = (self._cfg.get("SCREENS") or {}) if isinstance(self._cfg, dict) else {}
+        screen_cfg = (screens.get("BUSY") or {}) if isinstance(screens, dict) else {}
+        title = str(self._req.get("title") or screen_cfg.get("TITLE") or "CSV Tool 更新").strip()
+        self.setWindowTitle(title or "CSV Tool 更新")
+        msg = str(
+            self._req.get("message") or screen_cfg.get("MSG") or "処理中…"
+        ).strip()
+
+        from ui_qt.ui_common import (
+            _normalize_message_newlines,
+            _set_owner_hwnd,
+            apply_window_config,
+            center_on_excel,
+            enable_excel_window,
+            ensure_dialog_front_of_excel,
+            excel_rect_tuple_from_req,
+        )
+
+        self._center_on_excel = center_on_excel
+        self._ensure_dialog_front_of_excel = ensure_dialog_front_of_excel
+        self._enable_excel_window = enable_excel_window
+        self._set_owner_hwnd = _set_owner_hwnd
+        self._excel_rect_tuple_from_req = excel_rect_tuple_from_req
+
+        lay = QVBoxLayout(self)
+        msg_lbl = QLabel(_normalize_message_newlines(msg))
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setMinimumWidth(360)
+        try:
+            msg_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        except Exception:
+            pass
+        lay.addWidget(msg_lbl)
+
+        win_cfg = screen_cfg.get("WINDOW") if isinstance(screen_cfg, dict) else None
+        if not isinstance(win_cfg, dict):
+            win_cfg = {}
+        try:
+            apply_window_config(self, {"WINDOW": win_cfg}, self._parent_hwnd, "BUSY")
+        except Exception:
+            pass
+        w = int(win_cfg.get("DEFAULT_WIDTH") or 0)
+        h = int(win_cfg.get("DEFAULT_HEIGHT") or 0)
+        if w > 0 and h > 0:
+            self.resize(w, h)
+        else:
+            self.adjustSize()
+        if self._parent_hwnd:
+            try:
+                self._set_owner_hwnd(self, self._parent_hwnd)
+            except Exception:
+                pass
+
+    def _write_ready(self) -> None:
+        rp = self._ready_path
+        if not rp:
+            return
+        try:
+            p = Path(rp)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("ready", encoding="utf-8")
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._write_ready()
+        ph = int(self._parent_hwnd or 0)
+        if not ph:
+            return
+        rect = self._excel_rect_tuple_from_req(self._req)
+
+        def _front() -> None:
+            try:
+                self._center_on_excel(self, ph, rect)
+            except Exception:
+                pass
+            try:
+                self._ensure_dialog_front_of_excel(self, ph, rect)
+            except Exception:
+                pass
+            try:
+                self._enable_excel_window(ph, False)
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _front)
+        QTimer.singleShot(120, _front)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._parent_hwnd:
+            try:
+                self._enable_excel_window(self._parent_hwnd, True)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 
 class UpdateCheckDialog(QDialog):
@@ -137,7 +272,6 @@ class UpdateCheckDialog(QDialog):
         if not isinstance(win_cfg, dict):
             win_cfg = {}
         try:
-            # CONFIRM / WARNING / DONE ごとに WINDOW 設定を使い、前面化タイマーは ui_common の screen_key 規約に合わせる。
             apply_window_config(self, {"WINDOW": win_cfg}, self._parent_hwnd, sk)
         except Exception:
             pass
@@ -236,6 +370,15 @@ class UpdateCheckDialog(QDialog):
         return {"status": "CANCEL", "button": self._button, "rc": rc}
 
 
-def create_dialog(req_dict: dict[str, Any] | None, parent_hwnd: int, sheet_id: str) -> UpdateCheckDialog:
+def create_dialog(req_dict: dict[str, Any] | None, parent_hwnd: int, sheet_id: str) -> QDialog:
     _ = sheet_id
-    return UpdateCheckDialog(req_dict or {}, int(parent_hwnd or 0), _get_cfg())
+    req = req_dict or {}
+    action = str(req.get("action") or "").strip().lower()
+    cfg = _get_cfg()
+    if action == "update_check_busy":
+        global _UPDATE_CHECK_BUSY_DIALOG
+        dismiss_update_check_busy()
+        dlg = UpdateCheckBusyDialog(req, int(parent_hwnd or 0), cfg)
+        _UPDATE_CHECK_BUSY_DIALOG = dlg
+        return dlg
+    return UpdateCheckDialog(req, int(parent_hwnd or 0), cfg)

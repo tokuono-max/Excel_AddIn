@@ -655,7 +655,7 @@
       "TIP_COMBO_JOIN_PATH": "（廃止）",
       "TIP_LABEL_ITEM_NAME": "マスタ上のこの列（項目）の名称です。",
       "TIP_LABEL_SCENARIO_NAME": "一覧で識別するシナリオ名です。",
-      "TIP_SCENARIO_NAME_EDIT": "空のときは自動生成名が一覧に表示されます。",
+      "TIP_SCENARIO_NAME_EDIT": "一覧と同じ名前を表示します。変更は「登録」で確定します。",
       "TIP_FORM_COMBO_TYPE": "取得元の種別です。変更すると詳細フォームが切り替わります。",
       "TIP_LABEL_SUMMARY_FULL": "選択中シナリオの設定要約（全文）です。",
       "TIP_BTN_OK": "変更を項目に反映してダイアログを閉じます。",

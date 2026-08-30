@@ -1047,6 +1047,163 @@ def _wait_ui_dispatch_result(result_path: Path, timeout_sec: float = 120.0) -> d
     return None
 
 
+def _wait_ready_path(ready_path: Path, timeout_sec: float = 30.0) -> bool:
+    deadline = time.time() + max(0.1, float(timeout_sec))
+    while time.time() < deadline:
+        try:
+            if ready_path.is_file() and ready_path.stat().st_size > 0:
+                return True
+        except OSError:
+            pass
+        time.sleep(0.03)
+    return False
+
+
+def _dispatch_update_check_ui_request(
+    req_dict: dict[str, Any],
+    *,
+    owner_hwnd: int,
+    sheet_id: str = "",
+    ready_path: Path | None = None,
+    timeout_sec: float = 120.0,
+) -> dict[str, Any] | None:
+    try:
+        from svc.svc_host import ensure_ui_server
+        from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle
+    except Exception:
+        return None
+    try:
+        ensure_ui_server()
+    except Exception as e:
+        logger.warning("packaged_update ensure_ui_server failed: %s", e)
+        return None
+    ts_ms = int(time.time() * 1000)
+    pid = os.getpid()
+    res_dir = Path(get_ipc_root()) / "result"
+    res_dir.mkdir(parents=True, exist_ok=True)
+    result_path = res_dir / f"res_update_check_{ts_ms}_{pid}.pkl"
+    payload: dict[str, Any] = {
+        "parent_hwnd": int(owner_hwnd or 0),
+        "result_path": str(result_path),
+        "ready_path": str(ready_path) if ready_path else "",
+        "sheet_id": str(sheet_id or "_"),
+        "log_path": "",
+        "action": str(req_dict.get("action") or "update_check"),
+        "module": "ui_qt.ui_update_check",
+        "req_dict": req_dict,
+    }
+    req_path = get_request_dir() / f"req_update_check_{ts_ms}_{pid}.pkl"
+    try:
+        write_pickle(req_path, payload)
+        return _wait_ui_dispatch_result(result_path, timeout_sec=timeout_sec)
+    except Exception as e:
+        logger.warning("packaged_update UI request failed: %s", e)
+        return None
+    finally:
+        try:
+            result_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _update_check_busy_begin(
+    message: str,
+    *,
+    owner_hwnd: int,
+    sheet_id: str = "",
+) -> None:
+    hwnd = int(owner_hwnd or 0)
+    if hwnd <= 0:
+        return
+    try:
+        from ui_qt.ipc_file import get_ipc_root
+    except Exception:
+        return
+    ts_ms = int(time.time() * 1000)
+    pid = os.getpid()
+    ready_dir = Path(get_ipc_root()) / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    ready_path = ready_dir / f"ready_update_busy_{ts_ms}_{pid}.pkl"
+    try:
+        ready_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    req_ui = {
+        "action": "update_check_busy",
+        "modeless": True,
+        "message": str(message or ""),
+        "ready_path": str(ready_path),
+    }
+    _dispatch_update_check_ui_request(
+        req_ui,
+        owner_hwnd=hwnd,
+        sheet_id=sheet_id,
+        timeout_sec=15.0,
+    )
+    _wait_ready_path(ready_path, timeout_sec=8.0)
+
+
+def _update_check_busy_end(*, owner_hwnd: int, sheet_id: str = "") -> None:
+    hwnd = int(owner_hwnd or 0)
+    if hwnd <= 0:
+        return
+    req_ui = {"action": "update_check_busy_dismiss"}
+    _dispatch_update_check_ui_request(
+        req_ui,
+        owner_hwnd=hwnd,
+        sheet_id=sheet_id,
+        timeout_sec=10.0,
+    )
+
+
+def _run_with_update_busy_ui(
+    message: str,
+    fn: Any,
+    *,
+    owner_hwnd: int | None,
+    sheet_id: str = "",
+) -> Any:
+    hwnd = int(owner_hwnd or 0)
+    if hwnd > 0:
+        _update_check_busy_begin(message, owner_hwnd=hwnd, sheet_id=sheet_id)
+    try:
+        return fn()
+    finally:
+        if hwnd > 0:
+            _update_check_busy_end(owner_hwnd=hwnd, sheet_id=sheet_id)
+
+
+def _queue_pending_bin_update_with_busy_ui(
+    st: dict[str, Any],
+    *,
+    source: str,
+    require_admin: bool,
+    skip_apply_confirm: bool,
+    owner_hwnd: int | None,
+    sheet_id: str = "",
+) -> tuple[bool, str]:
+    """zip ローカルコピー等を Qt BUSY 表示の後に実行する（prepare 後の無反応区間を解消）。"""
+    msg = _um(
+        "PROGRESS_PREPARE_MSG",
+        "更新に必要なファイルを用意しています。\nしばらくお待ちください。",
+    )
+
+    def _do_queue() -> tuple[bool, str]:
+        return _queue_pending_bin_update(
+            st,
+            source=source,
+            require_admin=require_admin,
+            skip_apply_confirm=skip_apply_confirm,
+        )
+
+    return _run_with_update_busy_ui(
+        msg,
+        _do_queue,
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
+    )
+
+
 def _show_update_dialog_via_ui_server(
     *,
     req_dict: dict[str, Any],
@@ -1885,13 +2042,13 @@ def _try_apply_config_update(
     return True, latest_cfg, None
 
 
-def _prepare_bin_full_apply(
+def _resolve_bin_full_zip_path(
     catalog: dict[str, Any],
     catalog_path: Path,
 ) -> tuple[Path | None, str | None, str | None]:
     """
-    catalog.bin.full の zip を解決し、sha256 が catalog と一致するか検証する。
-    戻り値: (zip_path, expected_sha_or_none, error_message_or_none)
+    catalog.bin.full の zip パスを解決する（sha256 検証なし）。
+    戻り値: (zip_path, catalog_sha256_or_none, error_message_or_none)
     """
     b = catalog.get("bin")
     if not isinstance(b, dict):
@@ -1906,11 +2063,91 @@ def _prepare_bin_full_apply(
     if not zp.is_file():
         return None, None, f"bin フル zip が見つかりません: {zp}"
     expected_sha = str((full.get("sha256") or "").strip()).lower()
+    return zp, expected_sha or None, None
+
+
+def _prepare_bin_full_apply(
+    catalog: dict[str, Any],
+    catalog_path: Path,
+) -> tuple[Path | None, str | None, str | None]:
+    """
+    catalog.bin.full の zip を解決し、sha256 が catalog と一致するか検証する。
+    戻り値: (zip_path, expected_sha_or_none, error_message_or_none)
+    """
+    zp, expected_sha, err = _resolve_bin_full_zip_path(catalog, catalog_path)
+    if err or zp is None:
+        return None, None, err
     if expected_sha:
         actual = _sha256_file(zp)
         if actual != expected_sha:
             return None, None, "bin フル zip の sha256 が catalog と一致しません"
     return zp, expected_sha or None, None
+
+
+def _hint_bin_apply_mode(
+    catalog: dict[str, Any],
+    catalog_path: Path,
+    installed_bin: str,
+) -> str:
+    """sha256 なしで patch / full の想定モードを返す（UI ヒント・ログ用）。"""
+    b = catalog.get("bin")
+    if not isinstance(b, dict):
+        return ""
+    patch = b.get("patch")
+    if isinstance(patch, dict):
+        rel_p = str((patch.get("relative_path") or "").strip())
+        if rel_p and _patch_meta_eligible(installed_bin, patch):
+            zp = _catalog_resolve_payload(catalog_path, rel_p)
+            if zp.is_file():
+                return "patch"
+    full = b.get("full")
+    if isinstance(full, dict):
+        rel = str((full.get("relative_path") or "").strip())
+        if rel:
+            zp = _catalog_resolve_payload(catalog_path, rel)
+            if zp.is_file():
+                return "full"
+    return ""
+
+
+def prepare_bin_update_status(st: dict[str, Any]) -> dict[str, Any]:
+    """
+    軽量 check 後の status に bin zip 解決・sha256 検証結果を載せる。
+    「すぐに更新」確定後に呼ぶ（ネットワーク zip の重い読込はここ）。
+    """
+    if not st.get("needs_bin_update"):
+        return st
+    root = _install_root()
+    cat_path_s = str(st.get("catalog_path") or "").strip()
+    if not cat_path_s:
+        st["bin_update_prepare_error"] = "catalog path missing"
+        return st
+    cat_path = Path(cat_path_s)
+    data = load_catalog(cat_path)
+    if not isinstance(data, dict):
+        st["bin_update_prepare_error"] = "catalog invalid"
+        return st
+    installed_bin = str(st.get("installed_bin") or "").strip()
+    mode, zp, zsha, prep_err = _prepare_bin_apply(
+        data, cat_path, installed_bin, root
+    )
+    st["bin_apply_mode"] = mode if zp else None
+    st["bin_zip_path"] = str(zp) if zp else None
+    st["bin_zip_sha256_expected"] = zsha
+    st["bin_update_prepare_error"] = prep_err
+    full_zp, full_sha, _full_err = _resolve_bin_full_zip_path(data, cat_path)
+    st["bin_full_zip_path"] = str(full_zp) if full_zp else None
+    st["bin_full_zip_sha256_expected"] = full_sha
+    if root and root.is_dir():
+        _append_update_log(
+            root,
+            "prepare_bin: mode={m} zip={z} err={e}".format(
+                m=str(st.get("bin_apply_mode") or "-"),
+                z=str(st.get("bin_zip_path") or "-"),
+                e=str(prep_err or "-"),
+            ),
+        )
+    return st
 
 
 def _patch_meta_eligible(installed_bin: str, patch: dict[str, Any]) -> bool:
@@ -2137,7 +2374,7 @@ def check_for_updates(
     sheet_id: str = "",
 ) -> dict[str, Any]:
     """
-    Return status dict.
+    Return status dict (light check: bin zip の sha256 は未実施).
     Backward-compatible keys:
       ok, needs_update, installed, latest_version, error, catalog_path
     New keys:
@@ -2277,14 +2514,12 @@ def check_for_updates(
     out["needs_update"] = need_bin
 
     if need_bin:
-        full_zp, full_sha, full_err = _prepare_bin_full_apply(data, cat_path)
-        out["bin_full_zip_path"] = str(full_zp) if full_zp else None
-        out["bin_full_zip_sha256_expected"] = full_sha
-        mode, zp, zsha, prep_err = _prepare_bin_apply(data, cat_path, installed_bin, root)
-        out["bin_apply_mode"] = mode if zp else None
-        out["bin_zip_path"] = str(zp) if zp else None
-        out["bin_zip_sha256_expected"] = zsha
-        out["bin_update_prepare_error"] = prep_err or full_err
+        data_for_hint = data
+        cat_p = cat_path
+        ib = installed_bin
+        hint = _hint_bin_apply_mode(data_for_hint, cat_p, ib)
+        out["bin_apply_mode"] = hint or None
+        # zip の sha256・コピーは prepare_bin_update_status（「すぐに更新」確定後）
 
     # config update is silent by policy (failure only notifies).
     if need_cfg:
@@ -2593,15 +2828,6 @@ def _show_bin_update_prompt(
             sheet_id=sheet_id,
         )
         return
-    zip_s = st.get("bin_zip_path")
-    if not zip_s:
-        _message_box(
-            _um("BIN_UPDATE_ZIP_PATH_MISSING", "bin の zip パスが取得できませんでした。"),
-            style=MB_OK | MB_ICONWARNING,
-            owner_hwnd=owner_hwnd,
-            sheet_id=sheet_id,
-        )
-        return
 
     apply_hint = ""
     if not interactive_apply_now:
@@ -2670,7 +2896,51 @@ def _show_bin_update_prompt(
             )
         return
 
-    zp = Path(zip_s)
+    prep_msg = _um(
+        "PROGRESS_PREPARE_MSG",
+        "更新に必要なファイルを用意しています。\nしばらくお待ちください。",
+    )
+
+    def _do_prepare() -> None:
+        prepare_bin_update_status(st)
+
+    _run_with_update_busy_ui(
+        prep_msg,
+        _do_prepare,
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
+    )
+
+    prep_err = st.get("bin_update_prepare_error")
+    if prep_err:
+        lp = str(_update_log_path(_install_root()))
+        _message_box(
+            _um(
+                "BIN_UPDATE_PREP_FAILED_PROMPT_TEMPLATE",
+                "bin の新しい版がありますが、自動適用の準備に失敗しました。\n\n"
+                + str(prep_err)
+                + "\n\n手動でフル配布を適用するか、catalog と zip を確認してください。\nログ: "
+                + lp,
+                prep_err=str(prep_err),
+                log_path=lp,
+            ),
+            style=MB_OK | MB_ICONWARNING,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        return
+
+    zip_s = st.get("bin_zip_path")
+    if not zip_s:
+        _message_box(
+            _um("BIN_UPDATE_ZIP_PATH_MISSING", "bin の zip パスが取得できませんでした。"),
+            style=MB_OK | MB_ICONWARNING,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+        return
+
+    zp = Path(str(zip_s))
     if not root or not root.is_dir() or not zp.is_file():
         _message_box(
             _um("BIN_UPDATE_INVALID_ROOT_OR_ZIP", "インストール先または zip が無効です。"),
@@ -2699,11 +2969,13 @@ def _show_bin_update_prompt(
     require_admin = bool(require_admin_sel)
     _append_update_log(root, f"apply_bin: require_admin_selected={require_admin} scope={scope}")
 
-    ok, msg = _queue_pending_bin_update(
+    ok, msg = _queue_pending_bin_update_with_busy_ui(
         st,
         source="interactive_confirm",
         require_admin=require_admin,
         skip_apply_confirm=bool(interactive_apply_now),
+        owner_hwnd=owner_hwnd,
+        sheet_id=sheet_id,
     )
     if not ok:
         _append_update_log(root, f"apply_bin: queue pending failed err={msg}")
@@ -2845,10 +3117,23 @@ def check_for_updates_interactive(
 ) -> None:
     discard_bin_apply_success_marker_if_present()
     notify_offline = True
+    check_msg = _um(
+        "UPDATE_CHECK_BUSY_CHECKING",
+        "更新を確認しています…\nしばらくお待ちください。",
+    )
     try:
-        st = check_for_updates(
-            source=source,
-            notify_offline=notify_offline,
+
+        def _do_check() -> dict[str, Any]:
+            return check_for_updates(
+                source=source,
+                notify_offline=notify_offline,
+                owner_hwnd=owner_hwnd,
+                sheet_id=sheet_id,
+            )
+
+        st = _run_with_update_busy_ui(
+            check_msg,
+            _do_check,
             owner_hwnd=owner_hwnd,
             sheet_id=sheet_id,
         )
@@ -2940,23 +3225,6 @@ def check_for_updates_interactive(
             )
 
         if st.get("needs_bin_update"):
-            if st.get("bin_update_prepare_error"):
-                _message_box(
-                    _um(
-                        "BIN_PREPARE_FAILED_INTERACTIVE_TEMPLATE",
-                        "bin の新しい版があります（配布 {latest_bin}）。\n\n"
-                        "自動適用の準備に失敗しました: {prepare_error}\n\n"
-                        "catalog・共有上の zip・sha256 を確認するか、手動でフル適用してください。\n\n"
-                        "ログ: {log_path}",
-                        latest_bin=str(st.get("latest_bin_version") or "-"),
-                        prepare_error=str(st.get("bin_update_prepare_error")),
-                        log_path=str(_update_log_path(_install_root())),
-                    ),
-                    style=MB_OK | MB_ICONWARNING,
-                    owner_hwnd=owner_hwnd,
-                    sheet_id=sheet_id,
-                )
-                return
             _show_bin_update_prompt(st, owner_hwnd=owner_hwnd, sheet_id=sheet_id, interactive_apply_now=True)
             return
 
@@ -3165,9 +3433,22 @@ def maybe_check_updates_on_startup(*, owner_hwnd: int | None = None, sheet_id: s
         _suppress_startup_bin_prompt_after_pending_defer = False
         return
 
-    st = check_for_updates(
-        source="startup",
-        notify_offline=True,
+    check_msg = _um(
+        "UPDATE_CHECK_BUSY_CHECKING",
+        "更新を確認しています…\nしばらくお待ちください。",
+    )
+
+    def _do_startup_check() -> dict[str, Any]:
+        return check_for_updates(
+            source="startup",
+            notify_offline=True,
+            owner_hwnd=owner_hwnd,
+            sheet_id=sheet_id,
+        )
+
+    st = _run_with_update_busy_ui(
+        check_msg,
+        _do_startup_check,
         owner_hwnd=owner_hwnd,
         sheet_id=sheet_id,
     )

@@ -745,38 +745,6 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         ),
     )
     _append(paths.log_path, f"pending_apply: {probe_tasklist_line()}")
-    relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
-    if relax_svc_self:
-        _append(
-            paths.log_path,
-            "pending_apply: mutex_gate relax_svc_self=True "
-            "(interactive defer from hc_svc_server; svc mutex ignored)",
-        )
-    snap0 = mutex_snapshot()
-    if mutex_blocks_pending_apply(snap0, relax_svc_self=relax_svc_self):
-        _append(paths.log_path, "pending_apply: mutex_busy graceful_shutdown")
-        ensure_packaged_children_stopped(
-            lambda m: _append(paths.log_path, m),
-            cfg,
-            phase="pending_apply_graceful",
-            force_taskkill=False,
-        )
-        snap_mid = mutex_snapshot()
-        if mutex_blocks_pending_apply(snap_mid, relax_svc_self=relax_svc_self):
-            _append(paths.log_path, "pending_apply: mutex still busy; taskkill")
-            ensure_packaged_children_stopped(
-                lambda m: _append(paths.log_path, m),
-                cfg,
-                phase="pending_apply_force",
-                force_taskkill=True,
-            )
-        snap1 = mutex_snapshot()
-        if mutex_blocks_pending_apply(snap1, relax_svc_self=relax_svc_self):
-            return {
-                "ok": False,
-                "applied": False,
-                "error": f"blocked_by_running_process mutex={snap1}",
-            }
     if pending.get("skip_apply_confirm"):
         _append(
             paths.log_path,
@@ -797,6 +765,53 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             paths.log_path,
             "progress_ui: tk unavailable (HC_BOOTSTRAP_NO_TK or tk init failed); progress bar disabled, log only",
         )
+    wait_title = _ui_update_message(
+        install_root, "UPDATER_PHASE_WAIT_TITLE", "Excel の終了を待っています"
+    )
+    wait_msg = _ui_update_message(
+        install_root, "UPDATER_PHASE_WAIT_MESSAGE", "すべての Excel を閉じてください。"
+    )
+    _phase(paths.log_path, ui, wait_title, wait_msg, 2)
+    relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
+    if relax_svc_self:
+        _append(
+            paths.log_path,
+            "pending_apply: mutex_gate relax_svc_self=True "
+            "(interactive defer from hc_svc_server; svc mutex ignored)",
+        )
+    snap0 = mutex_snapshot()
+    if mutex_blocks_pending_apply(snap0, relax_svc_self=relax_svc_self):
+        stop_msg = _ui_update_message(
+            install_root,
+            "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
+            "関連プロセスを終了しています…",
+        )
+        _ui_pulse(ui, wait_title, stop_msg, 3)
+        _append(paths.log_path, "pending_apply: mutex_busy graceful_shutdown")
+        ensure_packaged_children_stopped(
+            lambda m: _append(paths.log_path, m),
+            cfg,
+            phase="pending_apply_graceful",
+            force_taskkill=False,
+        )
+        snap_mid = mutex_snapshot()
+        if mutex_blocks_pending_apply(snap_mid, relax_svc_self=relax_svc_self):
+            _append(paths.log_path, "pending_apply: mutex still busy; taskkill")
+            _ui_pulse(ui, wait_title, stop_msg, 4)
+            ensure_packaged_children_stopped(
+                lambda m: _append(paths.log_path, m),
+                cfg,
+                phase="pending_apply_force",
+                force_taskkill=True,
+            )
+        snap1 = mutex_snapshot()
+        if mutex_blocks_pending_apply(snap1, relax_svc_self=relax_svc_self):
+            ui.close()
+            return {
+                "ok": False,
+                "applied": False,
+                "error": f"blocked_by_running_process mutex={snap1}",
+            }
     _phase(
         paths.log_path,
         ui,
