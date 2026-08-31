@@ -99,10 +99,10 @@ def _full_pending(install: Path) -> Path:
     return full_zip
 
 
-def test_ribbon_patch_defer_passes_svc_mutex_and_defers_to_updater(
+def test_ribbon_patch_defer_legacy_spawn_blocked_in_svc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """リボン「すぐに更新」(patch): svc mutex 保持中でも準備完走し hc_updater へ委譲する。"""
+    """svc 内 in-process bin defer（レガシー 2 本 spawn）は拒否し pending を残す。"""
     install = _minimal_install(tmp_path)
     patch_zip = _patch_pending(install)
     paths = build_paths(install)
@@ -138,16 +138,11 @@ def test_ribbon_patch_defer_passes_svc_mutex_and_defers_to_updater(
     with patch.object(upc, "is_hc_svc_server_process", return_value=True):
         res = ub._apply_pending_update_impl(install)
 
-    assert res.get("ok") is True
-    assert res.get("deferred_to_updater") is True
-    assert "blocked_by_running_process" not in str(res.get("error") or "")
-    assert spawn_calls == ["patch"]
-    assert read_pending(paths) is None
-
-    log_text = paths.log_path.read_text(encoding="utf-8")
-    assert "relax_svc_self=True" in log_text
-    assert "skip_apply_confirm=True" in log_text
-    assert "deferred_to_hc_updater" in log_text
+    assert res.get("ok") is False
+    assert res.get("error_code") == "E_LEGACY_DEFER_UNSUPPORTED"
+    assert "legacy_defer_spawn_blocked" in paths.log_path.read_text(encoding="utf-8")
+    assert spawn_calls == []
+    assert read_pending(paths) is not None
 
 
 def test_hc_updater_inline_full_apply_with_clear_mutex(
@@ -198,16 +193,64 @@ def test_hc_updater_inline_full_apply_with_clear_mutex(
 def test_ribbon_patch_without_relax_still_blocks_on_svc_mutex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """hc_svc_server 以外（relax 不可）かつ svc mutex 残存時は従来どおりブロックする。"""
+    """2 段階確認（skip_apply_confirm なし）かつ svc mutex 残存時はブロックする。"""
     install = _minimal_install(tmp_path)
-    _patch_pending(install)
+    _patch_pending(install, skip_apply_confirm=False)
 
     monkeypatch.setattr(ub, "_ProgressUi", _FakeProgressUi)
     monkeypatch.setattr(ub, "mutex_snapshot", lambda: dict(_SVC_ONLY_MUTEX))
     monkeypatch.setattr(ub, "ensure_packaged_children_stopped", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        ub,
+        "_confirm_pending_apply_before_progress",
+        lambda *_a, **_k: True,
+    )
 
     with patch.object(upc, "is_hc_svc_server_process", return_value=False):
-        res = ub._apply_pending_update_impl(install)
+        with patch.object(upc, "is_hc_updater_process", return_value=False):
+            res = ub._apply_pending_update_impl(install)
 
     assert res.get("ok") is False
     assert "blocked_by_running_process" in str(res.get("error") or "")
+
+
+def test_hc_updater_defer_skips_mutex_gate_with_single_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hc_updater + skip_apply_confirm: mutex 待ちを省略し defer 準備へ進む。"""
+    install = _minimal_install(tmp_path)
+    patch_zip = _patch_pending(install, skip_apply_confirm=True)
+    paths = build_paths(install)
+    worker_zip = install / "worker.zip"
+    worker_zip.write_bytes(b"worker")
+
+    monkeypatch.setattr(ub, "_ProgressUi", _FakeProgressUi)
+    monkeypatch.setattr(ub, "_try_apply_bootstrap_swap", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(
+        ub,
+        "_resolve_payload",
+        lambda *_a, **_k: (patch_zip, ""),
+    )
+    monkeypatch.setattr(
+        ub,
+        "materialize_manifest_patch_zip",
+        lambda **_k: (worker_zip, None, {"changed": 1}, None),
+    )
+    monkeypatch.setattr(
+        ub,
+        "_persist_zip_for_hc_updater",
+        lambda _z, _p: worker_zip,
+    )
+
+    with patch.object(upc, "is_hc_svc_server_process", return_value=False):
+        with patch.object(upc, "is_hc_updater_process", return_value=True):
+            res = ub._apply_pending_update_impl(install)
+
+    assert res.get("ok") is True
+    assert res.get("deferred_to_updater") is True
+    assert res.get("deferred_inline_bin_apply") is True
+    assert str(res.get("worker_zip_path") or "").endswith("worker.zip")
+    log_text = paths.log_path.read_text(encoding="utf-8")
+    assert "skip_mutex_gate=True" in log_text
+    assert "mutex_busy graceful_shutdown" not in log_text
+    assert "deferred_inline_bin_apply" in log_text

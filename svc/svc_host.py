@@ -122,12 +122,18 @@ def _log_startup_ui_gate_skip(perf_prefix: str, hwnd: int, reason: str) -> None:
 def _excel_startup_svc_ui_bridge_register(target_hwnd: int, perf_prefix: str) -> None:
     """ensure_svc / ensure_ui / ensure_bridge / register_book と perf ログ（プレフィックスのみ異なる）。"""
     from core.excel_session import register_book as _register_book
-    from core.packaged_update import maybe_apply_pending_bootstrap_update
     from core.startup_session_gate import excel_startup_ui_gate
 
     plog = get_perf_logger(f"{__name__}.excel_startup")
     t0 = time.perf_counter()
     hwnd = int(target_hwnd or 0)
+    if hwnd > 0:
+        try:
+            from core import core_env
+
+            core_env.set_excel_hwnd_for_spawn(hwnd)
+        except Exception:
+            pass
     plog.info("%s phase=enter cumulative_ms=0 hwnd=%s", perf_prefix, hwnd)
     with excel_startup_ui_gate(hwnd, perf_prefix) as ui_gate:
         if ui_gate.skip_update_ui:
@@ -138,43 +144,43 @@ def _excel_startup_svc_ui_bridge_register(target_hwnd: int, perf_prefix: str) ->
                 hwnd,
             )
             _log_startup_ui_gate_skip(perf_prefix, hwnd, ui_gate.reason)
+            ensure_svc_ui_bridge_parallel()
+            _register_book(target_hwnd=target_hwnd)
+            if hwnd > 0:
+                from core.excel_book_register_gate import mark_excel_book_registered
+
+                mark_excel_book_registered(hwnd)
         else:
-            maybe_apply_pending_bootstrap_update(owner_hwnd=hwnd, sheet_id="_")
+            from core.packaged_update import run_excel_startup_update_sequence
+
+            run_excel_startup_update_sequence(
+                owner_hwnd=hwnd,
+                sheet_id="_",
+                bootstrap_apply_fn=lambda: _startup_maybe_apply_pending_bootstrap(hwnd),
+                ensure_bridge_fn=ensure_svc_ui_bridge_parallel,
+                register_book_fn=lambda: _startup_register_book(target_hwnd, hwnd),
+            )
             plog.info(
-                "%s phase=after_apply_pending_bootstrap cumulative_ms=%d",
+                "%s phase=after_startup_update_sequence cumulative_ms=%d",
                 perf_prefix,
                 int((time.perf_counter() - t0) * 1000),
             )
-        ensure_svc_ui_bridge_parallel()
-        plog.info(
-            "%s phase=after_ensure_svc_ui_bridge cumulative_ms=%d",
-            perf_prefix,
-            int((time.perf_counter() - t0) * 1000),
-        )
-        _register_book(target_hwnd=target_hwnd)
-        if hwnd > 0:
-            from core.excel_book_register_gate import mark_excel_book_registered
 
-            mark_excel_book_registered(hwnd)
-        plog.info(
-            "%s phase=after_register_book cumulative_ms=%d",
-            perf_prefix,
-            int((time.perf_counter() - t0) * 1000),
-        )
-        if ui_gate.skip_update_ui:
-            plog.info(
-                "%s phase=skip_duplicate_version_check reason=%s hwnd=%s",
-                perf_prefix,
-                ui_gate.reason or "-",
-                hwnd,
-            )
-        else:
-            try:
-                from core.packaged_update import maybe_check_updates_on_startup
 
-                maybe_check_updates_on_startup(owner_hwnd=hwnd, sheet_id="_")
-            except Exception as e:
-                logger.warning("%s packaged update check skipped: %s", perf_prefix, e)
+def _startup_maybe_apply_pending_bootstrap(hwnd: int) -> None:
+    from core.packaged_update import maybe_apply_pending_bootstrap_update
+
+    maybe_apply_pending_bootstrap_update(owner_hwnd=hwnd, sheet_id="_")
+
+
+def _startup_register_book(target_hwnd: int, hwnd: int) -> None:
+    from core.excel_session import register_book as _register_book
+
+    _register_book(target_hwnd=target_hwnd)
+    if hwnd > 0:
+        from core.excel_book_register_gate import mark_excel_book_registered
+
+        mark_excel_book_registered(hwnd)
 
 
 def excel_startup_workbook_open_full(target_hwnd: int) -> None:

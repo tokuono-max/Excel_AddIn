@@ -102,20 +102,9 @@ def test_maybe_show_updater_result_success_skips_notify(tmp_path: Path) -> None:
 def test_resolve_require_admin_interactive_skips_app_dialog(tmp_path: Path) -> None:
     root = tmp_path / "inst"
     root.mkdir()
-    with patch.object(pu, "_message_box") as mock_mb:
-        assert (
-            pu._resolve_require_admin_for_bin_prompt(
-                root, "all", interactive_apply_now=True
-            )
-            is True
-        )
-        assert (
-            pu._resolve_require_admin_for_bin_prompt(
-                root, "current", interactive_apply_now=True
-            )
-            is False
-        )
-        mock_mb.assert_not_called()
+    with patch.object(pu, "_append_update_log"):
+        assert pu._resolve_require_admin_interactive_apply(root, "all") is True
+        assert pu._resolve_require_admin_interactive_apply(root, "current") is False
 
 
 def test_updater_result_path_under_install_root(tmp_path: Path) -> None:
@@ -209,8 +198,8 @@ def test_run_interactive_bin_apply_now_failure_clears_pending(tmp_path: Path) ->
     )
     with patch.object(
         pu,
-        "_apply_pending_update_with_retry",
-        return_value={"ok": True, "applied": False, "deferred": True},
+        "spawn_apply_pending_via_hc_updater",
+        return_value=(False, "spawn failed"),
     ):
         with patch.object(pu, "_message_box") as mock_mb:
             ok = pu.run_interactive_bin_apply_now(
@@ -221,20 +210,43 @@ def test_run_interactive_bin_apply_now_failure_clears_pending(tmp_path: Path) ->
     assert not pending_path.is_file()
 
 
-def test_run_interactive_bin_apply_now_success_deferred(tmp_path: Path) -> None:
+def test_run_interactive_bin_apply_now_success_spawns_updater(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
+    (root / "update").mkdir(parents=True)
+    (root / "update" / "pending.json").write_text('{"state":"downloaded"}', encoding="utf-8")
+    ready = tmp_path / "ready.json"
     with patch.object(
         pu,
-        "_apply_pending_update_with_retry",
-        return_value={"ok": True, "applied": False, "deferred_to_updater": True},
-    ):
-        with patch.object(pu, "_message_box") as mock_mb:
-            ok = pu.run_interactive_bin_apply_now(
-                root, owner_hwnd=0, sheet_id="_", source="ribbon"
-            )
+        "spawn_apply_pending_via_hc_updater",
+        return_value=(True, str(ready)),
+    ) as mock_spawn:
+        with patch.object(pu, "ui_ready_path_from_apply_pending_job", return_value=ready):
+            with patch.object(pu, "wait_for_updater_ui_ready", return_value=True) as mock_wait:
+                with patch.object(pu, "_message_box") as mock_mb:
+                    ok = pu.run_interactive_bin_apply_now(
+                        root, owner_hwnd=0, sheet_id="_", source="ribbon"
+                    )
     assert ok is True
     mock_mb.assert_not_called()
+    mock_spawn.assert_called_once_with(root, source="ribbon", inline_bin=False)
+    mock_wait.assert_called_once_with(ready)
+
+
+def test_maybe_apply_pending_bootstrap_update_clears_bin_pending(tmp_path: Path) -> None:
+    root = tmp_path / "app"
+    (root / "update").mkdir(parents=True)
+    (root / "update" / "pending.json").write_text(
+        json.dumps({"apply_scope": "bin_only", "state": "downloaded"}),
+        encoding="utf-8",
+    )
+    pu._skip_startup_version_check_this_launch = False
+    with patch.object(pu, "_install_root", return_value=root):
+        with patch.object(pu, "_apply_pending_update_with_retry") as mock_apply:
+            pu.maybe_apply_pending_bootstrap_update(owner_hwnd=1001)
+            mock_apply.assert_not_called()
+    assert not (root / "update" / "pending.json").is_file()
+    assert pu._skip_startup_version_check_this_launch is False
 
 
 def test_notify_installed_apps_list_changed_skips_non_nt() -> None:
@@ -251,7 +263,8 @@ if __name__ == "__main__":
         test_apply_succeeded_for_interactive,
         test_apply_pending_with_retry_on_concurrent,
         test_run_interactive_bin_apply_now_failure_clears_pending,
-        test_run_interactive_bin_apply_now_success_deferred,
+        test_run_interactive_bin_apply_now_success_spawns_updater,
+        test_maybe_apply_pending_bootstrap_update_clears_bin_pending,
         test_notify_apply_result_if_failed_skips_deferred_to_updater,
         test_notify_apply_result_if_failed_calls_on_error,
         test_maybe_show_updater_result_consumes_file,

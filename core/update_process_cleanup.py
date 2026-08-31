@@ -56,6 +56,13 @@ def is_hc_svc_server_process() -> bool:
     return _current_process_image_name_nt() == "hc_svc_server.exe"
 
 
+def is_hc_updater_process() -> bool:
+    """True when this process is the packaged hc_updater executable."""
+    if os.name != "nt":
+        return False
+    return _current_process_image_name_nt() == "hc_updater.exe"
+
+
 def mutex_blocks_pending_apply(snap: dict[str, bool], *, relax_svc_self: bool = False) -> bool:
     """
     Return True if apply_pending_update must wait or abort for HC mutexes.
@@ -71,21 +78,70 @@ def mutex_blocks_pending_apply(snap: dict[str, bool], *, relax_svc_self: bool = 
 
 
 def should_relax_svc_mutex_for_interactive_defer(pending: dict[str, Any]) -> bool:
-    """Interactive single-confirm bin apply from svc_server: defer via hc_updater, not inline bin."""
+    """Interactive single-confirm bin apply: defer via hc_updater, not inline bin."""
     if not bool(pending.get("skip_apply_confirm")):
         return False
     if os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN") == "1":
         return False
-    return is_hc_svc_server_process()
+    return is_hc_svc_server_process() or is_hc_updater_process()
 
 
-def wait_mutex_clear(timeout_sec: int, poll_sec: float = 0.5) -> tuple[bool, dict[str, bool]]:
+def should_skip_mutex_gate_before_deferred_prep(pending: dict[str, Any]) -> bool:
+    """
+    「すぐに更新」（単一確認）で hc_updater に defer する準備段階では、
+    Excel 稼働中の main/ui mutex 待ちは不要（materialize のみ先に実行）。
+    """
+    if os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN") == "1":
+        return False
+    if not bool(pending.get("skip_apply_confirm")):
+        return False
+    scope = str(pending.get("apply_scope") or "").strip()
+    return scope != "bootstrap_only"
+
+
+def sleep_with_ui_pulse(
+    duration_sec: float,
+    *,
+    poll_sec: float = 0.25,
+    ui_pulse: Callable[[], None] | None = None,
+) -> None:
+    """sleep 中も ui_pulse を定期呼び出し（tk メッセージポンプ維持）。"""
+    total = max(0.0, float(duration_sec))
+    if total <= 0:
+        return
+    if ui_pulse is None:
+        time.sleep(total)
+        return
+    deadline = time.time() + total
+    step = max(0.05, float(poll_sec))
+    while True:
+        try:
+            ui_pulse()
+        except Exception:
+            pass
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(step, remaining))
+
+
+def wait_mutex_clear(
+    timeout_sec: int,
+    poll_sec: float = 0.5,
+    *,
+    ui_pulse: Callable[[], None] | None = None,
+) -> tuple[bool, dict[str, bool]]:
     t0 = time.time()
     last = mutex_snapshot()
     while time.time() - t0 < max(1, int(timeout_sec)):
         last = mutex_snapshot()
         if not any(last.values()):
             return True, last
+        if ui_pulse is not None:
+            try:
+                ui_pulse()
+            except Exception:
+                pass
         time.sleep(max(0.05, float(poll_sec)))
     return False, last
 
@@ -240,16 +296,17 @@ def ensure_packaged_children_stopped(
     *,
     phase: str,
     force_taskkill: bool,
+    ui_pulse: Callable[[], None] | None = None,
 ) -> None:
     """Write shutdown flags, wait for HC mutexes to clear, optional grace, optional taskkill."""
     log_append(f"pre_apply: phase={phase} probe_begin {probe_tasklist_line()}")
     request_packaged_shutdown_flags()
     wait_sec = _cfg_mutex_wait(cfg)
-    ok, snap = wait_mutex_clear(timeout_sec=wait_sec, poll_sec=0.5)
+    ok, snap = wait_mutex_clear(timeout_sec=wait_sec, poll_sec=0.5, ui_pulse=ui_pulse)
     log_append(f"pre_apply: phase={phase} mutex_wait ok={ok} state={snap}")
     grace = _cfg_grace_sec(cfg)
     if grace > 0:
-        time.sleep(grace)
+        sleep_with_ui_pulse(grace, ui_pulse=ui_pulse)
     log_append(f"pre_apply: phase={phase} after_grace {probe_tasklist_line()}")
     if not force_taskkill:
         return
@@ -257,5 +314,5 @@ def ensure_packaged_children_stopped(
         log_append(f"pre_apply: phase={phase} skip_taskkill (BOOTSTRAP_SKIP_PROCESS_KILL)")
         return
     _taskkill_hc_children(log_append)
-    time.sleep(1.0)
+    sleep_with_ui_pulse(1.0, ui_pulse=ui_pulse)
     log_append(f"pre_apply: phase={phase} probe_after_kill {probe_tasklist_line()}")

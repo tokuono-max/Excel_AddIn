@@ -12,12 +12,13 @@ import time
 import traceback
 import zipfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, TypeVar, cast
 
 from core.patch_manifest import materialize_manifest_patch_zip
 from core.update_process_cleanup import (
     ensure_packaged_children_stopped,
     mutex_blocks_pending_apply,
+    should_skip_mutex_gate_before_deferred_prep,
     mutex_snapshot,
     probe_tasklist_line,
     should_relax_svc_mutex_for_interactive_defer,
@@ -29,6 +30,72 @@ from core.win_running_file_replace import (
     process_bin_dir,
     replace_via_sidecar,
 )
+
+_T = TypeVar("_T")
+_ProgressPulseFn = Callable[[str, str, float], None]
+_external_progress_pulse: _ProgressPulseFn | None = None
+
+
+def set_external_progress_pulse(fn: _ProgressPulseFn | None) -> None:
+    """hc_updater continuous 経路: bootstrap tk 無効時に defer_ui へ進捗を転送。"""
+    global _external_progress_pulse
+    _external_progress_pulse = fn
+
+
+def clear_external_progress_pulse() -> None:
+    set_external_progress_pulse(None)
+
+
+def _progress_pulse(ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
+    if ui.active:
+        try:
+            ui.set(title, msg, progress)
+        except Exception:
+            pass
+        return
+    ext = _external_progress_pulse
+    if ext is not None:
+        try:
+            ext(title, msg, progress)
+        except Exception:
+            pass
+
+
+def _ui_pulse_fn(ui: _ProgressUi, title: str, msg: str, progress: float) -> Callable[[], None] | None:
+    if not ui.active and _external_progress_pulse is None:
+        return None
+    return lambda: _progress_pulse(ui, title, msg, progress)
+
+
+def _pulse_while_blocking(
+    ui: _ProgressUi,
+    title: str,
+    msg: str,
+    progress: float,
+    fn: Callable[[], _T],
+    *,
+    poll_sec: float = 0.25,
+) -> _T:
+    """重い処理を worker スレッドで実行し、メインスレッドで tk を pump。"""
+    result: list[_T] = []
+    errors: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            result.append(fn())
+        except BaseException as e:
+            errors.append(e)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        _progress_pulse(ui, title, msg, progress)
+        worker.join(timeout=max(0.05, float(poll_sec)))
+    _progress_pulse(ui, title, msg, progress)
+    if errors:
+        raise errors[0]
+    return result[0]
+
 
 # 起動シーケンスで apply が二重に掛からないようにする
 _APPLY_SINGLE_FLIGHT = threading.Lock()
@@ -232,17 +299,12 @@ def _sha256_file(path: Path) -> str:
 
 def _phase(log_path: Path, ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
     _append(log_path, f"bootstrap phase={title} message={msg}")
-    ui.set(title, msg, progress)
+    _progress_pulse(ui, title, msg, progress)
 
 
 def _ui_pulse(ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
     """長時間ブロック処理の前後で進捗 UI を更新（無応答に見えるのを軽減）。"""
-    if not ui.active:
-        return
-    try:
-        ui.set(title, msg, progress)
-    except Exception:
-        pass
+    _progress_pulse(ui, title, msg, progress)
 
 
 def _mode_text(mode: str) -> str:
@@ -437,6 +499,7 @@ def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str,
             cfg_apply,
             phase="before_bin_apply",
             force_taskkill=True,
+            ui_pulse=_ui_pulse_fn(ui, "処理中", "関連プロセスを終了しています…", 66),
         )
         _phase(log_path, ui, "適用中", apply_msg, 70)
         if mode == "patch":
@@ -747,6 +810,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
     _append(paths.log_path, f"pending_apply: {probe_tasklist_line()}")
     # skip_apply_confirm は直後に pending から除去するため、relax 判定は pop より前に行う。
     relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
+    skip_mutex_gate = should_skip_mutex_gate_before_deferred_prep(pending)
     if pending.get("skip_apply_confirm"):
         _append(
             paths.log_path,
@@ -773,46 +837,54 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
     wait_msg = _ui_update_message(
         install_root, "UPDATER_PHASE_WAIT_MESSAGE", "すべての Excel を閉じてください。"
     )
-    _phase(paths.log_path, ui, wait_title, wait_msg, 2)
-    if relax_svc_self:
+    if skip_mutex_gate:
         _append(
             paths.log_path,
-            "pending_apply: mutex_gate relax_svc_self=True "
-            "(interactive defer from hc_svc_server; svc mutex ignored)",
+            "pending_apply: skip_mutex_gate=True (interactive defer prep; Excel may stay open)",
         )
-    snap0 = mutex_snapshot()
-    if mutex_blocks_pending_apply(snap0, relax_svc_self=relax_svc_self):
-        stop_msg = _ui_update_message(
-            install_root,
-            "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
-            "関連プロセスを終了しています…",
-        )
-        _ui_pulse(ui, wait_title, stop_msg, 3)
-        _append(paths.log_path, "pending_apply: mutex_busy graceful_shutdown")
-        ensure_packaged_children_stopped(
-            lambda m: _append(paths.log_path, m),
-            cfg,
-            phase="pending_apply_graceful",
-            force_taskkill=False,
-        )
-        snap_mid = mutex_snapshot()
-        if mutex_blocks_pending_apply(snap_mid, relax_svc_self=relax_svc_self):
-            _append(paths.log_path, "pending_apply: mutex still busy; taskkill")
-            _ui_pulse(ui, wait_title, stop_msg, 4)
+    else:
+        _phase(paths.log_path, ui, wait_title, wait_msg, 2)
+        if relax_svc_self:
+            _append(
+                paths.log_path,
+                "pending_apply: mutex_gate relax_svc_self=True "
+                "(interactive defer from hc_svc_server; svc mutex ignored)",
+            )
+        snap0 = mutex_snapshot()
+        if mutex_blocks_pending_apply(snap0, relax_svc_self=relax_svc_self):
+            stop_msg = _ui_update_message(
+                install_root,
+                "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
+                "関連プロセスを終了しています…",
+            )
+            _ui_pulse(ui, wait_title, stop_msg, 3)
+            _append(paths.log_path, "pending_apply: mutex_busy graceful_shutdown")
             ensure_packaged_children_stopped(
                 lambda m: _append(paths.log_path, m),
                 cfg,
-                phase="pending_apply_force",
-                force_taskkill=True,
+                phase="pending_apply_graceful",
+                force_taskkill=False,
+                ui_pulse=_ui_pulse_fn(ui, wait_title, stop_msg, 3),
             )
-        snap1 = mutex_snapshot()
-        if mutex_blocks_pending_apply(snap1, relax_svc_self=relax_svc_self):
-            ui.close()
-            return {
-                "ok": False,
-                "applied": False,
-                "error": f"blocked_by_running_process mutex={snap1}",
-            }
+            snap_mid = mutex_snapshot()
+            if mutex_blocks_pending_apply(snap_mid, relax_svc_self=relax_svc_self):
+                _append(paths.log_path, "pending_apply: mutex still busy; taskkill")
+                _ui_pulse(ui, wait_title, stop_msg, 4)
+                ensure_packaged_children_stopped(
+                    lambda m: _append(paths.log_path, m),
+                    cfg,
+                    phase="pending_apply_force",
+                    force_taskkill=True,
+                    ui_pulse=_ui_pulse_fn(ui, wait_title, stop_msg, 4),
+                )
+            snap1 = mutex_snapshot()
+            if mutex_blocks_pending_apply(snap1, relax_svc_self=relax_svc_self):
+                ui.close()
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": f"blocked_by_running_process mutex={snap1}",
+                }
     _phase(
         paths.log_path,
         ui,
@@ -955,22 +1027,27 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     try:
                         pending["retry"] = {"patch_retry_in_run": i + 1, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "", "last_error_message": "", "last_failed_at": ""}
                         write_pending(paths, pending)
-                        _ui_pulse(
-                            ui,
-                            _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
-                            _ui_update_message(
-                                install_root,
-                                "PROGRESS_PREPARE_MSG_PATCH_BUILD",
-                                "差分パッケージを構築しています。\nしばらくお待ちください。",
-                            ),
-                            8,
+                        mat_title = _ui_update_message(
+                            install_root, "PROGRESS_PREPARE_TITLE", "準備中"
                         )
+                        mat_msg = _ui_update_message(
+                            install_root,
+                            "PROGRESS_PREPARE_MSG_PATCH_BUILD",
+                            "差分パッケージを構築しています。\nしばらくお待ちください。",
+                        )
+                        _ui_pulse(ui, mat_title, mat_msg, 8)
                         t_mat0 = time.perf_counter()
                         try:
-                            mz, mclean, mstats, merr = materialize_manifest_patch_zip(
-                                install_root=install_root,
-                                patch_zip=patch_path,
-                                target_bin_version=target_bin,
+                            mz, mclean, mstats, merr = _pulse_while_blocking(
+                                ui,
+                                mat_title,
+                                mat_msg,
+                                8,
+                                lambda: materialize_manifest_patch_zip(
+                                    install_root=install_root,
+                                    patch_zip=patch_path,
+                                    target_bin_version=target_bin,
+                                ),
                             )
                         finally:
                             sec = time.perf_counter() - t_mat0
@@ -991,7 +1068,13 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                         apply_sha = "" if mstats is not None else patch_sha
                         try:
                             if defer_bin_to_updater:
-                                worker_zip = _persist_zip_for_hc_updater(mz, paths.payload_root)
+                                worker_zip = _pulse_while_blocking(
+                                    ui,
+                                    mat_title,
+                                    mat_msg,
+                                    10,
+                                    lambda: _persist_zip_for_hc_updater(mz, paths.payload_root),
+                                )
                                 worker_mode = "patch"
                                 worker_sha = apply_sha
                             else:
@@ -1049,7 +1132,21 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                 _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
                 return {"ok": False, "applied": False, "error": "フル更新ファイルを取得できません。"}
             if defer_bin_to_updater:
-                worker_zip = _persist_zip_for_hc_updater(full_path, paths.payload_root)
+                persist_title = _ui_update_message(
+                    install_root, "PROGRESS_PREPARE_TITLE", "準備中"
+                )
+                persist_msg = _ui_update_message(
+                    install_root,
+                    "PROGRESS_PREPARE_MSG",
+                    "更新に必要なファイルを用意しています。\nしばらくお待ちください。",
+                )
+                worker_zip = _pulse_while_blocking(
+                    ui,
+                    persist_title,
+                    persist_msg,
+                    12,
+                    lambda: _persist_zip_for_hc_updater(full_path, paths.payload_root),
+                )
                 worker_mode = "full"
                 worker_sha = full_sha
             else:
@@ -1078,6 +1175,12 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                                 cfg,
                                 phase=f"full_apply_win32_retry_{j}",
                                 force_taskkill=True,
+                                ui_pulse=_ui_pulse_fn(
+                                    ui,
+                                    "処理中",
+                                    "関連プロセスを終了しています…",
+                                    66,
+                                ),
                             )
                             time.sleep(1.5 if j == 0 else 3.0)
                             continue
@@ -1136,52 +1239,65 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     "error": "更新 zip の準備に失敗しました。ログを確認してください。",
                 }
             display_ver = _catalog_display_version_for_pending(cat_path)
-            try:
-                from core.packaged_update import spawn_hc_updater_for_pending_bin_apply
+            from core.update_process_cleanup import is_hc_updater_process
 
-                spawn_hc_updater_for_pending_bin_apply(
-                    install_root,
-                    zip_path=worker_zip,
-                    expected_sha=worker_sha,
-                    apply_mode=worker_mode,
-                    target_bin_version=target_bin,
-                    display_version=display_ver,
+            continuous_bin = is_hc_updater_process() or os.environ.get(
+                "CSV_TOOL_HC_UPDATER_CONTINUOUS_BIN"
+            ) == "1"
+            if continuous_bin:
+                clear_pending(paths)
+                _append(
+                    paths.log_path,
+                    "apply_bin: apply_mode_final={m} apply_result=deferred_inline_bin_apply target_bin={t}".format(
+                        m=worker_mode,
+                        t=target_bin or "-",
+                    ),
                 )
+                return {
+                    "ok": True,
+                    "applied": False,
+                    "deferred_to_updater": True,
+                    "deferred_inline_bin_apply": True,
+                    "worker_zip_path": str(worker_zip.resolve()),
+                    "worker_zip_sha": worker_sha,
+                    "worker_apply_mode": worker_mode,
+                    "target_bin_version": target_bin,
+                    "display_version": display_ver,
+                }
+            try:
+                pending = read_pending(paths) or {}
+                pending.setdefault("retry", {})
+                pending["retry"]["last_error_code"] = "E_LEGACY_DEFER_UNSUPPORTED"
+                pending["retry"]["last_error_message"] = (
+                    "この更新経路はサポートされなくなりました。"
+                    "リボンの「更新確認」から「すぐに更新」を実行してください。"
+                )
+                write_pending(paths, pending)
             except Exception as e:
                 _append(
                     paths.log_path,
-                    "apply_bin: spawn_hc_updater_for_pending_bin_apply failed type={t} err={m}".format(
+                    "apply_bin: legacy_defer_pending_update_failed type={t} err={m}".format(
                         t=type(e).__name__,
                         m=e,
                     ),
                 )
-                pending["state"] = "failed"
-                pending["retry"] = {
-                    "patch_retry_in_run": 0,
-                    "patch_fail_total": patch_total,
-                    "full_fail_total": full_total + 1,
-                    "last_error_code": "E_SPAWN_UPDATER_FAILED",
-                    "last_error_message": str(e),
-                    "last_failed_at": _ts(),
-                }
-                write_pending(paths, pending)
-                return {"ok": False, "applied": False, "error": str(e)}
-            clear_pending(paths)
-            done_msg = _ui_update_message(
-                install_root,
-                "PROGRESS_DEFER_DONE_TEMPLATE",
-                "準備が終わりました。\n\n開いている Excel をすべて終了してください。",
-            )
-            defer_title = _ui_update_message(install_root, "PROGRESS_DEFER_DONE_TITLE", "準備完了")
-            _phase(paths.log_path, ui, defer_title, done_msg, 100)
             _append(
                 paths.log_path,
-                "apply_bin: apply_mode_final={m} apply_result=deferred_to_hc_updater restart_required=true target_bin={t}".format(
+                "apply_bin: legacy_defer_spawn_blocked=true reason=not_hc_updater_continuous "
+                "apply_mode={m} target_bin={t} hint=use_ribbon_update_check".format(
                     m=worker_mode,
                     t=target_bin or "-",
                 ),
             )
-            return {"ok": True, "applied": False, "deferred_to_updater": True}
+            return {
+                "ok": False,
+                "applied": False,
+                "error": (
+                    "この更新経路はサポートされなくなりました。"
+                    "リボンの「更新確認」から「すぐに更新」を実行してください。"
+                ),
+                "error_code": "E_LEGACY_DEFER_UNSUPPORTED",
+            }
 
         pending["state"] = "done"
         pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total, "last_error_code": "", "last_error_message": "", "last_failed_at": ""}

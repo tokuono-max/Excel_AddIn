@@ -36,16 +36,34 @@ def test_should_relax_svc_mutex_for_interactive_defer() -> None:
     with patch.dict("os.environ", {}, clear=False):
         with patch.object(upc, "is_hc_svc_server_process", return_value=True):
             assert upc.should_relax_svc_mutex_for_interactive_defer(pending)
+        with patch.object(upc, "is_hc_updater_process", return_value=True):
+            with patch.object(upc, "is_hc_svc_server_process", return_value=False):
+                assert upc.should_relax_svc_mutex_for_interactive_defer(pending)
     with patch.object(upc, "is_hc_svc_server_process", return_value=False):
-        assert not upc.should_relax_svc_mutex_for_interactive_defer(pending)
+        with patch.object(upc, "is_hc_updater_process", return_value=False):
+            assert not upc.should_relax_svc_mutex_for_interactive_defer(pending)
     assert not upc.should_relax_svc_mutex_for_interactive_defer({})
     with patch.dict("os.environ", {"CSV_TOOL_APPLY_PENDING_INLINE_BIN": "1"}):
         with patch.object(upc, "is_hc_svc_server_process", return_value=True):
             assert not upc.should_relax_svc_mutex_for_interactive_defer(pending)
 
 
+def test_should_skip_mutex_gate_before_deferred_prep() -> None:
+    pending = {"skip_apply_confirm": True, "apply_scope": "bin_only"}
+    assert upc.should_skip_mutex_gate_before_deferred_prep(pending)
+    assert not upc.should_skip_mutex_gate_before_deferred_prep(
+        {"skip_apply_confirm": True, "apply_scope": "bootstrap_only"}
+    )
+    assert not upc.should_skip_mutex_gate_before_deferred_prep(
+        {"skip_apply_confirm": False, "apply_scope": "bin_only"}
+    )
+    with patch.dict("os.environ", {"CSV_TOOL_APPLY_PENDING_INLINE_BIN": "1"}):
+        assert not upc.should_skip_mutex_gate_before_deferred_prep(pending)
+
+
 if __name__ == "__main__":
     test_mutex_blocks_pending_apply_strict_svc()
     test_mutex_blocks_pending_apply_main_ui()
     test_should_relax_svc_mutex_for_interactive_defer()
+    test_should_skip_mutex_gate_before_deferred_prep()
     print("all passed")

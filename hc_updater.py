@@ -32,13 +32,16 @@ from core.update_process_cleanup import (
     ensure_packaged_children_stopped,
     mutex_snapshot,
     probe_tasklist_line,
+    sleep_with_ui_pulse,
     taskkill_other_hc_updater_processes,
 )
 from core.update_housekeeping import cleanup_update_payload_dir, post_deferred_bin_success_housekeeping
 from core.packaged_update import (
+    _bin_apply_success_marker_path,
     _resolve_install_scope,
     display_name_for_install_scope,
     notify_installed_apps_list_changed,
+    updater_result_path,
 )
 from core.update_state import load_runtime_config
 
@@ -103,13 +106,9 @@ def _is_excel_running() -> bool:
         return False
 
 
-def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
+def _load_update_messages_for_install(install_root: Path) -> dict[str, str]:
     msgs: dict[str, str] = {}
     try:
-        raw = json.loads(job_path.read_text(encoding="utf-8-sig"))
-        install_root = Path(str(raw.get("InstallRoot", "")).strip())
-        if not install_root:
-            return msgs
         cfg_path = install_root / "config" / "ui_update_check.json"
         if not cfg_path.is_file():
             return msgs
@@ -119,6 +118,19 @@ def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
             for k, v in maybe.items():
                 if isinstance(k, str) and isinstance(v, str):
                     msgs[k] = v
+    except Exception:
+        pass
+    return msgs
+
+
+def _load_update_messages_for_job(job_path: Path) -> dict[str, str]:
+    msgs: dict[str, str] = {}
+    try:
+        raw = json.loads(job_path.read_text(encoding="utf-8-sig"))
+        install_root = Path(str(raw.get("InstallRoot", "")).strip())
+        if not install_root:
+            return msgs
+        return _load_update_messages_for_install(install_root)
     except Exception:
         pass
     return msgs
@@ -477,6 +489,10 @@ class _ProgressUi:
         except Exception:
             self._ok = False
 
+    @property
+    def active(self) -> bool:
+        return self._ok
+
     def set(self, title: str, message: str, progress: int) -> None:
         if not self._ok:
             return
@@ -529,8 +545,43 @@ def _phase(log_path: Path, ui: _ProgressUi, key: str, title: str, msg: str, prog
     ui.set(title, msg, progress)
 
 
+def _write_ui_ready_marker(path: Path | None, *, ui_active: bool) -> None:
+    if path is None or not str(path).strip():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"ready": True, "ui_active": bool(ui_active), "pid": os.getpid(), "ts": _ts()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _job_from_deferred_inline_result(
+    install_root: Path,
+    res: dict[str, Any],
+    log_path: Path,
+) -> Job:
+    zip_s = str(res.get("worker_zip_path") or "").strip()
+    return Job(
+        install_root=install_root,
+        zip_path=Path(zip_s),
+        expected_sha=str(res.get("worker_zip_sha") or "").strip().lower(),
+        log_path=log_path,
+        display_version=str(res.get("display_version") or "").strip(),
+        apply_mode=str(res.get("worker_apply_mode") or "full").strip().lower() or "full",
+        target_bin_version=str(res.get("target_bin_version") or "").strip(),
+        cleanup_path="",
+        notify_marker_path=str(_bin_apply_success_marker_path(install_root).resolve()),
+    )
+
+
 def _run_apply_pending_job(job_path: Path, raw: dict[str, Any]) -> int:
-    """UAC 昇格で pending を適用（UI なし）。結果 JSON を ResultPath に書く。"""
+    """apply_pending ジョブ: pending を適用（昇格時は inline bin、通常 defer 可）。"""
     import traceback
 
     install_root = Path(str(raw.get("InstallRoot", "")).strip())
@@ -538,33 +589,120 @@ def _run_apply_pending_job(job_path: Path, raw: dict[str, Any]) -> int:
     result_path = Path(result_s) if result_s else Path()
     log_s = str(raw.get("LogPath", "")).strip()
     log_line = Path(log_s) if log_s else (install_root / "logs" / "hc_update.log")
+    source_s = str(raw.get("Source", "")).strip()
+    ui_ready_s = str(raw.get("UiReadyPath") or "").strip()
+    ui_ready_path = Path(ui_ready_s) if ui_ready_s else None
+    inline_raw = raw.get("InlineBin")
+    inline_bin = True if inline_raw is None else bool(inline_raw)
+    defer_ui: _ProgressUi | None = None
+    handed_off_ui = False
     try:
         if not install_root.is_dir():
             raise RuntimeError(f"InstallRoot not found: {install_root}")
-        if not result_s:
-            raise RuntimeError("ResultPath is empty")
         _append_with_cap(
             log_line,
-            f"{_ts()} apply_pending: elevated worker start pid={os.getpid()} install_root={install_root}\n",
+            f"{_ts()} apply_pending: worker start pid={os.getpid()} install_root={install_root} "
+            f"inline_bin={inline_bin} source={source_s or '-'}\n",
         )
-        from bootstrap.update_bootstrap import apply_pending_update
+        from bootstrap.update_bootstrap import (
+            apply_pending_update,
+            clear_external_progress_pulse,
+            set_external_progress_pulse,
+        )
 
-        os.environ["CSV_TOOL_APPLY_PENDING_INLINE_BIN"] = "1"
+        ui_msgs: dict[str, str] = {}
+        if not inline_bin:
+            ui_msgs = _load_update_messages_for_install(install_root)
+            defer_ui = _ProgressUi(ui_msgs)
+            _write_ui_ready_marker(ui_ready_path, ui_active=defer_ui.active)
+            if defer_ui.active:
+                defer_ui.set(
+                    ui_msgs.get("PROGRESS_PREPARE_TITLE", "準備中"),
+                    ui_msgs.get(
+                        "PROGRESS_PREPARE_MSG",
+                        "更新に必要なファイルを用意しています。\nしばらくお待ちください。",
+                    ),
+                    5,
+                )
+                set_external_progress_pulse(
+                    lambda title, message, progress: defer_ui.set(title, message, int(progress))
+                )
+            os.environ["HC_BOOTSTRAP_NO_TK"] = "1"
+            os.environ["CSV_TOOL_HC_UPDATER_CONTINUOUS_BIN"] = "1"
+
+        if inline_bin:
+            os.environ["CSV_TOOL_APPLY_PENDING_INLINE_BIN"] = "1"
+        else:
+            os.environ.pop("CSV_TOOL_APPLY_PENDING_INLINE_BIN", None)
         try:
             res = apply_pending_update(install_root)
         finally:
+            clear_external_progress_pulse()
             os.environ.pop("CSV_TOOL_APPLY_PENDING_INLINE_BIN", None)
+            os.environ.pop("HC_BOOTSTRAP_NO_TK", None)
+            os.environ.pop("CSV_TOOL_HC_UPDATER_CONTINUOUS_BIN", None)
+
         out: dict[str, Any] = {"ok": False, "applied": False}
         if isinstance(res, dict):
             out.update(res)
             out["ok"] = bool(res.get("ok", True))
         else:
             out = {"ok": True, "applied": False}
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
+        if (
+            not inline_bin
+            and isinstance(res, dict)
+            and res.get("deferred_inline_bin_apply")
+            and defer_ui is not None
+        ):
+            if defer_ui.active:
+                defer_ui.set(
+                    ui_msgs.get("PROGRESS_DEFER_DONE_TITLE", "準備完了"),
+                    ui_msgs.get(
+                        "PROGRESS_DEFER_DONE_TEMPLATE",
+                        "更新の準備が終わりました。\n\n開いている Microsoft Excel をすべて終了してください。",
+                    ),
+                    100,
+                )
+            job = _job_from_deferred_inline_result(install_root, res, log_line)
+            bin_result_path = result_path if result_s else updater_result_path(install_root)
+            handed_off_ui = True
+            exit_code = _run_bin_apply_job(
+                job,
+                defer_ui,
+                ui_msgs,
+                result_path=bin_result_path if str(bin_result_path) else None,
+                job_path=None,
+            )
+            if result_s:
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "ok": exit_code == 0,
+                            "applied": exit_code == 0,
+                            "deferred_to_updater": False,
+                            "deferred_inline_bin_apply": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            _append_with_cap(
+                log_line,
+                f"{_ts()} apply_pending: continuous_bin_apply done exit={exit_code}\n",
+            )
+            return exit_code
+
+        if defer_ui is not None:
+            defer_ui.close()
+        if result_s:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
         _append_with_cap(
             log_line,
-            f"{_ts()} apply_pending: done ok={out.get('ok')} applied={out.get('applied')}\n",
+            f"{_ts()} apply_pending: done ok={out.get('ok')} applied={out.get('applied')} "
+            f"deferred_to_updater={out.get('deferred_to_updater')}\n",
         )
         return 0 if out.get("ok") else 1
     except Exception as e:
@@ -588,6 +726,11 @@ def _run_apply_pending_job(job_path: Path, raw: dict[str, Any]) -> int:
             job_path.unlink(missing_ok=True)
         except OSError:
             pass
+        if defer_ui is not None and not handed_off_ui:
+            try:
+                defer_ui.close()
+            except Exception:
+                pass
 
 
 def _load_job(job_path: Path) -> Job:
@@ -620,45 +763,25 @@ def _write_marker(path_text: str, target_bin_version: str, display_version: str,
     _append_with_cap(log_path, f"{_ts()} apply_bin: success_notify marker_written path={p}\n")
 
 
-def run(job_path: Path) -> int:
-    try:
-        raw_head = json.loads(job_path.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        bootstrap_log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
-        _append_with_cap(
-            bootstrap_log_path,
-            f"{_ts()} apply_bin: job read failed {type(e).__name__}: {e} path={job_path}\n",
-        )
-        return 1
-    jt = str(raw_head.get("JobType", "bin_apply")).strip().lower()
-    if jt == "apply_pending":
-        return _run_apply_pending_job(job_path, raw_head)
-
-    result_s = str(raw_head.get("ResultPath", "")).strip()
-    result_path = Path(result_s) if result_s else None
+def _run_bin_apply_job(
+    job: Job,
+    ui: _ProgressUi,
+    ui_msgs: dict[str, str],
+    *,
+    result_path: Path | None,
+    job_path: Path | None = None,
+) -> int:
     exit_code = 1
     result_error = ""
-    job: Job | None = None
-
-    bootstrap_log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
-    _append_with_cap(
-        bootstrap_log_path,
-        f"{_ts()} apply_bin: updater process start pid={os.getpid()} job={job_path}\n",
+    busy_title = updater_busy_title(ui_msgs, job.apply_mode)
+    apply_title = busy_title
+    apply_msg = updater_busy_body(
+        ui_msgs, job.apply_mode, "UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。", apply_phase=True
     )
-    ui_msgs = _load_update_messages_for_job(job_path)
-    ui = _ProgressUi(ui_msgs)
-    apply_msg = ui_msgs.get("UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。")
-    apply_title = ui_msgs.get("UPDATER_PHASE_APPLY_TITLE", "更新中")
     try:
-        job = _load_job(job_path)
-        busy_title = updater_busy_title(ui_msgs, job.apply_mode)
-        apply_title = busy_title
-        apply_msg = updater_busy_body(
-            ui_msgs, job.apply_mode, "UPDATER_PHASE_APPLY_MESSAGE", "更新ファイルを適用しています。", apply_phase=True
-        )
         _append_with_cap(
             job.log_path,
-            f"{_ts()} apply_bin: updater job loaded pid={os.getpid()} job={job_path}\n",
+            f"{_ts()} apply_bin: updater job loaded pid={os.getpid()} job={job_path or '-'}\n",
         )
         if not job.install_root.is_dir():
             raise RuntimeError(f"InstallRoot not found: {job.install_root}")
@@ -678,6 +801,10 @@ def run(job_path: Path) -> int:
         wait_title = ui_msgs.get("UPDATER_PHASE_WAIT_TITLE", "Excel の終了を待っています")
         wait_msg = ui_msgs.get("UPDATER_PHASE_WAIT_MESSAGE", "")
         wait_deadline = time.time() + _excel_wait_timeout_sec(job.install_root)
+
+        def _wait_pulse() -> None:
+            ui.set(wait_title, wait_msg, 5)
+
         while _is_excel_running():
             if time.time() > wait_deadline:
                 timeout_tpl = ui_msgs.get(
@@ -685,9 +812,8 @@ def run(job_path: Path) -> int:
                     "Excel が終了しませんでした。\n\nすべての Excel ウィンドウを閉じてから、再度「すぐに更新」を実行してください。",
                 )
                 raise RuntimeError(timeout_tpl)
-            time.sleep(2)
-            ui.set(wait_title, wait_msg, 5)
-        time.sleep(1)
+            sleep_with_ui_pulse(2.0, ui_pulse=_wait_pulse)
+        sleep_with_ui_pulse(1.0, ui_pulse=_wait_pulse)
 
         _phase(
             job.log_path,
@@ -726,46 +852,49 @@ def run(job_path: Path) -> int:
 
         extract_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_extract_"))
         try:
+            extract_title = busy_title
+            extract_msg = updater_busy_body(
+                ui_msgs,
+                job.apply_mode,
+                "UPDATER_PHASE_EXTRACT_MESSAGE",
+                "更新ファイルを展開しています。",
+            )
             _phase(
                 job.log_path,
                 ui,
                 "extract",
-                busy_title,
-                updater_busy_body(
-                    ui_msgs,
-                    job.apply_mode,
-                    "UPDATER_PHASE_EXTRACT_MESSAGE",
-                    "更新ファイルを展開しています。",
-                ),
+                extract_title,
+                extract_msg,
                 50,
             )
-            ui.set(
-                busy_title,
-                updater_busy_body(
-                    ui_msgs,
-                    job.apply_mode,
-                    "UPDATER_PHASE_EXTRACT_MESSAGE",
-                    "更新ファイルを展開しています。",
-                ),
+            ui.set(extract_title, extract_msg, 55)
+            from bootstrap.update_bootstrap import _pulse_while_blocking
+
+            _pulse_while_blocking(
+                ui,
+                extract_title,
+                extract_msg,
                 55,
+                lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
             )
-            shutil.unpack_archive(str(zip_local), str(extract_tmp))
             cfg = load_runtime_config(job.install_root)
-            ui.set(
-                busy_title,
-                updater_busy_body(
-                    ui_msgs,
-                    job.apply_mode,
-                    "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
-                    "関連プロセスを終了しています…",
-                ),
-                68,
+            stop_msg = updater_busy_body(
+                ui_msgs,
+                job.apply_mode,
+                "UPDATER_PHASE_STOP_PROCESSES_MESSAGE",
+                "関連プロセスを終了しています…",
             )
+
+            def _stop_pulse() -> None:
+                ui.set(busy_title, stop_msg, 68)
+
+            ui.set(busy_title, stop_msg, 68)
             ensure_packaged_children_stopped(
                 lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
                 cfg,
                 phase="updater_before_bin_apply",
                 force_taskkill=True,
+                ui_pulse=_stop_pulse,
             )
             taskkill_other_hc_updater_processes(
                 lambda m: _append_with_cap(job.log_path, f"{_ts()} {m}\n"),
@@ -916,10 +1045,7 @@ def run(job_path: Path) -> int:
             shutil.rmtree(dl_tmp, ignore_errors=True)
     except Exception as e:
         result_error = f"{type(e).__name__}: {e}"
-        # Keep same keyword "ERROR" used by existing operations.
-        log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
-        if job is not None:
-            log_path = job.log_path
+        log_path = job.log_path
         wn = getattr(e, "winerror", None) if isinstance(e, OSError) else None
         en = getattr(e, "errno", None) if isinstance(e, OSError) else None
         _append_with_cap(
@@ -941,7 +1067,7 @@ def run(job_path: Path) -> int:
             log_path,
             f"{_ts()} apply_bin: ERROR traceback {traceback.format_exc()[:2000]}\n",
         )
-        if job is not None and job.install_root.is_dir():
+        if job.install_root.is_dir():
             try:
                 cleanup_update_payload_dir(
                     job.install_root,
@@ -949,8 +1075,7 @@ def run(job_path: Path) -> int:
                 )
             except Exception:
                 pass
-        msgs = ui_msgs if "ui_msgs" in locals() else {}
-        err_tpl = msgs.get(
+        err_tpl = ui_msgs.get(
             "UPDATER_ERROR_TEMPLATE",
             "CSV Tool の更新に失敗しました。\n\n{error}\n\n"
             "対処: 開いている Excel をすべて閉じてから、再度「すぐに更新」を実行してください。\n"
@@ -964,25 +1089,61 @@ def run(job_path: Path) -> int:
                 err_msg = err_tpl.format(error=e)
             except (KeyError, ValueError):
                 err_msg = f"CSV Tool の更新に失敗しました。\n\n{e}"
-        _message_box(err_msg, msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"), 0x30)
+        _message_box(err_msg, ui_msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"), 0x30)
         exit_code = 1
         return exit_code
     finally:
         result_kw: dict[str, Any] = {"ok": exit_code == 0, "error": result_error}
-        if exit_code == 0 and job is not None:
+        if exit_code == 0:
             result_kw["target_bin_version"] = job.target_bin_version
             result_kw["display_version"] = job.display_version
         _write_updater_result(result_path, **result_kw)
-        if job is not None:
-            try:
-                _remove_path(job.cleanup_path)
-            except Exception:
-                pass
-        _remove_path(str(job_path))
+        try:
+            _remove_path(job.cleanup_path)
+        except Exception:
+            pass
+        if job_path is not None:
+            _remove_path(str(job_path))
         try:
             ui.close()
         except Exception:
             pass
+
+
+def run(job_path: Path) -> int:
+    try:
+        raw_head = json.loads(job_path.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        bootstrap_log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
+        _append_with_cap(
+            bootstrap_log_path,
+            f"{_ts()} apply_bin: job read failed {type(e).__name__}: {e} path={job_path}\n",
+        )
+        return 1
+    jt = str(raw_head.get("JobType", "bin_apply")).strip().lower()
+    if jt == "apply_pending":
+        return _run_apply_pending_job(job_path, raw_head)
+
+    result_s = str(raw_head.get("ResultPath", "")).strip()
+    result_path = Path(result_s) if result_s else None
+
+    bootstrap_log_path = Path(tempfile.gettempdir()) / "csv_tool" / "hc_update.log"
+    _append_with_cap(
+        bootstrap_log_path,
+        f"{_ts()} apply_bin: updater process start pid={os.getpid()} job={job_path}\n",
+    )
+    ui_msgs = _load_update_messages_for_job(job_path)
+    ui = _ProgressUi(ui_msgs)
+    try:
+        job = _load_job(job_path)
+    except Exception as e:
+        _append_with_cap(
+            bootstrap_log_path,
+            f"{_ts()} apply_bin: job load failed {type(e).__name__}: {e}\n",
+        )
+        ui.close()
+        return 1
+    return _run_bin_apply_job(job, ui, ui_msgs, result_path=result_path, job_path=job_path)
 
 
 def main() -> int:

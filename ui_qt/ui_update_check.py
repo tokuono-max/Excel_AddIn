@@ -120,6 +120,26 @@ class UpdateCheckBusyDialog(QDialog):
             except Exception:
                 pass
 
+        try:
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        except Exception:
+            pass
+
+    def _center_without_owner(self) -> None:
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+            if screen is None:
+                return
+            geo = screen.availableGeometry()
+            frame = self.frameGeometry()
+            frame.moveCenter(geo.center())
+            self.move(frame.topLeft())
+        except Exception:
+            pass
+
     def _write_ready(self) -> None:
         rp = self._ready_path
         if not rp:
@@ -136,6 +156,9 @@ class UpdateCheckBusyDialog(QDialog):
         self._write_ready()
         ph = int(self._parent_hwnd or 0)
         if not ph:
+            QTimer.singleShot(0, self._center_without_owner)
+            QTimer.singleShot(0, lambda: self.raise_())
+            QTimer.singleShot(0, lambda: self.activateWindow())
             return
         rect = self._excel_rect_tuple_from_req(self._req)
 
