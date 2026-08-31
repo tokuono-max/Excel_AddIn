@@ -156,21 +156,22 @@ def test_spawn_interactive_apply_pending_and_wait_no_pending_returns_false(
     assert pu._spawn_interactive_apply_pending_and_wait(install, source="test") is False
 
 
-def test_run_excel_startup_update_sequence_uses_busy_when_packaged(
+def test_run_excel_startup_update_sequence_runs_without_startup_busy_when_packaged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
+    busy_calls: list[str] = []
+    startup_calls: list[bool] = []
 
     monkeypatch.setenv(ENV_PACKAGED, "1")
     monkeypatch.setattr(
         pu,
         "_run_with_update_busy_ui",
-        lambda msg, fn, **kw: (calls.append(str(msg)), fn())[1],
+        lambda *_a, **_k: busy_calls.append("busy"),
     )
     monkeypatch.setattr(
         pu,
         "maybe_check_updates_on_startup",
-        lambda **kw: calls.append(f"startup_check reuse={kw.get('reuse_busy')}"),
+        lambda **kw: startup_calls.append(bool(kw.get("reuse_busy"))),
     )
 
     order: list[str] = []
@@ -184,8 +185,8 @@ def test_run_excel_startup_update_sequence_uses_busy_when_packaged(
     )
 
     assert order == ["bootstrap", "bridge", "register"]
-    assert any("startup_check reuse=True" in c for c in calls)
-    assert len(calls) >= 2
+    assert busy_calls == []
+    assert startup_calls == [True]
 
 
 def test_run_excel_startup_update_sequence_skips_busy_when_not_packaged(

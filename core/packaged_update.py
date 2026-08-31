@@ -3629,33 +3629,20 @@ def run_excel_startup_update_sequence(
     ensure_bridge_fn: Any,
     register_book_fn: Any,
 ) -> None:
-    """Excel 起動: bootstrap 適用〜bridge 登録〜起動時 catalog 確認を BUSY 付きで一括実行。"""
+    """Excel 起動: bootstrap 適用〜bridge 登録〜起動時 catalog 確認（UI なし・リボン更新確認は別経路）。"""
     if not packaged_spawn_requested():
         bootstrap_apply_fn()
         ensure_bridge_fn()
         register_book_fn()
         return
 
-    startup_msg = _um(
-        "UPDATE_CHECK_BUSY_STARTUP",
-        "起動しています…\n更新の確認準備をしています。",
-    )
-
-    def _body() -> None:
-        bootstrap_apply_fn()
-        ensure_bridge_fn()
-        register_book_fn()
-        maybe_check_updates_on_startup(
-            owner_hwnd=owner_hwnd,
-            sheet_id=sheet_id,
-            reuse_busy=True,
-        )
-
-    _run_with_update_busy_ui(
-        startup_msg,
-        _body,
+    bootstrap_apply_fn()
+    ensure_bridge_fn()
+    register_book_fn()
+    maybe_check_updates_on_startup(
         owner_hwnd=owner_hwnd,
         sheet_id=sheet_id,
+        reuse_busy=True,
     )
 
 
