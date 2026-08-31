@@ -75,6 +75,8 @@ KEY_SCENARIO_ID = "scenario_id"
 KEY_DEBUG_FLAGS = "debug_flags"
 # メイン画面 Excel タブ（出力先・ジャンプ・並べ替え）。省略時は normalize で補完。
 KEY_EXCEL_OPTIONS = "excel_options"
+# 一括実行・マスタデバッグの結果一覧に付加する列（実行時 UI のみ。シナリオ保存対象外）。
+KEY_RESULT_COLUMNS = "result_columns"
 
 # ソース type（extract_item_values と整合）
 SOURCE_TYPE_CELL = "cell"
@@ -722,6 +724,62 @@ def default_excel_options() -> dict[str, Any]:
         "autofilter": True,
         "sort_keys": [{"item": "", "order": "asc", "natural": True}],
     }
+
+
+def default_result_columns() -> dict[str, Any]:
+    """結果一覧・Excel 出力の先頭に付加するパス／ファイル名列（既定は両方 OFF）。"""
+    return {
+        "include_path": False,
+        "include_file": False,
+        "path_header": "パス",
+        "file_header": "ファイル",
+    }
+
+
+def normalize_result_columns(raw: Any) -> dict[str, Any]:
+    """result_columns を読込用に正規化する。"""
+    d = default_result_columns()
+    if not isinstance(raw, dict):
+        return d
+    if "include_path" in raw:
+        d["include_path"] = bool(raw.get("include_path"))
+    if "include_file" in raw:
+        d["include_file"] = bool(raw.get("include_file"))
+    ph = str(raw.get("path_header") or "").strip()
+    if ph:
+        d["path_header"] = ph[:64]
+    fh = str(raw.get("file_header") or "").strip()
+    if fh:
+        d["file_header"] = fh[:64]
+    return d
+
+
+def result_column_header_names(raw: Any) -> list[str]:
+    """有効な結果付加列のヘッダ名（左から パス→ファイル）。"""
+    opts = normalize_result_columns(raw)
+    names: list[str] = []
+    if opts["include_path"]:
+        names.append(str(opts["path_header"]))
+    if opts["include_file"]:
+        names.append(str(opts["file_header"]))
+    return names
+
+
+def master_item_headers_from_scenario(data: dict[str, Any]) -> list[str]:
+    """シナリオ items からマスタ項目列ヘッダを返す。"""
+    items = data.get(KEY_ITEMS) or []
+    return [
+        str(it.get(KEY_ITEM_NAME) or it.get(KEY_ITEM_ID) or ("項目_%s" % i))
+        for i, it in enumerate(items)
+        if isinstance(it, dict)
+    ]
+
+
+def output_table_headers_for_scenario(data: dict[str, Any]) -> list[str]:
+    """結果付加列＋マスタ項目列の出力ヘッダ（左から）。"""
+    return result_column_header_names(data.get(KEY_RESULT_COLUMNS)) + master_item_headers_from_scenario(
+        data
+    )
 
 
 def normalize_excel_options(raw: Any) -> dict[str, Any]:

@@ -893,6 +893,34 @@ class _DataAggMainWindow(QDialog):
         self._scan_pending_auto: bool = False
         self._excel_unlock_pulse_chain_scheduled: bool = False
         self._excel_create_probe_t0: float = 0.0
+        row_result_cols = QHBoxLayout()
+        row_result_cols.setContentsMargins(0, 0, 0, 0)
+        row_result_cols.setSpacing(12)
+        lbl_result_cols = QLabel(_u("LABEL_RESULT_COLUMNS", "結果に付加する列"))
+        self._main_set_tip(
+            lbl_result_cols,
+            "TOOLTIP_LABEL_RESULT_COLUMNS",
+            "一括実行・マスタデバッグの結果一覧および Excel 書込の先頭に列を追加します。",
+        )
+        self._chk_result_path = QCheckBox(_u("CHK_RESULT_PATH", "パス"))
+        self._main_set_tip(
+            self._chk_result_path,
+            "TOOLTIP_CHK_RESULT_PATH",
+            "取得元のフルパスを結果の先頭列に追加します。",
+        )
+        self._chk_result_path.setChecked(False)
+        self._chk_result_file = QCheckBox(_u("CHK_RESULT_FILE", "ファイル"))
+        self._main_set_tip(
+            self._chk_result_file,
+            "TOOLTIP_CHK_RESULT_FILE",
+            "取得元のファイル名（拡張子付き）を結果の先頭列に追加します。",
+        )
+        self._chk_result_file.setChecked(False)
+        row_result_cols.addWidget(lbl_result_cols)
+        row_result_cols.addWidget(self._chk_result_path)
+        row_result_cols.addWidget(self._chk_result_file)
+        row_result_cols.addStretch(1)
+        layout.addLayout(row_result_cols)
         # 制御用ボタン（シナリオ読込/保存、一括実行・キャンセル）
         row_btn = QHBoxLayout()
         btn_load = QPushButton(_u("BTN_SCENARIO_LOAD", "シナリオ読込"))
@@ -1890,6 +1918,20 @@ class _DataAggMainWindow(QDialog):
         self._excel_sort_layout.removeWidget(row)
         row.deleteLater()
         self._mark_scenario_dirty()
+
+    def _result_columns_from_ui(self) -> dict[str, Any]:
+        """結果付加列（パス／ファイル）の実行時オプション。シナリオ JSON には保存しない。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        _u = lambda k, d: _ui_disp_str(self._ui or {}, k, d)
+        return scenario_mod.normalize_result_columns(
+            {
+                "include_path": self._chk_result_path.isChecked(),
+                "include_file": self._chk_result_file.isChecked(),
+                "path_header": _u("RESULT_COL_PATH_HEADER", "パス"),
+                "file_header": _u("RESULT_COL_FILE_HEADER", "ファイル"),
+            }
+        )
 
     def _excel_options_from_ui(self) -> dict[str, Any]:
         """Excel タブの状態をシナリオ用 dict にする。"""
@@ -3182,8 +3224,10 @@ class _DataAggMainWindow(QDialog):
         t_dbg = _u("TITLE_DEBUG", "デバッグ").strip() or "デバッグ"
         try:
             from ui_qt.ui_data_agg_debug import create_data_agg_debug_dialog
+            from svc import svc_data_agg_scenario as scenario_mod
 
             data = self._build_scenario_from_ui()
+            data[scenario_mod.KEY_RESULT_COLUMNS] = self._result_columns_from_ui()
             items = data.get("items") or []
             paths = list(getattr(self, "_file_list_items", None) or [])
             dbg = (_get_cfg().get("SCREENS") or {}).get("DEBUG") or {}
@@ -3809,6 +3853,7 @@ class _DataAggMainWindow(QDialog):
         data[scenario_mod.KEY_EXCEL_OPTIONS] = scenario_mod.normalize_excel_options(
             self._excel_options_from_ui()
         )
+        data.pop(scenario_mod.KEY_RESULT_COLUMNS, None)
         return data
 
     def _start_batch_done_poll_for_sheet(self, sheet_id: str, *, run_id: str = "") -> None:
@@ -3912,6 +3957,9 @@ class _DataAggMainWindow(QDialog):
     def _run_execution(self, action: str, *, extract_trunc_policy: str | None = None) -> None:
         """一括実行を IPC で svc に依頼する（メイン本番は一括のみ）。"""
         data = self._build_scenario_from_ui()
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        data[scenario_mod.KEY_RESULT_COLUMNS] = self._result_columns_from_ui()
         items = data.get("items") or []
         if not items:
             msg = _normalize_message_newlines(
@@ -6034,9 +6082,24 @@ class _ScenarioEditDialog(QDialog):
                     tag = str(cb.property("ext_tag") or "")
                     cb.setChecked(tag in want)
                 r["sheet_name"].setText(str(src.get("sheet_name") or ""))
-                rule = str(p.get("sheet_rule") or "左端シート")
+                dc_cell = self._scenario_edit_detail_cell_cfg()
+                sheet_items = dc_cell.get("SHEET_RULE_ITEMS") or [
+                    "左端シート",
+                    "完全一致",
+                    "含む",
+                    "含まない",
+                ]
+                sheet_def_idx = int(dc_cell.get("SHEET_RULE_DEFAULT_INDEX", 1))
+                sheet_def_idx = min(
+                    max(sheet_def_idx, 0),
+                    max(len(sheet_items) - 1, 0),
+                )
+                default_sheet_rule = str(sheet_items[sheet_def_idx])
+                rule = str(p.get("sheet_rule") or default_sheet_rule)
                 ri = r["sheet_rule"].findText(rule)
-                r["sheet_rule"].setCurrentIndex(ri if ri >= 0 else 0)
+                r["sheet_rule"].setCurrentIndex(
+                    ri if ri >= 0 else sheet_def_idx
+                )
                 r["cell_ref"].setText(ascii_upper_cell_ref(str(src.get("cell_ref") or "")))
                 r["row_offset"].setValue(int(src.get("row_offset") or 0))
                 r["col_offset"].setValue(int(src.get("col_offset") or 0))

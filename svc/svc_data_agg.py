@@ -1458,22 +1458,55 @@ def _resolve_join_search_index(
     return cached
 
 
+def _result_column_values_from_row(
+    row: dict[str, Any],
+    result_columns: dict[str, Any] | None,
+    *,
+    fallback_file_path: str = "",
+) -> list[Any]:
+    """結果付加列（パス・ファイル）のセル値。row の __file_path を優先し、無ければ fallback を使う。"""
+    from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
+
+    opts = normalize_result_columns(result_columns)
+    if not opts["include_path"] and not opts["include_file"]:
+        return []
+    fp = str(row.get("__file_path") or fallback_file_path or "").strip()
+    vals: list[Any] = []
+    if opts["include_path"]:
+        vals.append(normalize_source_path(fp) if fp else "")
+    if opts["include_file"]:
+        vals.append(Path(fp).name if fp else "")
+    return vals
+
+
 def _merged_dict_rows_to_table_rows(
     rows: Sequence[dict[str, Any]],
     headers: list[str],
     *,
     row_skip: Optional[Callable[[dict[str, Any]], bool]] = None,
+    result_columns: Optional[dict[str, Any]] = None,
+    fallback_file_path: str = "",
 ) -> list[list[Any]]:
     """merged 行 dict のリストを table_rows 用の行リストへ一括変換する。"""
     if not headers:
         return []
+    from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
+
+    rc = normalize_result_columns(result_columns)
+    use_rc = bool(rc["include_path"] or rc["include_file"])
     out: list[list[Any]] = []
     append = out.append
     get = dict.get
     for r in rows:
         if row_skip is not None and row_skip(r):
             continue
-        append([get(r, h) for h in headers])
+        row_vals: list[Any] = []
+        if use_rc:
+            row_vals = _result_column_values_from_row(
+                r, rc, fallback_file_path=fallback_file_path
+            )
+        row_vals.extend([get(r, h) for h in headers])
+        append(row_vals)
     return out
 
 
@@ -1505,6 +1538,8 @@ def _append_merged_rows_to_table_chunked(
     iteration_context_for_row: Optional[
         Callable[[dict[str, Any], int], dict[str, Any]]
     ] = None,
+    result_columns: Optional[dict[str, Any]] = None,
+    fallback_file_path: str = "",
 ) -> bool:
     """
     merged_rows をチャンク単位で table_rows に追加する（行単位 progress ループを避ける）。
@@ -1542,7 +1577,14 @@ def _append_merged_rows_to_table_chunked(
             if iteration_contexts_out is not None and iteration_context_for_row is not None:
                 iteration_contexts_out.append(iteration_context_for_row(r, global_i))
         if kept:
-            table_rows.extend(_merged_dict_rows_to_table_rows(kept, headers))
+            table_rows.extend(
+                _merged_dict_rows_to_table_rows(
+                    kept,
+                    headers,
+                    result_columns=result_columns,
+                    fallback_file_path=fallback_file_path,
+                )
+            )
         if progress_ph is not None and progress_detail is not None and n_total > 0:
             progress_ph(progress_detail(end, n_total))
         if capped and len(table_rows) >= cap_n:
@@ -2925,12 +2967,22 @@ def _resolve_match_keys_to_headers(
     items: list[dict[str, Any]],
     headers: list[str],
 ) -> list[str]:
-    """シナリオの match_keys（項目 id または表示名）をマスタ列名（headers）に解決する。"""
+    """シナリオの match_keys（項目 id または表示名）をマスタ列名に解決する。
+
+    headers に結果付加列（パス／ファイル）が含まれていても、項目 id は items の name/id から解決する。
+    """
     id_to_header: dict[str, str] = {}
+    item_names: set[str] = set()
     for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        hname = str(it.get("name") or it.get("id") or ("項目_%s" % i)).strip()
+        if hname:
+            item_names.add(hname)
         iid = str(it.get("id") or "").strip()
         if iid:
-            id_to_header[iid] = headers[i]
+            id_to_header[iid] = hname
+    header_set = set(headers or [])
     out: list[str] = []
     for mk in match_keys or []:
         if mk is None:
@@ -2938,10 +2990,12 @@ def _resolve_match_keys_to_headers(
         s = str(mk).strip()
         if not s:
             continue
-        if s in headers:
-            out.append(s)
-        elif s in id_to_header:
+        if s in id_to_header:
             out.append(id_to_header[s])
+        elif s in item_names:
+            out.append(s)
+        elif s in header_set:
+            out.append(s)
     seen: set[str] = set()
     uniq: list[str] = []
     for x in out:
@@ -2949,6 +3003,24 @@ def _resolve_match_keys_to_headers(
             seen.add(x)
             uniq.append(x)
     return uniq
+
+
+def _prepend_result_columns_to_master_table_rows(
+    rows: Sequence[Sequence[Any]],
+    result_columns: dict[str, Any] | None,
+    *,
+    fallback_file_path: str = "",
+) -> list[list[Any]]:
+    """マスタ列のみの table 行リストの先頭に結果付加列を挿入する。"""
+    from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
+
+    rc = normalize_result_columns(result_columns)
+    if not rc["include_path"] and not rc["include_file"]:
+        return [list(r) for r in rows]
+    prefix = _result_column_values_from_row(
+        {}, rc, fallback_file_path=fallback_file_path
+    )
+    return [prefix + list(r) for r in rows]
 
 
 def _joined_result_to_table_rows(joined: Any, headers: list[str]) -> list[list[Any]]:
@@ -4225,6 +4297,8 @@ def compute_batch_table_rows(
     if not items:
         return [], [], [], 0
     headers = [it.get("name") or it.get("id") or ("項目_%s" % i) for i, it in enumerate(items)]
+    result_columns = scenario_mod.normalize_result_columns(data.get(scenario_mod.KEY_RESULT_COLUMNS))
+    output_headers = scenario_mod.result_column_header_names(result_columns) + headers
     header_set = set(headers)
     dd = data.get("__debug_diag") or {}
     preview_master_mode = str(dd.get("source") or "") == _MASTER_PREVIEW_DIAG_SOURCE
@@ -5336,6 +5410,8 @@ def compute_batch_table_rows(
                     cancel_poll=_poll_cancel if cancel_check is not None else None,
                     iteration_contexts_out=iteration_contexts_out,
                     iteration_context_for_row=_iter_ctx_fn,
+                    result_columns=result_columns,
+                    fallback_file_path=str(file_path),
                 )
                 if (
                     not preview_master_mode
@@ -5351,6 +5427,8 @@ def compute_batch_table_rows(
                         row_skip=None,
                         iteration_contexts_out=iteration_contexts_out,
                         iteration_context_for_row=_iter_ctx_fn,
+                        result_columns=result_columns,
+                        fallback_file_path=str(file_path),
                     )
                 if diag_on:
                     try:
@@ -5434,6 +5512,11 @@ def compute_batch_table_rows(
                 rows_to_add = [
                     r for r in rows_to_add if not _batch_sparse_table_row_noise(r, headers)
                 ]
+            rows_to_add = _prepend_result_columns_to_master_table_rows(
+                rows_to_add,
+                result_columns,
+                fallback_file_path=str(file_path),
+            )
             if max_table_rows is not None and max_table_rows > 0:
                 room = max_table_rows - len(table_rows)
                 rows_to_add = rows_to_add[: max(0, room)]
@@ -5590,6 +5673,11 @@ def compute_batch_table_rows(
                 rows_to_add = [
                     r for r in rows_to_add if not _batch_sparse_table_row_noise(r, headers)
                 ]
+            rows_to_add = _prepend_result_columns_to_master_table_rows(
+                rows_to_add,
+                result_columns,
+                fallback_file_path=str(file_path),
+            )
             if max_table_rows is not None and max_table_rows > 0:
                 room = max_table_rows - len(table_rows)
                 rows_to_add = rows_to_add[: max(0, room)]
@@ -5720,6 +5808,7 @@ def compute_batch_table_rows(
             cancel_poll=_poll_cancel if cancel_check is not None else None,
             iteration_contexts_out=iteration_contexts_out,
             iteration_context_for_row=_join_pool_iter_ctx,
+            result_columns=result_columns,
         )
         if preview_master_mode and isinstance(dd, dict):
             _mi_cap = dd.get("mi_idx")
@@ -5728,8 +5817,9 @@ def compute_batch_table_rows(
                     master_preview_join_host_column_fill_ratio,
                 )
 
-                ci = int(_mi_cap)
-                hname = headers[ci]
+                _rc_extra = len(scenario_mod.result_column_header_names(result_columns))
+                ci = int(_mi_cap) + _rc_extra
+                hname = headers[int(_mi_cap)]
                 n_tbl = len(table_rows)
                 filled = sum(
                     1
@@ -5815,7 +5905,7 @@ def compute_batch_table_rows(
                 vals,
             )
     if preview_master_mode and table_rows:
-        table_rows = apply_master_preview_table_row_order(data, headers, table_rows)
+        table_rows = apply_master_preview_table_row_order(data, output_headers, table_rows)
     _log_compute_batch_result_invariants(
         scenario_id=scenario_id,
         n_files=n_files,
@@ -5827,7 +5917,7 @@ def compute_batch_table_rows(
         parallel_expected=n_files if use_file_parallel else 0,
         parallel_got=len(parallel_extract_by_fi),
     )
-    return headers, table_rows, event_log_rows, join_events_total
+    return output_headers, table_rows, event_log_rows, join_events_total
 
 
 def _submit_step_popup_ui(

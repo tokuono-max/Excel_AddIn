@@ -745,6 +745,8 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         ),
     )
     _append(paths.log_path, f"pending_apply: {probe_tasklist_line()}")
+    # skip_apply_confirm は直後に pending から除去するため、relax 判定は pop より前に行う。
+    relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
     if pending.get("skip_apply_confirm"):
         _append(
             paths.log_path,
@@ -772,7 +774,6 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         install_root, "UPDATER_PHASE_WAIT_MESSAGE", "すべての Excel を閉じてください。"
     )
     _phase(paths.log_path, ui, wait_title, wait_msg, 2)
-    relax_svc_self = should_relax_svc_mutex_for_interactive_defer(pending)
     if relax_svc_self:
         _append(
             paths.log_path,

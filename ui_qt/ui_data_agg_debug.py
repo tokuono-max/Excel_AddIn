@@ -6362,11 +6362,9 @@ class DataAggDebugDialog(QDialog):
         return core_env.data_agg_master_frozen_columns_enabled()
 
     def _mpv_preview_headers(self) -> list[str]:
-        items = list((self._scenario_for_dry_run or {}).get("items") or [])
-        return [
-            it.get("name") or it.get("id") or ("項目_%s" % i)
-            for i, it in enumerate(items)
-        ]
+        from svc.svc_data_agg_scenario import output_table_headers_for_scenario  # noqa: WPS433
+
+        return output_table_headers_for_scenario(self._scenario_for_dry_run or {})
 
     def _debug_carry_empty_target_names(self) -> set[str]:
         """
@@ -8084,11 +8082,7 @@ class DataAggDebugDialog(QDialog):
         """デバッグ結果一覧を本番集約と同じ縦順（paths 順 + excel sort_keys）に揃える。"""
         if self._mode != 1 or not rows or not self._scenario_for_dry_run:
             return rows
-        items = list((self._scenario_for_dry_run or {}).get("items") or [])
-        headers = [
-            str(it.get("name") or it.get("id") or ("項目_%s" % i))
-            for i, it in enumerate(items)
-        ]
+        headers = self._mpv_preview_headers()
         if not headers:
             return rows
         from svc.svc_data_agg import apply_master_preview_table_row_order  # noqa: WPS433
@@ -8841,11 +8835,7 @@ class DataAggDebugDialog(QDialog):
         """マスタプレビュー: 結果一覧は run_preview_compute の table_rows（進捗行）のみを表示する。
         _mpv_grid は描画直前に prog_rows と同内容へ同期し、extract マージで batch 結果を上書き表示しない。"""
         scen = self._scenario_for_dry_run or {}
-        items = list(scen.get("items") or [])
-        headers = [
-            str(it.get("name") or it.get("id") or ("項目_%s" % i))
-            for i, it in enumerate(items)
-        ]
+        headers = self._mpv_preview_headers()
         headers = self._decorate_debug_grid_headers(headers)
         ncols = len(headers)
         if ncols == 0:
@@ -8883,10 +8873,14 @@ class DataAggDebugDialog(QDialog):
         # table_rows を正とする。データ行数より display_floor で枠だけ膨らませない。
         row_basis = pr if pr > 0 else display_floor
         max_r = max(1, row_basis)
+        from svc.svc_data_agg_scenario import KEY_RESULT_COLUMNS, result_column_header_names  # noqa: WPS433
+
+        _extra_ncols = len(result_column_header_names(scen.get(KEY_RESULT_COLUMNS)))
+        _n_master_cols = max(0, ncols - _extra_ncols)
         disp_mi = self._mpv_display_mi_idx
-        if disp_mi is None or disp_mi < 0 or disp_mi >= ncols:
+        if disp_mi is None or disp_mi < 0 or disp_mi >= _n_master_cols:
             disp_mi = self._mi_idx
-        mi = max(0, min(int(disp_mi), ncols - 1))
+        mi = _extra_ncols + max(0, min(int(disp_mi), max(0, _n_master_cols - 1)))
         show_merged_current = bool(getattr(self, "_mpv_show_merged_current", False))
         sync_grid: list[list[Any]] = []
         for r in range(max_r):
@@ -9119,11 +9113,7 @@ class DataAggDebugDialog(QDialog):
             return
         if self._mode == 1 and self._scenario_for_dry_run and self._debug_scan_paths:
             if not self._summary_rows:
-                items = list((self._scenario_for_dry_run or {}).get("items") or [])
-                headers = [
-                    str(it.get("name") or it.get("id") or ("項目_%s" % i))
-                    for i, it in enumerate(items)
-                ]
+                headers = self._mpv_preview_headers()
                 headers = self._decorate_debug_grid_headers(headers)
                 if headers:
                     self._mpv_join_table_active = True

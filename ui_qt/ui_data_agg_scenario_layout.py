@@ -929,11 +929,12 @@ def build_scenario_detail_cell_scroll(
     if not isinstance(sheet_rule_items, list):
         sheet_rule_items = ["左端シート", "完全一致", "含む", "含まない"]
     sheet_rule_items = [_normalize_message_newlines(str(x).strip()) for x in sheet_rule_items]
+    sheet_rule_def = int(_dc(cfg, "SHEET_RULE_DEFAULT_INDEX", 1))
     cb_sheet_rule = _add_form_row_combo(
         f2,
         _dcp(cfg, "LABEL_SHEET_RULE", "シート名条件"),
         sheet_rule_items,
-        0,
+        sheet_rule_def,
     )
     _csv_note = QLabel(_dch(cfg, "SHEET_CSV_NOTE_HTML", ""))
     _csv_note.setWordWrap(True)
