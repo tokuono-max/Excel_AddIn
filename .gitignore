@@ -57,3 +57,4 @@ tools/dev/packaged_root.local.bat
 
 # 現場用（インストール先直下）。リポジトリには置かない
 /出荷履歴項目.json
+config/catalog_path.txt
