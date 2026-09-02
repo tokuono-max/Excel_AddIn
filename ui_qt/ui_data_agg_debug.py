@@ -1002,7 +1002,7 @@ class DataAggDebugDialog(QDialog):
         self._master_progress_pct_floor: int = 0
         self._master_batch_hook_last_fi: int = 1
         self._master_batch_hook_last_nf: int = 1
-        # 項目ループ中もファイル開始時の [C]/[F] を 1 行目に残す
+        # 項目ループ中もファイル開始時の [CCH]/[LOC] を 1 行目に残す
         self._master_batch_hook_last_cache_mark: str = ""
         self._master_batch_hook_mark_fi: int = 0
         # マスタプレビュー（シナリオ単位）で最後だけ確定表示を走らせるための一時フラグ
@@ -2983,28 +2983,38 @@ class DataAggDebugDialog(QDialog):
         return bind_workbook_cache_frame(frame)
 
     def _master_progress_cache_mark_prefix(self, detail_s: str) -> str:
-        """raw detail 先頭の [C]/[F] を取り出す（進捗 1 行目＝フェーズ用）。"""
-        s = str(detail_s or "").lstrip()
-        if s.startswith("[C]"):
-            return "[C] "
-        if s.startswith("[F]"):
-            return "[F] "
-        return ""
+        """raw detail 先頭の [UNC]/[CCH]/[LOC] を取り出す（進捗 1 行目＝フェーズ用）。"""
+        from svc.data_agg_progress_mark import extract_progress_io_mark_prefix  # noqa: WPS433
+
+        return extract_progress_io_mark_prefix(detail_s)
 
     @staticmethod
     def _master_progress_strip_cache_mark(text: str) -> str:
-        """詳細行から先頭の [C]/[F] を除く（フェーズ側へ移したあとの二重表示防止）。"""
-        s = str(text or "").lstrip()
-        for prefix in ("[C] ", "[F] ", "[C]", "[F]"):
-            if s.startswith(prefix):
-                return s[len(prefix) :].lstrip()
-        return s
+        """詳細行から先頭の [UNC]/[CCH]/[LOC] を除く（フェーズ側へ移したあとの二重表示防止）。"""
+        from svc.data_agg_progress_mark import strip_progress_io_mark  # noqa: WPS433
 
-    def _master_progress_resolve_cache_mark(self, detail_s: str, file_index: int) -> str:
-        """detail のマーク、なければ同一ファイルの直近マークを返す。"""
+        return strip_progress_io_mark(text)
+
+    def _master_progress_resolve_cache_mark(
+        self, detail_s: str, file_index: int, *, io_path: str = ""
+    ) -> str:
+        """detail のマーク、なければ io_path または同一ファイルの直近マークを返す。"""
         mark = self._master_progress_cache_mark_prefix(detail_s)
         fi = int(file_index or 0)
         if mark:
+            self._master_batch_hook_last_cache_mark = mark
+            self._master_batch_hook_mark_fi = fi
+            return mark
+        if io_path:
+            try:
+                from svc.data_agg_progress_mark import (  # noqa: WPS433
+                    PROGRESS_MARK_LOC,
+                    progress_io_ref_mark,
+                )
+
+                mark = progress_io_ref_mark(io_path)
+            except Exception:
+                mark = PROGRESS_MARK_LOC
             self._master_batch_hook_last_cache_mark = mark
             self._master_batch_hook_mark_fi = fi
             return mark
@@ -3015,15 +3025,10 @@ class DataAggDebugDialog(QDialog):
     def _master_progress_phase_with_file(
         self, phase_head: str, *, mark: str, cur_file: str
     ) -> str:
-        """1 行目: [C]/[F] + フェーズ + 現在ファイル名。"""
-        head = str(phase_head or "").strip() or "準備中"
-        m = str(mark or "")
-        if m:
-            head = "%s%s" % (m, head)
-        fn = str(cur_file or "").strip()
-        if fn:
-            head = "%s — %s" % (head, fn)
-        return head
+        """1 行目: [UNC]/[CCH]/[LOC] + フェーズ + 現在ファイル名。"""
+        from svc.data_agg_progress_mark import progress_phase_with_mark  # noqa: WPS433
+
+        return progress_phase_with_mark(phase_head, mark=mark, cur_file=cur_file)
 
     def _master_progress_pick_current_file(
         self, detail: str, file_index: int, n_files: int
@@ -3324,6 +3329,9 @@ class DataAggDebugDialog(QDialog):
         hook_paths = self._mpv_effective_progress_hook_paths()
         hook_nf = len(hook_paths) if hook_paths else nf
         cur_file = self._master_progress_pick_current_file(detail_s, fi, hook_nf)
+        hook_io = ""
+        if hook_paths and 1 <= fi <= len(hook_paths):
+            hook_io = str(hook_paths[fi - 1] or "")
         if ui_done == 4:
             show_detail = self._master_progress_format_read_start_detail(
                 fi=fi, nf=nf, raw=detail_s
@@ -3348,11 +3356,13 @@ class DataAggDebugDialog(QDialog):
             show_detail = self._master_progress_format_assemble_detail(
                 detail_s, fi=fi, nf=nf, cur_file=cur_file
             )
-        # [C]/[F] + ファイル名は 1 行目。項目進捗でもマークを sticky 維持
-        mark = self._master_progress_resolve_cache_mark(detail_s, fi)
+        # [CCH]/[LOC] + ファイル名は 1 行目。項目進捗でもマークを sticky 維持
+        mark = self._master_progress_resolve_cache_mark(
+            detail_s, fi, io_path=hook_io
+        )
         show_detail = self._master_progress_strip_cache_mark(show_detail)
         phase_head = self._master_progress_phase_with_file(
-            phase_head, mark=mark, cur_file=cur_file if ui_done in (4, 5, 6) else ""
+            phase_head, mark=mark, cur_file=""
         )
         self._show_run_progress(
             phase_head,
@@ -3533,6 +3543,12 @@ class DataAggDebugDialog(QDialog):
         self._bump_mpv_prefetch_cancel()
         self._mpv_close_item_wb_frame()
         self._mpv_try_flush_pending_wb_frames()
+        try:
+            from svc.data_agg_network_stage import cleanup_all_network_stage_dirs
+
+            cleanup_all_network_stage_dirs()
+        except Exception:
+            pass
         if self._mode == 0:
             self._persist_scenario_state()
         self._scenario_snapshots.clear()
@@ -7160,6 +7176,7 @@ class DataAggDebugDialog(QDialog):
                         probe_caller=probe_caller,
                         cancel_check=self._master_run_cancel_check(),
                         iteration_contexts_out=iter_ctx,
+                        scan_root=getattr(self, "_scan_root", None),
                     )
                 if iter_ctx:
                     dd_local = scen.get("__debug_diag")
@@ -8593,11 +8610,15 @@ class DataAggDebugDialog(QDialog):
                     fname = Path(str(fp)).name
                     row_prog = min(len(col_vals) + 1, max_rows)
                     mark = ""
-                    if xlsx_progress_cache_mark is not None:
-                        try:
-                            mark = str(xlsx_progress_cache_mark(fp) or "")
-                        except Exception:
-                            mark = "[F] "
+                    try:
+                        from svc.data_agg_progress_mark import (  # noqa: WPS433
+                            PROGRESS_MARK_LOC,
+                            progress_io_ref_mark,
+                        )
+
+                        mark = str(progress_io_ref_mark(fp) or "")
+                    except Exception:
+                        mark = PROGRESS_MARK_LOC
                     if extract_hook is not None:
                         try:
                             extract_hook(

@@ -338,6 +338,13 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     cfg_msgs = (_get_config().get("MESSAGES") or {})
 
     from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
+    from svc.data_agg_progress_mark import (  # noqa: E402
+        PROGRESS_MARK_UNC,
+        ProgressIoMarkState,
+        apply_batch_hook_io_mark,
+        progress_phase_with_mark,
+        progress_scan_mark,
+    )
 
     if write_pickle is None:
         raise RuntimeError("write_pickle is not available")
@@ -411,9 +418,12 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     rec = bool(scan_cfg.get("recursive"))
 
     file_paths_holder: list[list[Path]] = [[]]
+    io_paths_holder: list[list[str]] = [[]]
+    hook_mark_state = ProgressIoMarkState()
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
         fps = file_paths_holder[0]
+        io_ps = io_paths_holder[0] or [str(p) for p in fps]
         nf_l = max(len(fps), 1)
         ni_l = max(len(items), 1)
         fi_kw = int(rest[0]) if len(rest) >= 1 else None
@@ -430,9 +440,17 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         pi = min(4, max(1, int(sub) - 3))
         phase_txt, detail_txt = _batch_hook_progress_lines(sub, suffix)
         cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
+        phase_txt, detail_txt = apply_batch_hook_io_mark(
+            phase_txt,
+            detail_txt,
+            suffix=str(suffix or ""),
+            io_paths=io_ps,
+            file_index=fi_kw,
+            mark_state=hook_mark_state,
+        )
         prog_kw: dict[str, Any] = {
             "pct": prog_last_pct[0],
-            "phase": phase_txt[:120],
+            "phase": phase_txt,
             "phase_i": pi,
             "done": prog_last_pct[0],
             "total": 100,
@@ -443,9 +461,13 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             prog_kw["current_file"] = cf
         _prog_write(**prog_kw)
 
+    scan_mark = progress_scan_mark(start_path)
     _prog_write(
         pct=2,
-        phase=str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中..."),
+        phase=progress_phase_with_mark(
+            str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中..."),
+            mark=scan_mark,
+        )[:120],
         phase_i=0,
         done=0,
         total=100,
@@ -467,6 +489,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     with batch_cancel_scope(cancel_check):
         try:
+            t_scan0 = time.perf_counter()
             file_paths = scan_mod.scan_folder(
                 start_path,
                 recursive=rec,
@@ -474,6 +497,19 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 keyword=kw,
                 cancel_check=cancel_check,
             )
+            try:
+                from core import core_env
+
+                if core_env.data_agg_io_profile_enabled():
+                    from svc import data_agg_io_profile_temp as iop
+
+                    iop.record_scan(
+                        ms=int((time.perf_counter() - t_scan0) * 1000),
+                        n_files=len(file_paths),
+                        start_path=start_path,
+                    )
+            except Exception:
+                pass
         except DataAggCancelled:
             log_cancel_detected(
                 sheet_id=sheet_id,
@@ -526,16 +562,93 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     event_log_rows: list[list[Any]] = []
     t_compute = time.perf_counter()
     try:
-        with batch_cancel_scope(cancel_check):
-            headers, table_rows, event_log_rows, join_events_total = compute_batch_table_rows(
-                data,
-                file_paths,
-                probe_caller="excel_batch_submit",
-                progress_hook=_batch_hook,
-                cancel_check=cancel_check,
+        from core import core_env
+        from svc.data_agg_network_stage import network_stage_batch
+        from svc.svc_data_agg import filter_file_paths_by_item_file_patterns  # noqa: WPS433
+
+        if core_env.data_agg_batch_file_path_filter_enabled():
+            n_pf_in = len(file_paths)
+            file_paths = filter_file_paths_by_item_file_patterns(file_paths, items)
+            if n_pf_in != len(file_paths):
+                try:
+                    logger.info(
+                        "[DATA_AGG] batch file_path_filter before=%s after=%s scenario=%s",
+                        n_pf_in,
+                        len(file_paths),
+                        scenario_id,
+                    )
+                except Exception:
+                    pass
+            file_paths_holder[0] = list(file_paths)
+
+        stage_enabled = core_env.data_agg_network_stage_enabled()
+        use_stage_pipeline = (
+            stage_enabled and core_env.data_agg_network_stage_pipeline_enabled()
+        )
+
+        def _stage_copy_progress(done_i: int, total_n: int, fname: str) -> None:
+            if total_n <= 0:
+                return
+            pct = min(12, 2 + int(10 * done_i / max(1, total_n)))
+            prog_last_pct[0] = max(prog_last_pct[0], pct)
+            _prog_write(
+                pct=pct,
+                phase=progress_phase_with_mark(
+                    "ネットワークからコピー中",
+                    mark=PROGRESS_MARK_UNC,
+                )[:120],
+                phase_i=0,
+                detail="コピー %s/%s — %s" % (done_i, total_n, fname),
+                done=pct,
+                total=100,
             )
+
+        if use_stage_pipeline:
+            with batch_cancel_scope(cancel_check):
+                headers, table_rows, event_log_rows, join_events_total = compute_batch_table_rows(
+                    data,
+                    file_paths,
+                    probe_caller="excel_batch_submit",
+                    progress_hook=_batch_hook,
+                    cancel_check=cancel_check,
+                    stage_pipeline=True,
+                    stage_scan_root=start_path,
+                    stage_progress_callback=_stage_copy_progress,
+                )
+            io_paths_holder[0] = list(file_paths)
+        else:
+            with network_stage_batch(
+                file_paths,
+                scan_root=start_path,
+                enabled=stage_enabled,
+                cancel_check=cancel_check,
+                progress_callback=_stage_copy_progress,
+            ) as stage_batch:
+                io_paths_holder[0] = list(stage_batch.io_paths)
+                if core_env.data_agg_io_profile_enabled() and stage_batch.copy_ms > 0:
+                    try:
+                        from svc import data_agg_io_profile_temp as iop
+
+                        iop.record_stage_copy_ms(stage_batch.copy_ms)
+                    except Exception:
+                        pass
+                with batch_cancel_scope(cancel_check):
+                    headers, table_rows, event_log_rows, join_events_total = compute_batch_table_rows(
+                        data,
+                        stage_batch.io_paths,
+                        source_display_paths=stage_batch.display_paths,
+                        probe_caller="excel_batch_submit",
+                        progress_hook=_batch_hook,
+                        cancel_check=cancel_check,
+                    )
     except DataAggCancelled:
         dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)
+        try:
+            from svc.data_agg_network_stage import cleanup_all_network_stage_dirs
+
+            cleanup_all_network_stage_dirs()
+        except Exception:
+            pass
         log_cancel_detected(
             sheet_id=sheet_id,
             phase="compute",

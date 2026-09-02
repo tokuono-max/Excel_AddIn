@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from svc.data_agg_path_norm import normalize_source_path_literal
+
 logger = logging.getLogger(__name__)
 
 _CACHE_KEY = "hidden_row_sets"  # frame[path][sheet_key] -> set[int] (0-based) | frozenset
@@ -40,6 +42,11 @@ def _frame_hidden_cache() -> dict[str, Any] | None:
 
 def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
     """openpyxl 通常ロードで row_dimensions.hidden を収集（0 始まり行）。"""
+    import time
+
+    from core import core_env
+
+    t0 = time.perf_counter()
     try:
         import openpyxl
     except ImportError:
@@ -77,6 +84,13 @@ def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
             wb.close()
         except Exception:
             pass
+        if core_env.data_agg_io_profile_enabled():
+            try:
+                from svc import data_agg_io_profile_temp as iop
+
+                iop.record_hidden_open(path, time.perf_counter() - t0)
+            except Exception:
+                pass
     return hidden
 
 
@@ -121,6 +135,35 @@ def _load_hidden_rows_xls(path: Path, sheet_name: Optional[str]) -> set[int]:
     return hidden
 
 
+def _path_cache_key(path: Path | str) -> str:
+    return normalize_source_path_literal(path)
+
+
+def _hidden_rows_from_cached_workbook(
+    path: Path, sheet_name: Optional[str]
+) -> set[int] | None:
+    """xlsx_workbook_scope 内の既存ブックから非表示行を取得。未キャッシュなら None。"""
+    try:
+        from svc.svc_data_agg_extract import (  # noqa: WPS433
+            _hidden_rows_from_workbook,
+            _xlsx_workbook_cache_top,
+            _xlsx_cache_path_key,
+            is_openxml_excel_suffix,
+        )
+    except Exception:
+        return None
+    if not is_openxml_excel_suffix(path.suffix):
+        return None
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return None
+    key = _xlsx_cache_path_key(path)
+    wb = (frame.get("wbs") or {}).get(key)
+    if wb is None or bool(getattr(wb, "read_only", False)):
+        return None
+    return _hidden_rows_from_workbook(wb, sheet_name)
+
+
 def get_hidden_excel_rows(
     path: Path | str,
     sheet_name: Optional[str] = None,
@@ -134,7 +177,7 @@ def get_hidden_excel_rows(
     if suf not in (".xlsx", ".xlsm", ".xls"):
         return set()
     sk = _sheet_cache_key(sheet_name)
-    pk = str(p.resolve())
+    pk = _path_cache_key(p)
     cache = _frame_hidden_cache()
     if cache is not None:
         by_sheet = cache.setdefault(pk, {})
@@ -142,7 +185,23 @@ def get_hidden_excel_rows(
         if hit is not None:
             return set(hit)
     if suf in (".xlsx", ".xlsm"):
-        hidden = _load_hidden_rows_xlsx(p, sheet_name)
+        from_wb = _hidden_rows_from_cached_workbook(p, sheet_name)
+        if from_wb is not None:
+            hidden = from_wb
+        else:
+            try:
+                from svc.svc_data_agg_extract import (  # noqa: WPS433
+                    _hidden_rows_from_workbook,
+                    ensure_xlsx_workbook_for_hidden_rows,
+                )
+
+                wb = ensure_xlsx_workbook_for_hidden_rows(p)
+                if wb is not None:
+                    hidden = _hidden_rows_from_workbook(wb, sheet_name)
+                else:
+                    hidden = _load_hidden_rows_xlsx(p, sheet_name)
+            except Exception:
+                hidden = _load_hidden_rows_xlsx(p, sheet_name)
     else:
         hidden = _load_hidden_rows_xls(p, sheet_name)
     if cache is not None:

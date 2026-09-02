@@ -109,14 +109,33 @@ def _per_file_workbook_timing_enabled() -> bool:
     return core_env.data_agg_file_timing_enabled()
 
 
-def _add_workbook_open_seconds(path_key: str, seconds: float) -> None:
-    if seconds <= 0 or not _per_file_workbook_timing_enabled():
+def _io_profile_enabled() -> bool:
+    from core import core_env
+
+    return core_env.data_agg_io_profile_enabled()
+
+
+def _record_io_profile_cache_open(path_key: str, seconds: float) -> None:
+    if seconds <= 0 or not _io_profile_enabled():
         return
-    d = getattr(_tls_wb_open_sec, "by_path", None)
-    if d is None:
-        d = {}
-        _tls_wb_open_sec.by_path = d
-    d[path_key] = float(d.get(path_key, 0.0)) + float(seconds)
+    try:
+        from svc import data_agg_io_profile_temp as iop
+
+        iop.record_cache_open(path_key, seconds)
+    except Exception:
+        pass
+
+
+def _add_workbook_open_seconds(path_key: str, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    if _per_file_workbook_timing_enabled():
+        d = getattr(_tls_wb_open_sec, "by_path", None)
+        if d is None:
+            d = {}
+            _tls_wb_open_sec.by_path = d
+        d[path_key] = float(d.get(path_key, 0.0)) + float(seconds)
+    _record_io_profile_cache_open(path_key, seconds)
 
 
 def consume_workbook_open_ms_for_path(file_path: str) -> int:
@@ -255,7 +274,7 @@ def _xlsx_cache_path_key(file_path: str | Path) -> str:
 def xlsx_workbook_path_cached(file_path: str | Path) -> bool:
     """
     現在の TLS スコープ先頭フレームに、当該パスのブック／CSV 実体が既にあるとき True。
-    （シート行列だけのヒットは「未オープン」扱い → 進捗は [F]）
+    （シート行列だけのヒットは「未オープン」扱い → 進捗は [LOC]）
     """
     frame = _xlsx_workbook_cache_top()
     if frame is None:
@@ -273,8 +292,120 @@ def xlsx_workbook_path_cached(file_path: str | Path) -> bool:
 
 
 def xlsx_progress_cache_mark(file_path: str | Path) -> str:
-    """進捗文言用: キャッシュ再利用なら '[C] '、新規読込なら '[F] '。"""
-    return "[C] " if xlsx_workbook_path_cached(file_path) else "[F] "
+    """進捗文言用: ネットワーク [UNC] / キャッシュ [CCH] / 新規ローカル [LOC]。"""
+    from svc.data_agg_progress_mark import progress_io_ref_mark  # noqa: WPS433
+
+    return progress_io_ref_mark(file_path)
+
+
+def list_sheet_names_from_workbook_cache(file_path: str | Path) -> list[str] | None:
+    """
+    xlsx_workbook_scope 内で当該パスのブックが既に開いていれば sheetnames を返す。
+    スコープ外・未ロード・CSV 等は None（呼び出し側が従来どおり open する）。
+    """
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return None
+    p = Path(file_path)
+    suffix = p.suffix.lower()
+    try:
+        key = str(p.resolve())
+    except OSError:
+        key = str(p)
+    if suffix in (".xlsx", ".xlsm"):
+        wb = (frame.get("wbs") or {}).get(key)
+        if wb is None:
+            return None
+        try:
+            names = list(getattr(wb, "sheetnames", None) or [])
+            return [str(x) for x in names if str(x).strip() != ""]
+        except Exception:
+            return []
+    if suffix == ".xls":
+        book = (frame.get("xls_books") or {}).get(key)
+        if book is None:
+            return None
+        from svc.data_agg_xls_io import list_xls_sheet_names_from_book
+
+        return list_xls_sheet_names_from_book(book)
+    return None
+
+
+def _hidden_rows_from_workbook(wb: Any, sheet_name: Optional[str]) -> set[int]:
+    """openpyxl Workbook から非表示行（0 始まり）を収集。"""
+    hidden: set[int] = set()
+    if wb is None:
+        return hidden
+    try:
+        names = list(getattr(wb, "sheetnames", None) or [])
+        sn = str(sheet_name or "").strip()
+        if sn and sn in names:
+            ws = wb[sn]
+        else:
+            ws = wb.active
+        dims = getattr(ws, "row_dimensions", None)
+        if dims is None:
+            return hidden
+        for idx, dim in dims.items():
+            try:
+                r1 = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if bool(getattr(dim, "hidden", False)) and r1 >= 1:
+                hidden.add(r1 - 1)
+    except Exception as e:
+        logger.debug("[DATA_AGG_HIDDEN] wb dims 失敗: %s", e)
+    return hidden
+
+
+def ensure_xlsx_workbook_for_hidden_rows(path: Path | str) -> Any | None:
+    """
+    skip_hidden_rows 用に read_only=False でブックを開き、スコープ内キャッシュへ登録。
+    既にキャッシュされていればそれを返す（二重 open 回避）。
+    """
+    frame = _xlsx_workbook_cache_top()
+    if frame is None:
+        return None
+    p = Path(path)
+    if not is_openxml_excel_suffix(p.suffix):
+        return None
+    wbs: dict[str, Any] = frame.setdefault("wbs", {})
+    key = _xlsx_cache_path_key(p)
+    wb = wbs.get(key)
+    if wb is not None and not bool(getattr(wb, "read_only", False)):
+        return wb
+    if wb is not None:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        wbs.pop(key, None)
+    try:
+        from svc.data_agg_cancel import poll_active_cancel  # noqa: WPS433
+
+        poll_active_cancel(force=True)
+    except Exception:
+        pass
+    try:
+        import openpyxl  # noqa: E402
+    except ImportError:
+        return None
+    try:
+        need_open_timing = _per_file_workbook_timing_enabled() or _io_profile_enabled()
+        t_ld = time.perf_counter()
+        wb = openpyxl.load_workbook(
+            p,
+            read_only=False,
+            data_only=False,
+            keep_links=False,
+        )
+        if need_open_timing:
+            _add_workbook_open_seconds(key, time.perf_counter() - t_ld)
+    except Exception as e:
+        logger.debug("[DATA_AGG_HIDDEN] Excel open 失敗 %s: %s", p, e)
+        return None
+    wbs[key] = wb
+    return wb
 
 
 def _load_workbook_readonly(path: Path) -> Any:
@@ -312,7 +443,8 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
     except ImportError:
         return None
     try:
-        if _per_file_workbook_timing_enabled():
+        need_open_timing = _per_file_workbook_timing_enabled() or _io_profile_enabled()
+        if need_open_timing:
             t_ld = time.perf_counter()
             wb = _load_workbook_readonly(path)
             _add_workbook_open_seconds(key, time.perf_counter() - t_ld)
@@ -1526,7 +1658,15 @@ def _get_readonly_sheet_matrix(
     if mat is not None or not create:
         return mat
     try:
+        t_mat = time.perf_counter()
         mat = _materialize_readonly_sheet_matrix(ws)
+        if _io_profile_enabled():
+            try:
+                from svc import data_agg_io_profile_temp as iop
+
+                iop.record_materialize(path, time.perf_counter() - t_mat)
+            except Exception:
+                pass
     except Exception:
         return None
     mats_store[store_key] = mat

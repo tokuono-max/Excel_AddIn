@@ -114,6 +114,38 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
     ブックのシート名一覧。
     CSV などシート概念なしは None。読取失敗は []。
     """
+    import time
+
+    from core import core_env
+
+    _iop = None
+    _t0 = 0.0
+    if core_env.data_agg_io_profile_enabled():
+        try:
+            from svc import data_agg_io_profile_temp as _iop_mod
+
+            _iop = _iop_mod
+            _t0 = time.perf_counter()
+        except Exception:
+            _iop = None
+
+    def _finish_sheet_name_timing() -> None:
+        if _iop is None:
+            return
+        try:
+            _iop.record_sheet_name_open(file_path, time.perf_counter() - _t0)
+        except Exception:
+            pass
+
+    try:
+        from svc.svc_data_agg_extract import list_sheet_names_from_workbook_cache
+
+        cached = list_sheet_names_from_workbook_cache(file_path)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
     p = Path(file_path)
     suffix = p.suffix.lower()
     if suffix == ".csv":
@@ -122,19 +154,27 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
         from svc.data_agg_xls_io import list_xls_sheet_names, xls_reader_unavailable_message
 
         if xls_reader_unavailable_message():
+            _finish_sheet_name_timing()
             return []
-        return list_xls_sheet_names(p)
+        try:
+            names = list_xls_sheet_names(p)
+        finally:
+            _finish_sheet_name_timing()
+        return names
     if suffix in (".xlsx", ".xlsm"):
         try:
             import openpyxl  # noqa: E402
         except Exception:
+            _finish_sheet_name_timing()
             return []
         try:
             wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
             names = list(wb.sheetnames or [])
             wb.close()
+            _finish_sheet_name_timing()
             return [str(x) for x in names if str(x).strip() != ""]
         except Exception:
+            _finish_sheet_name_timing()
             return []
     return []
 

@@ -20,6 +20,13 @@ def test_batch_hook_resolve_current_file_join_slice() -> None:
     assert cf == "紐づけ履歴.xlsx"
 
 
+def test_batch_hook_resolve_current_file_network_mark() -> None:
+    cf = _batch_hook_resolve_current_file(
+        "[UNC] ファイル 2/5: net.xlsx 読込中", 2, []
+    )
+    assert cf == "net.xlsx"
+
+
 def test_batch_hook_progress_lines_splits_phase_and_detail() -> None:
     phase, detail = _batch_hook_progress_lines(6, "紐づけ履歴.xlsx 結合 10/20")
     assert phase == "照合・パス"

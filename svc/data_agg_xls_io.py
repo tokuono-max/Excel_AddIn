@@ -60,6 +60,17 @@ def close_xls_workbook(book: Any) -> None:
         pass
 
 
+def list_xls_sheet_names_from_book(book: Any) -> list[str]:
+    """開済み xlrd Book からシート名一覧（open/close しない）。"""
+    if book is None:
+        return []
+    try:
+        return [str(x) for x in (book.sheet_names() or []) if str(x).strip() != ""]
+    except Exception as e:
+        logger.warning("[DATA_AGG_XLS] sheet_names(book) 失敗: %s", e)
+        return []
+
+
 def list_xls_sheet_names(path: Path | str) -> list[str]:
     """シート名を左→右順で返す。失敗時は空リスト。"""
     if _xlrd_mod is None:

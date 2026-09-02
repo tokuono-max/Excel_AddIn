@@ -14,6 +14,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from svc.svc_data_agg import (  # noqa: E402
+    _align_context_paths_for_row,
     _apply_join_key_search_link_write,
     _apply_join_key_search_write,
     _assign_series_to_rows_by_context,
@@ -47,6 +48,20 @@ def test_assign_series_link_respects_overwrite_and_empty_string() -> None:
         write_mode="overwrite",
     )
     assert rows[0]["MAC"] == ""
+
+    rows_staged = [{"__file_path": r"\\server\share\book.xlsx", "__iter_index": 0, "連携": None}]
+    _assign_series_to_rows_by_context(
+        rows_staged,
+        "連携",
+        ["L1"],
+        _align_context_paths_for_row(
+            [{"file_path": r"C:\Temp\stage\book.xlsx", "iter_index": 0}],
+            r"\\server\share\book.xlsx",
+        ),
+        r"\\server\share\book.xlsx",
+        write_mode="fill_in",
+    )
+    assert rows_staged[0]["連携"] == "L1"
 
     rows2 = [
         {"__file_path": "f.xlsx", "__iter_index": 0, "MAC": "old"},

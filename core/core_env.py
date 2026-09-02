@@ -148,6 +148,24 @@ def data_agg_file_timing_enabled() -> bool:
     )
 
 
+def data_agg_io_profile_enabled() -> bool:
+    """TEMP: ネットワーク I/O 比較計測（data_agg_io_profile_temp）。本改善後に削除予定。"""
+    return truthy(
+        os.environ.get("HC_DIAG_DATA_AGG_IO_PROFILE"), empty_means_false=False
+    ) or (os.environ.get("DATA_AGG_IO_PROFILE", "").strip() == "1")
+
+
+def data_agg_network_stage_enabled() -> bool:
+    """
+    ネットワーク上の入力ファイルを TEMP へコピーしてから読む。
+    DATA_AGG_NETWORK_STAGE: 0=無効, 1/未設定=有効（ネットワークパスがあるときのみコピー）。
+    """
+    raw = os.environ.get("DATA_AGG_NETWORK_STAGE", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 def data_agg_join_dump_enabled() -> bool:
     """結合キー検索書込みの診断ダンプ（`[DATA_AGG_JOIN_DUMP]`）を出すか。"""
     return truthy(os.environ.get("HC_DIAG_DATA_AGG_JOIN"), empty_means_false=False) or (
@@ -195,6 +213,7 @@ def data_agg_diag_file_needed() -> bool:
         data_agg_name_path_diag_enabled()
         or data_agg_batch_timing_enabled()
         or data_agg_file_timing_enabled()
+        or data_agg_io_profile_enabled()
         or data_agg_join_dump_enabled()
     )
 
@@ -207,6 +226,26 @@ def data_agg_batch_file_path_filter_enabled() -> bool:
     if raw in ("1", "true", "yes", "on"):
         return True
     return True
+
+
+def data_agg_network_stage_copy_workers(*, n_files: int) -> int:
+    """
+    ネットワークステージの並列コピー数。CPU 数を検出して自動設定。
+    DATA_AGG_STAGE_COPY_WORKERS: 0=逐次, auto/未設定=min(8, CPU, ファイル数), 正整数=上限。
+    """
+    if n_files < 1:
+        return 1
+    raw = os.environ.get("DATA_AGG_STAGE_COPY_WORKERS", "").strip().lower()
+    if raw == "0":
+        return 1
+    cpu = os.cpu_count() or 4
+    if not raw or raw == "auto":
+        return max(1, min(8, cpu, n_files))
+    try:
+        w = int(raw)
+        return max(1, min(w, n_files))
+    except ValueError:
+        return max(1, min(8, cpu, n_files))
 
 
 def data_agg_file_parallel_workers(*, n_files: int) -> int:
@@ -227,6 +266,71 @@ def data_agg_file_parallel_workers(*, n_files: int) -> int:
         return max(0, min(w, n_files))
     except ValueError:
         return 0
+
+
+def data_agg_network_stage_pipeline_enabled() -> bool:
+    """コピー完了次第の抽出開始（ステージ＋抽出パイプライン）。DATA_AGG_STAGE_PIPELINE=0 で無効。"""
+    raw = os.environ.get("DATA_AGG_STAGE_PIPELINE", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def data_agg_parallel_cold_cap() -> int:
+    """UNC 起点時の抽出並列上限（ランプ前）。DATA_AGG_PARALLEL_COLD_CAP（既定 2）。"""
+    raw = os.environ.get("DATA_AGG_PARALLEL_COLD_CAP", "").strip()
+    if not raw:
+        return 2
+    try:
+        return max(1, min(int(raw), 8))
+    except ValueError:
+        return 2
+
+
+def data_agg_parallel_ramp_files() -> int:
+    """抽出完了がこの件数に達したら並列上限を本番 workers まで解放。DATA_AGG_PARALLEL_RAMP_FILES（既定 16）。"""
+    raw = os.environ.get("DATA_AGG_PARALLEL_RAMP_FILES", "").strip()
+    if not raw:
+        return 16
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 16
+
+
+def data_agg_resolve_file_parallel_workers(
+    *,
+    n_files: int,
+    io_paths: Sequence[str | Path] | None = None,
+    display_paths: Sequence[str | Path] | None = None,
+) -> int:
+    """
+    目標 workers（auto 等）を返す。UNC 起点のコールド抑制は ramp 側で適用するため、
+    ここでは DATA_AGG_FILE_PARALLEL_WORKERS の解決のみ行う。
+    """
+    return data_agg_file_parallel_workers(n_files=n_files)
+
+
+def data_agg_parallel_ramp_enabled(
+    *,
+    n_files: int,
+    target_workers: int,
+    display_paths: Sequence[str | Path] | None = None,
+    io_paths: Sequence[str | Path] | None = None,
+) -> bool:
+    """UNC 起点かつ target_workers > cold_cap のときランプを有効化。"""
+    if target_workers <= 1:
+        return False
+    try:
+        from svc.data_agg_path_network import path_is_network
+    except Exception:
+        return False
+    disp = [str(p) for p in (display_paths or io_paths or []) if str(p).strip()]
+    if not disp:
+        return False
+    if not any(path_is_network(p) for p in disp):
+        return False
+    return target_workers > data_agg_parallel_cold_cap()
 
 
 def data_agg_master_progress_prefetch_enabled() -> bool:
