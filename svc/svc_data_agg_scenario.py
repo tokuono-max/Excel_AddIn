@@ -17,6 +17,7 @@ Purpose:
         - 同一項目内 sources は cell 系と path_name 系の混在不可
     - match_keys[]: 照合に使う item id の列（AND）
     - scan: { start_path, recursive, extensions, keyword }
+      （実行時のみ file_paths: 基準フォルダ走査結果の再利用。永続 JSON には保存しない）
     - master_path: マスターファイルパス
     - debug_flags?: { scenario_step?, item_preview? } デバッグ UI 用
 History (latest 3):
@@ -706,7 +707,14 @@ def save_scenario(path: str | Path, data: dict[str, Any]) -> None:
     """
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, ensure_ascii=False, indent=2)
+    # 実行時スナップショット専用の走査パス一覧は永続 JSON に残さない
+    to_save = dict(data)
+    scan = to_save.get(KEY_SCAN)
+    if isinstance(scan, dict) and "file_paths" in scan:
+        scan = dict(scan)
+        scan.pop("file_paths", None)
+        to_save[KEY_SCAN] = scan
+    text = json.dumps(to_save, ensure_ascii=False, indent=2)
     p.write_text(text, encoding="utf-8")
     logger.info("[DATA_AGG_SCENARIO] 保存 完了 path=%s", p)
 

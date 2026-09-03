@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from core import core_env
 from core.core_log import get_data_agg_diag_logger, get_logger
@@ -20,20 +20,7 @@ class DataAggExtractTruncated(Exception):
 
     def __init__(self, records: list["ExtractTruncationRecord"]) -> None:
         self.records = list(records)
-        super().__init__(self._format_message())
-
-    def _format_message(self) -> str:
-        if not self.records:
-            return "extract truncated"
-        r0 = self.records[0]
-        extra = len(self.records) - 1
-        msg = (
-            "%s の「%s」: 読取上限 %s 件に達しました（未読データの可能性）"
-            % (Path(r0.file_path).name, r0.item_label, r0.limit)
-        )
-        if extra > 0:
-            msg += "（他 %s 件）" % extra
-        return msg
+        super().__init__(format_extract_truncation_user_message(self.records))
 
 
 @dataclass(frozen=True)
@@ -43,6 +30,47 @@ class ExtractTruncationRecord:
     limit: int
     read_count: int
     source_index: int = 0
+
+
+def format_extract_truncation_user_message(
+    records: Sequence[ExtractTruncationRecord] | list[ExtractTruncationRecord],
+) -> str:
+    """ユーザー向けの読取上限警告文（要点を短く）。"""
+    recs = list(records or [])
+    lines = [
+        "主キーの取得件数が設定されている上限に達しました。 その先にも",
+        "データがありそうです。",
+        "シナリオの「取得件数」を確認し、必要に応じて修正してください。",
+    ]
+    if not recs:
+        return "\n".join(lines)
+    show = recs[:5]
+    for r0 in show:
+        lines.append("・ファイル: %s" % Path(r0.file_path).name)
+        lines.append("・主キー項目: %s" % (r0.item_label or "-"))
+        lines.append("・上限: %s 件（取込済み %s 件）" % (r0.limit, r0.read_count))
+    extra = len(recs) - len(show)
+    if extra > 0:
+        lines.append("（他 %s 件の項目／ファイルでも同様）" % extra)
+    return "\n".join(lines)
+
+
+def extract_truncation_records_to_dicts(
+    records: Sequence[ExtractTruncationRecord] | list[ExtractTruncationRecord],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r0 in records or []:
+        out.append(
+            {
+                "file": Path(r0.file_path).name,
+                "file_path": str(r0.file_path),
+                "item": str(r0.item_label or "").strip() or "-",
+                "limit": int(r0.limit),
+                "read": int(r0.read_count),
+                "source_index": int(r0.source_index),
+            }
+        )
+    return out
 
 
 def clear_extract_truncation_records() -> None:

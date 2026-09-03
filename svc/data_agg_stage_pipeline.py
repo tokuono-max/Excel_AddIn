@@ -47,7 +47,9 @@ def run_stage_extract_pipeline(
 
     results: dict[int, Any] = {}
     results_lock = threading.Lock()
-    extract_sem = threading.BoundedSemaphore(cold_workers)
+    # Semaphore（非 Bounded）: 初期=cold、ランプ時に (target-cold) 回 release して並列度を上げる。
+    # BoundedSemaphore(cold) は上限が cold 固定のためランプで ValueError になる。
+    extract_sem = threading.Semaphore(cold_workers)
     ramp_lock = threading.Lock()
     extract_done_count = 0
     ramp_released = False
@@ -65,10 +67,7 @@ def run_stage_extract_pipeline(
             ramp_released = True
             extra = target_workers - cold_workers
             for _ in range(extra):
-                try:
-                    extract_sem.release()
-                except ValueError:
-                    break
+                extract_sem.release()
             try:
                 logger.info(
                     "[DATA_AGG_STAGE] extract ramp released done=%s cold=%s target=%s",

@@ -149,8 +149,13 @@ def apply_batch_hook_io_mark(
     io_paths: Sequence[str | Path],
     file_index: int | None,
     mark_state: ProgressIoMarkState,
+    in_memory_io: bool = False,
 ) -> tuple[str, str]:
-    """本番一括 hook: 1 行目 phase にマーク、2 行目 detail からマーク除去。"""
+    """
+    本番一括 hook: 1 行目 phase にマーク、2 行目 detail からマーク除去。
+    in_memory_io=True（結合キー比較等）: 実ファイル UNC 直読ではないため [UNC] を出さず
+    [LOC]（直前が [CCH] なら維持）にする。
+    """
     io_path: str | Path | None = None
     if file_index is not None:
         try:
@@ -159,11 +164,24 @@ def apply_batch_hook_io_mark(
                 io_path = io_paths[ix]
         except (TypeError, ValueError):
             pass
-    mark = mark_state.resolve(
-        suffix=suffix,
-        io_path=io_path,
-        file_index=file_index,
-    )
+    if in_memory_io:
+        # プール上の結合。表示パスが UNC でもネットワーク I/O ではない。
+        mark = PROGRESS_MARK_LOC
+        sticky = str(mark_state.last_mark or "")
+        if sticky.startswith("[CCH]") or sticky.startswith("[C]"):
+            mark = PROGRESS_MARK_CCH
+        mark_state.last_mark = mark
+        if file_index is not None:
+            try:
+                mark_state.last_fi = int(file_index)
+            except (TypeError, ValueError):
+                pass
+    else:
+        mark = mark_state.resolve(
+            suffix=suffix,
+            io_path=io_path,
+            file_index=file_index,
+        )
     detail_out = strip_progress_io_mark(detail_txt or suffix)
     phase_out = progress_phase_with_mark(phase_txt, mark=mark)
     return phase_out[:120], detail_out[:120] if detail_out else ""

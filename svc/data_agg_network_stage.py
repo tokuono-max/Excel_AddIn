@@ -70,7 +70,8 @@ def cleanup_all_network_stage_dirs(*, prune_orphans: bool = True) -> int:
             removed += 1
         unregister_stage_dir(sd)
     if prune_orphans:
-        _prune_stale_stage_dirs(max_age_sec=0, remove_empty_only=True)
+        # 実行中以外（非登録）の残骸は中身ごと削除（短時間経過でも掃除）
+        removed += _prune_stale_stage_dirs(max_age_sec=60)
     return removed
 
 
@@ -111,35 +112,46 @@ def _stage_temp_base() -> Path:
     return Path(os.environ.get("TEMP", "C:\\Temp")) / "csv_tool" / "data_agg_stage"
 
 
-def _prune_stale_stage_dirs(
-    *,
-    max_age_sec: int = 86400,
-    remove_empty_only: bool = False,
-) -> None:
-    """古いステージ残骸・空ディレクトリを best-effort で削除（失敗しても処理は続行）。"""
+_DEFAULT_ORPHAN_MAX_AGE_SEC = 3600
+
+
+def _prune_stale_stage_dirs(*, max_age_sec: int = _DEFAULT_ORPHAN_MAX_AGE_SEC) -> int:
+    """
+    非登録の古いステージ dir を中身ごと削除（.part・途中コピー含む）。
+    実行中 dir はレジストリで保護する。戻り値は削除した件数。
+    """
     base = _stage_temp_base()
     if not base.is_dir():
-        return
+        return 0
+    with _registry_lock:
+        active = set(_registered_stage_dirs)
     cutoff = time.time() - max(0, int(max_age_sec))
+    removed = 0
     try:
         for child in list(base.iterdir()):
             if not child.is_dir():
                 continue
             try:
-                if remove_empty_only:
-                    _remove_orphan_part_files(child)
-                    _remove_empty_dirs(child, remove_root=True)
+                key = str(child.resolve())
+            except OSError:
+                key = str(child)
+            if key in active:
+                continue
+            try:
+                if child.stat().st_mtime >= cutoff and max_age_sec > 0:
                     continue
-                if child.stat().st_mtime < cutoff:
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    _remove_orphan_part_files(child)
-                    _remove_empty_dirs(child, remove_root=True)
+                if _force_remove_stage_dir(child):
+                    removed += 1
+                    try:
+                        logger.info("[DATA_AGG_STAGE] prune orphan dir=%s", child)
+                    except Exception:
+                        pass
             except OSError:
                 pass
         _remove_empty_dirs(base, remove_root=False)
     except OSError:
         pass
+    return removed
 
 
 def _remove_empty_dirs(root: Path, *, remove_root: bool) -> None:

@@ -81,8 +81,20 @@ def test_record_skips_when_below_limit_or_peek_empty() -> None:
     assert take_extract_truncation_records() == []
 
 
-def test_enforce_abort_raises_for_batch(monkeypatch) -> None:
+def test_enforce_batch_default_warns_without_raise(monkeypatch) -> None:
+    """本番一括の既定は warn（止めない）。担保はデバッグ側。"""
     monkeypatch.delenv("HC_DATA_AGG_EXTRACT_TRUNC_POLICY", raising=False)
+    rec = ExtractTruncationRecord(
+        file_path="big.xlsx",
+        item_label="機器名",
+        limit=9999,
+        read_count=9999,
+    )
+    enforce_extract_truncation_policy([rec], probe_caller="excel_batch_submit")
+
+
+def test_enforce_abort_when_env_set(monkeypatch) -> None:
+    monkeypatch.setenv("HC_DATA_AGG_EXTRACT_TRUNC_POLICY", "abort")
     rec = ExtractTruncationRecord(
         file_path="big.xlsx",
         item_label="機器名",
@@ -91,8 +103,32 @@ def test_enforce_abort_raises_for_batch(monkeypatch) -> None:
     )
     with pytest.raises(DataAggExtractTruncated) as exc:
         enforce_extract_truncation_policy([rec], probe_caller="excel_batch_submit")
-    assert "big.xlsx" in str(exc.value)
-    assert "9999" in str(exc.value)
+    assert "主キーの取得件数が設定されている上限" in str(exc.value)
+    assert "機器名" in str(exc.value)
+
+
+def test_format_extract_truncation_user_message_is_plain() -> None:
+    from svc.data_agg_extract_limit import format_extract_truncation_user_message
+
+    msg = format_extract_truncation_user_message(
+        [
+            ExtractTruncationRecord(
+                file_path=r"C:\data\a.xls",
+                item_label="機器番号",
+                limit=2,
+                read_count=2,
+            )
+        ]
+    )
+    assert "主キーの取得件数が設定されている上限" in msg
+    assert "その先にも" in msg
+    assert "データがありそうです。" in msg
+    assert "シナリオの「取得件数」を確認し、必要に応じて修正してください。" in msg
+    assert "a.xls" in msg
+    assert "主キー項目: 機器番号" in msg
+    assert "2 件" in msg
+    assert "未読データの可能性" not in msg
+    assert "空白まで" not in msg
 
 
 def test_skip_extract_truncation_peek_explicit_one_only() -> None:

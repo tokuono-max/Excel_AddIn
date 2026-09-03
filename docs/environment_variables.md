@@ -188,7 +188,7 @@ VBA（`HC_Log`）と Python（`core_log`）が **同じファイル名** で追�
 | 変数名 | 既定 | 意味 |
 |--------|------|------|
 | `HC_DATA_AGG_EXTRACT_ABSOLUTE_MAX` | `999999` | 「N件」指定および「空白まで」の絶対上限。UI の取得件数スピンもこの範囲。 |
-| `HC_DATA_AGG_EXTRACT_TRUNC_POLICY` | 本番一括 `abort`、それ以外 `warn` | 読取上限に達し未読データがあると判定したときの方針。`abort` … 結合前に処理中断（`DataAggExtractTruncated`）。`warn` … ログのみで続行。 |
+| `HC_DATA_AGG_EXTRACT_TRUNC_POLICY` | `warn`（未設定時） | 読取上限に達し未読データがあると判定したときの方針。`warn` … ログのみで続行（本番一括・デバッグの既定）。`abort` … 結合前に処理中断（`DataAggExtractTruncated`）。上限の確認はシナリオ／マスタデバッグで行い、本番一括は止めない思想。 |
 
 **互換（コード側の既定・環境変数なし）**: シナリオで `repeat_max` 未設定かつ「空白まで」でもない場合、縦反復の上限は従来どおり **9999** 件。
 

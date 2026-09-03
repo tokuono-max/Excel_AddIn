@@ -3,15 +3,15 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-08-10
-Version: 0.4.51
+Updated: 2026-09-03
+Version: 0.4.52
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.52 (2026-09-03) 本番一括は読取上限で止めず警告ダイアログも出さない。上限の確認はマスタデバッグで行う。
   - 0.4.51 (2026-08-10) 一括完了: 読取上限打ち切り時に継続／中止を選択。継続なら HC_DATA_AGG_EXTRACT_TRUNC_POLICY=warn で再実行。
   - 0.4.50 (2026-07-02) 起動: prepare は ensure_front スキップ＋show 前 opacity 0→reveal。pulse 初回 700ms・再試行は Win32 のみ（COM 4 連打抑制）。上下黒塗り緩和。
-  - 0.4.49 (2026-06-30) 起動 pulse: 初回を 350ms 遅延（描画後 COM）、get_excel_context は sheet_id なし（guid_scan 回避で UI フリーズ・黒塗り緩和）。
 """
 from __future__ import annotations
 
@@ -150,6 +150,29 @@ def folder_scan_paths_from_state(state: dict[str, Any]) -> list[str]:
     return [str(p) for p in paths]
 
 
+def folder_scan_paths_from_state_with_retry(
+    state: dict[str, Any],
+    *,
+    max_attempts: int = 3,
+    sleep_sec: float = 1.0,
+) -> list[str]:
+    """走査を最大 max_attempts 回試し、すべて失敗したら最後の例外を再送出する。"""
+    attempts = max(1, int(max_attempts or 1))
+    last_exc: BaseException | None = None
+    for i in range(attempts):
+        try:
+            return folder_scan_paths_from_state(state)
+        except BaseException as ex:
+            last_exc = ex
+            if i + 1 < attempts and float(sleep_sec or 0) > 0:
+                try:
+                    time.sleep(float(sleep_sec))
+                except Exception:
+                    pass
+    assert last_exc is not None
+    raise last_exc
+
+
 def should_apply_folder_scan_result(generation: int, current_generation: int) -> bool:
     """走査世代が最新のときだけ UI へ結果を反映する。"""
     return int(generation) == int(current_generation)
@@ -161,15 +184,31 @@ class _FolderScanWorker(QObject):
     finished = Signal(int, object)
     failed = Signal(int, str)
 
-    def __init__(self, generation: int, state: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        generation: int,
+        state: dict[str, Any],
+        *,
+        max_attempts: int = 3,
+        sleep_sec: float = 1.0,
+    ) -> None:
         super().__init__()
         self._generation = int(generation)
         self._state = dict(state)
+        self._max_attempts = max(1, int(max_attempts or 1))
+        try:
+            self._sleep_sec = max(0.0, float(sleep_sec))
+        except (TypeError, ValueError):
+            self._sleep_sec = 1.0
 
     @Slot()
     def run(self) -> None:
         try:
-            paths = folder_scan_paths_from_state(self._state)
+            paths = folder_scan_paths_from_state_with_retry(
+                self._state,
+                max_attempts=self._max_attempts,
+                sleep_sec=self._sleep_sec,
+            )
             self.finished.emit(self._generation, paths)
         except Exception as ex:
             self.failed.emit(self._generation, str(ex))
@@ -888,6 +927,8 @@ class _DataAggMainWindow(QDialog):
         self._file_list_items: list[str] = []
         self._scan_generation: int = 0
         self._scan_busy: bool = False
+        self._scan_list_ready: bool = True
+        self._scan_batch_ok: bool = True
         self._scan_req_auto_mode: bool = True
         self._scan_req_on_complete: Callable[[int], None] | None = None
         self._scan_thread: QThread | None = None
@@ -929,6 +970,7 @@ class _DataAggMainWindow(QDialog):
         btn_load.setAutoDefault(False)
         btn_load.setDefault(False)
         btn_load.clicked.connect(self._on_scenario_load)
+        self._btn_scenario_load = btn_load
         self._main_set_tip(
             btn_load,
             "TOOLTIP_BTN_SCENARIO_LOAD",
@@ -1007,11 +1049,14 @@ class _DataAggMainWindow(QDialog):
         self._update_detected_file_count_label()
         # 基準フォルダが空のときは一覧も空。パスありは showEvent 後に非同期走査（UI 表示を先に返す）。
         self._scan_pending_auto = bool((self._edit_start_path.text() or "").strip())
+        self._scan_list_ready = not self._scan_pending_auto
+        self._scan_batch_ok = not self._scan_pending_auto
         if not self._scan_pending_auto:
             self._file_list_items = []
             self._file_list.clear()
             self._update_detected_file_count_label()
         self._refresh_scenario_display_label()
+        self._update_batch_button_enabled()
         try:
             self.destroyed.connect(self._on_data_agg_main_destroyed)
         except Exception:
@@ -1053,16 +1098,38 @@ class _DataAggMainWindow(QDialog):
         return False
 
     def _update_batch_button_enabled(self) -> None:
-        """一括実行・デバッグ・シナリオ出力の有効化（出力はシナリオファイル読込も必須）。"""
+        """一括実行・デバッグ・シナリオ出力・読込／保存の有効化。
+
+        走査中／未完了: 主要操作を抑止。
+        走査失敗後: 読込／保存／出力は可、一括／デバッグのみ不可。
+        """
         btn = getattr(self, "_btn_batch", None)
         dbg = getattr(self, "_btn_debug", None)
         exp = getattr(self, "_btn_scenario_export", None)
-        if btn is None and dbg is None and exp is None:
-            return
+        btn_load = getattr(self, "_btn_scenario_load", None)
+        btn_save = getattr(self, "_btn_scenario_save", None)
+        scan_blocking = bool(getattr(self, "_scan_busy", False)) or (
+            not bool(getattr(self, "_scan_list_ready", True))
+        )
+        batch_blocked = scan_blocking or (
+            not bool(getattr(self, "_scan_batch_ok", True))
+        )
+        tip_scan = str(
+            (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_SCAN_READY") or ""
+        ).strip()
+        if not tip_scan:
+            tip_scan = "基準フォルダの走査が完了するまで操作できません。"
+        tip_scan_fail = str(
+            (self._ui or {}).get("TOOLTIP_BATCH_REQUIRES_SCAN_OK") or ""
+        ).strip()
+        if not tip_scan_fail:
+            tip_scan_fail = (
+                "基準フォルダの走査に失敗しました。条件を見直して再検索してください。"
+            )
         ok_src = self._scenario_has_any_registered_source()
         ok_path = bool((self._scenario_path or "").strip())
-        ok = ok_src
-        ok_export = ok_src and ok_path
+        ok_batch = ok_src and not batch_blocked
+        ok_export = ok_src and ok_path and not scan_blocking
         tip_ok = str((self._ui or {}).get("TOOLTIP_BATCH") or "").strip()
         tip_dbg_ok = str((self._ui or {}).get("TOOLTIP_DEBUG") or "").strip()
         tip_exp_ok = str((self._ui or {}).get("TOOLTIP_SCENARIO_EXPORT") or "").strip()
@@ -1076,20 +1143,63 @@ class _DataAggMainWindow(QDialog):
         tip_exp_need = str(
             (self._ui or {}).get("TOOLTIP_SCENARIO_EXPORT_REQUIRES_LOAD") or ""
         ).strip()
+
+        def _batch_tip() -> str:
+            if scan_blocking:
+                return tip_scan
+            if not getattr(self, "_scan_batch_ok", True):
+                return tip_scan_fail
+            return tip_ok if ok_src else (tip_need or tip_ok)
+
         if btn is not None:
-            btn.setEnabled(ok)
-            set_widget_tooltip(btn, tip_ok if ok else (tip_need or tip_ok))
+            btn.setEnabled(ok_batch)
+            set_widget_tooltip(btn, _batch_tip())
         if dbg is not None:
-            dbg.setEnabled(ok)
-            set_widget_tooltip(dbg, tip_dbg_ok if ok else (tip_need or tip_dbg_ok))
+            dbg.setEnabled(ok_batch)
+            if scan_blocking:
+                set_widget_tooltip(dbg, tip_scan)
+            elif not getattr(self, "_scan_batch_ok", True):
+                set_widget_tooltip(dbg, tip_scan_fail)
+            else:
+                set_widget_tooltip(
+                    dbg, tip_dbg_ok if ok_src else (tip_need or tip_dbg_ok)
+                )
         if exp is not None:
             exp.setEnabled(ok_export)
-            if ok_export:
+            if scan_blocking:
+                set_widget_tooltip(exp, tip_scan)
+            elif ok_export:
                 set_widget_tooltip(exp, tip_exp_ok or tip_ok)
             elif not ok_src:
                 set_widget_tooltip(exp, tip_need or tip_exp_ok)
             else:
                 set_widget_tooltip(exp, tip_exp_need or tip_exp_ok or tip_need)
+        if btn_load is not None:
+            btn_load.setEnabled(not scan_blocking)
+            set_widget_tooltip(
+                btn_load,
+                tip_scan
+                if scan_blocking
+                else _ui_disp_str(
+                    self._ui or {},
+                    "TOOLTIP_BTN_SCENARIO_LOAD",
+                    "シナリオ JSON を読み込み、項目ごとの取得設定を復元します。",
+                ),
+            )
+        if btn_save is not None:
+            ok_save = bool(getattr(self, "_scenario_dirty", False)) and not scan_blocking
+            btn_save.setEnabled(ok_save)
+            if scan_blocking:
+                set_widget_tooltip(btn_save, tip_scan)
+            else:
+                set_widget_tooltip(
+                    btn_save,
+                    _ui_disp_str(
+                        self._ui or {},
+                        "TOOLTIP_BTN_SCENARIO_SAVE",
+                        "現在の取得設定をシナリオファイルに保存します（変更があるとき有効）。",
+                    ),
+                )
 
     def _apply_excel_menu_bar_lock(self, lock: bool) -> bool:
         """メイン表示中は Excel のリボン／メニュー操作を抑止し、閉じたときに解除する。
@@ -2137,12 +2247,11 @@ class _DataAggMainWindow(QDialog):
         if self._suppress_scenario_dirty:
             return
         self._scenario_dirty = True
-        self._btn_scenario_save.setEnabled(True)
         self._update_batch_button_enabled()
 
     def _clear_scenario_dirty(self) -> None:
         self._scenario_dirty = False
-        self._btn_scenario_save.setEnabled(False)
+        self._update_batch_button_enabled()
 
     def _refresh_scenario_display_label(self) -> None:
         """読込んだシナリオファイル名（拡張子除く）をタブ上に表示する。"""
@@ -2169,6 +2278,9 @@ class _DataAggMainWindow(QDialog):
         self._edit_start_path.clear()
         self._file_list_items = []
         self._file_list.clear()
+        self._scan_list_ready = True
+        self._scan_batch_ok = True
+        self._scan_busy = False
         self._update_detected_file_count_label()
         self._refresh_scenario_display_label()
         self._update_item_count_label()
@@ -2224,22 +2336,24 @@ class _DataAggMainWindow(QDialog):
 
     def _set_scan_ui_busy(self, busy: bool) -> None:
         self._scan_busy = bool(busy)
+        if busy:
+            self._scan_list_ready = False
         btn = getattr(self, "_btn_scan_run", None)
         if btn is not None:
             btn.setEnabled(not busy)
         lbl = getattr(self, "_lbl_detected_file_count", None)
-        if lbl is None:
-            return
-        if busy:
-            lbl.setText(
-                _ui_disp_str(
-                    self._ui or {},
-                    "LABEL_DETECTED_FILE_COUNT_SCANNING",
-                    "走査中…",
+        if lbl is not None:
+            if busy:
+                lbl.setText(
+                    _ui_disp_str(
+                        self._ui or {},
+                        "LABEL_DETECTED_FILE_COUNT_SCANNING",
+                        "走査中…",
+                    )
                 )
-            )
-        else:
-            self._update_detected_file_count_label()
+            else:
+                self._update_detected_file_count_label()
+        self._update_batch_button_enabled()
 
     def _stop_scan_thread(self) -> None:
         th = getattr(self, "_scan_thread", None)
@@ -2263,11 +2377,14 @@ class _DataAggMainWindow(QDialog):
         if not should_apply_folder_scan_result(generation, self._scan_generation):
             return
         self._set_scan_ui_busy(False)
+        self._scan_list_ready = True
+        self._scan_batch_ok = True
         self._file_list_items = list(paths)
         self._file_list.clear()
         for fp in self._file_list_items:
             self._file_list.addItem(fp)
         self._update_detected_file_count_label()
+        self._update_batch_button_enabled()
         try:
             sp = str(self._get_scan_state().get("start_path") or "").strip() or "."
             rp = Path(sp).resolve()
@@ -2313,20 +2430,30 @@ class _DataAggMainWindow(QDialog):
         if not should_apply_folder_scan_result(generation, self._scan_generation):
             return
         self._set_scan_ui_busy(False)
-        auto_mode = bool(self._scan_req_auto_mode)
+        # 走査失敗後も読込／保存等は可能。一括／デバッグのみ不可。
+        self._scan_list_ready = True
+        self._scan_batch_ok = False
+        self._file_list_items = []
+        self._file_list.clear()
+        self._update_detected_file_count_label()
+        self._update_batch_button_enabled()
         cb = self._scan_req_on_complete
-        if not auto_mode:
-            t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
-            show_warning_notice(
-                self,
-                t_scan,
-                _ui_disp_str(
-                    self._ui or {},
-                    "MSG_SCAN_FAILED_FMT",
-                    "検索に失敗しました: %s",
-                )
-                % message,
+        t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
+        show_warning_notice(
+            self,
+            t_scan,
+            _ui_disp_str(
+                self._ui or {},
+                "MSG_SCAN_FAILED_AFTER_RETRY_FMT",
+                "基準フォルダの走査に失敗しました（%s回試行）。\n"
+                "シナリオ読込・保存などは利用できます。"
+                "一括実行／デバッグは再検索が成功するまで無効です。\n\n%s",
             )
+            % (
+                self._folder_scan_retry_attempts(),
+                message,
+            ),
+        )
         if callable(cb):
             cb(0)
         self._scan_thread = None
@@ -2352,7 +2479,11 @@ class _DataAggMainWindow(QDialog):
         if not sp:
             self._file_list_items = []
             self._file_list.clear()
+            self._scan_list_ready = True
+            self._scan_batch_ok = True
+            self._scan_busy = False
             self._update_detected_file_count_label()
+            self._update_batch_button_enabled()
             if on_complete is not None:
                 on_complete(0)
             return
@@ -2360,7 +2491,11 @@ class _DataAggMainWindow(QDialog):
         if not exts:
             self._file_list_items = []
             self._file_list.clear()
+            self._scan_list_ready = True
+            self._scan_batch_ok = True
+            self._scan_busy = False
             self._update_detected_file_count_label()
+            self._update_batch_button_enabled()
             if not auto_mode:
                 t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
                 show_warning_notice(
@@ -2384,7 +2519,12 @@ class _DataAggMainWindow(QDialog):
         self._stop_scan_thread()
 
         thread = QThread(self)
-        worker = _FolderScanWorker(gen, state)
+        worker = _FolderScanWorker(
+            gen,
+            state,
+            max_attempts=self._folder_scan_retry_attempts(),
+            sleep_sec=self._folder_scan_retry_sleep_sec(),
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_folder_scan_worker_finished)
@@ -3538,6 +3678,24 @@ class _DataAggMainWindow(QDialog):
                 % exc,
             )
 
+    def _folder_scan_retry_attempts(self) -> int:
+        """基準フォルダ走査の最大試行回数（既定 3）。"""
+        raw = (self._ui or {}).get("FOLDER_SCAN_RETRY_ATTEMPTS", 3)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            n = 3
+        return max(1, min(n, 10))
+
+    def _folder_scan_retry_sleep_sec(self) -> float:
+        """走査リトライ間隔秒（既定 1.0、上限 10）。"""
+        raw = (self._ui or {}).get("FOLDER_SCAN_RETRY_SLEEP_SEC", 1)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            v = 1.0
+        return max(0.0, min(v, 10.0))
+
     def _on_scan(self, auto_mode: bool = False) -> None:
         """検索実行でフォルダを走査し、検出ファイル一覧を更新する（非同期）。"""
         self._request_folder_scan(auto_mode=auto_mode)
@@ -3814,8 +3972,14 @@ class _DataAggMainWindow(QDialog):
                 % exc,
             )
 
-    def _build_scenario_from_ui(self) -> dict[str, Any]:
-        """UI の状態からシナリオ辞書を組み立てる。"""
+    def _build_scenario_from_ui(
+        self, *, include_scan_file_paths: bool = False
+    ) -> dict[str, Any]:
+        """UI の状態からシナリオ辞書を組み立てる。
+
+        include_scan_file_paths: 一括実行スナップショット用。基準フォルダ走査結果を
+        scan.file_paths に載せる（永続シナリオ JSON には載せない）。
+        """
         from svc import svc_data_agg_scenario as scenario_mod
         data = self._scenario.copy() if self._scenario else scenario_mod.create_empty_scenario()
         scan = dict(data.get("scan") or {})
@@ -3832,6 +3996,12 @@ class _DataAggMainWindow(QDialog):
             exts.append(".csv")
         scan["extensions"] = exts if exts else [".xlsx", ".xlsm", ".csv"]
         scan["keyword"] = self._edit_keyword.text().strip()
+        if include_scan_file_paths:
+            scan["file_paths"] = [
+                str(p) for p in (getattr(self, "_file_list_items", None) or []) if str(p).strip()
+            ]
+        else:
+            scan.pop("file_paths", None)
         data["scan"] = scan
         data["master_path"] = ""
         data.pop("match_no_key_action", None)
@@ -3896,16 +4066,17 @@ class _DataAggMainWindow(QDialog):
         from svc.data_agg_extract_limit import is_extract_truncated_batch_notify
 
         if is_extract_truncated_batch_notify(d):
-            if self._ask_continue_after_extract_truncated(title, msg):
-                self._run_execution("batch_run", extract_trunc_policy="warn")
+            # 本番一括の既定は warn（ダイアログなし）。abort 強制時のみここに来る。
+            # 再実行はせず、内容を警告表示するだけ（デバッグで上限を直す前提）。
+            show_warning_notice(self, title, msg)
             return
         show_warning_notice(self, title, msg)
 
     def _ask_continue_after_extract_truncated(self, title: str, msg: str) -> bool:
-        """読取上限打ち切り時に継続／中止を尋ねる。継続なら True。"""
+        """互換用（本番一括では使わない）。読取上限時の継続確認。"""
         prompt = str(
             (self._messages or {}).get("MSG_EXTRACT_TRUNCATED_CONTINUE_PROMPT")
-            or "読めた件数のまま処理を続けますか？\n（継続すると未読分は取り込まれません）"
+            or "上限までの件数で処理を続けますか？\n（続きのデータは取り込まれません）"
         ).strip()
         btn_continue = str(
             (self._messages or {}).get("BTN_EXTRACT_TRUNCATED_CONTINUE") or "継続"
@@ -3958,7 +4129,29 @@ class _DataAggMainWindow(QDialog):
 
     def _run_execution(self, action: str, *, extract_trunc_policy: str | None = None) -> None:
         """一括実行を IPC で svc に依頼する（メイン本番は一括のみ）。"""
-        data = self._build_scenario_from_ui()
+        if bool(getattr(self, "_scan_busy", False)) or (
+            not bool(getattr(self, "_scan_list_ready", True))
+        ):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_SCAN_READY")
+                    or "基準フォルダの走査が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
+        if not bool(getattr(self, "_scan_batch_ok", True)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_BATCH_REQUIRES_SCAN_OK")
+                    or "基準フォルダの走査に失敗しました。条件を見直して再検索してください。"
+                ).strip(),
+            )
+            return
+        data = self._build_scenario_from_ui(include_scan_file_paths=True)
         from svc import svc_data_agg_scenario as scenario_mod
 
         data[scenario_mod.KEY_RESULT_COLUMNS] = self._result_columns_from_ui()

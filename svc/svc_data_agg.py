@@ -3433,10 +3433,110 @@ def _batch_hook_resolve_current_file(
     return ""
 
 
-def _batch_hook_progress_lines(sub: int, suffix: str) -> tuple[str, str]:
-    """本番一括進捗: 1 行目=フェーズ名、2 行目=詳細（suffix）。照合中は読みやすい短文に寄せる。"""
-    labels = {4: "ファイル読込", 5: "行のまとめ", 6: "照合・パス", 7: "一覧の組立"}
+def _batch_hook_parse_rest(rest: tuple[Any, ...]) -> tuple[int | None, int | None, int | None]:
+    fi_kw = int(rest[0]) if len(rest) >= 1 else None
+    nf_kw = int(rest[1]) if len(rest) >= 2 else None
+    done_kw = None
+    if len(rest) >= 3 and rest[2] is not None:
+        try:
+            done_kw = int(rest[2])
+        except (TypeError, ValueError):
+            done_kw = None
+    return fi_kw, nf_kw, done_kw
+
+
+def _batch_hook_monotonic_done(
+    sub: int,
+    *,
+    file_index: int | None,
+    done_n: int | None,
+    hi: list[int],
+) -> int | None:
+    """フェーズ 4–6 の 1 行目 N を単調増加にする。"""
+    n_disp = done_n if done_n is not None else file_index
+    si = int(sub)
+    if n_disp is None or si not in (4, 5, 6):
+        return done_n
+    try:
+        n_i = int(n_disp)
+    except (TypeError, ValueError):
+        return done_n
+    while len(hi) <= si:
+        hi.append(0)
+    n_i = max(int(hi[si]), n_i)
+    hi[si] = n_i
+    return n_i
+
+
+def _batch_hook_phase_nm(
+    sub: int,
+    suffix: str,
+    *,
+    file_index: int | None = None,
+    n_files: int | None = None,
+    done_n: int | None = None,
+) -> str:
+    """進捗1行目用 N/M。4–6=ファイル完了数（並列は done_n）、7=行。取れなければ空。"""
+    sfx = str(suffix or "").strip()
+    si = int(sub)
+    if si in (4, 5, 6):
+        nf = int(n_files) if n_files is not None else 0
+        n_cur: int | None = None
+        if done_n is not None:
+            try:
+                n_cur = max(0, int(done_n))
+            except (TypeError, ValueError):
+                n_cur = None
+        if n_cur is None:
+            m_par = re.search(r"並列読込\s*(\d+)\s*/\s*(\d+)", sfx)
+            if m_par:
+                n_cur = int(m_par.group(1))
+                nf = nf or int(m_par.group(2))
+        if n_cur is None and file_index is not None:
+            # 逐次時は処理中ファイル番号。並列では done_n を渡すこと。
+            try:
+                n_cur = max(0, int(file_index))
+            except (TypeError, ValueError):
+                n_cur = None
+        if n_cur is not None and nf > 0:
+            return "%s/%s" % (n_cur, nf)
+        return ""
+    if si == 7:
+        m_row = re.search(r"行\s+(\d+)\s*/\s*(\d+)", sfx)
+        if m_row:
+            return "%s/%s" % (m_row.group(1), m_row.group(2))
+        m_tot = re.search(r"（(\d+)\s*行）", sfx)
+        if m_tot:
+            return "0/%s" % m_tot.group(1)
+        return ""
+    return ""
+
+
+def _batch_hook_progress_lines(
+    sub: int,
+    suffix: str,
+    *,
+    file_index: int | None = None,
+    n_files: int | None = None,
+    done_n: int | None = None,
+) -> tuple[str, str]:
+    """本番一括進捗: 1 行目=フェーズ名(+N/M)、2 行目=詳細（suffix）。"""
+    labels = {
+        4: "ファイル読込",
+        5: "主キー連携組立",
+        6: "結合キー比較",
+        7: "結果一覧組立",
+    }
     base = labels.get(int(sub), "処理")
+    nm = _batch_hook_phase_nm(
+        sub,
+        suffix,
+        file_index=file_index,
+        n_files=n_files,
+        done_n=done_n,
+    )
+    if nm:
+        base = "%s %s" % (base, nm)
     sfx = str(suffix or "").strip()
     if not sfx:
         return base, ""
@@ -4352,7 +4452,8 @@ def _run_batch_files_extract_parallel(
     target_workers = int(workers)
     cold_cap = int(cold_workers or target_workers)
     ramp_n = int(ramp_files or n_paths)
-    extract_sem: threading.BoundedSemaphore | None = None
+    # Semaphore（非 Bounded）: ランプで (target-cold) 回 release する。Bounded(cold) は上限超過で失敗する。
+    extract_sem: threading.Semaphore | None = None
     ramp_lock = threading.Lock()
     extract_done_count = 0
     ramp_released = False
@@ -4363,7 +4464,7 @@ def _run_batch_files_extract_parallel(
         and ramp_n > 0
     ):
         use_ramp = True
-        extract_sem = threading.BoundedSemaphore(max(1, cold_cap))
+        extract_sem = threading.Semaphore(max(1, cold_cap))
 
     def _maybe_release_ramp() -> None:
         nonlocal extract_done_count, ramp_released
@@ -4375,10 +4476,7 @@ def _run_batch_files_extract_parallel(
                 return
             ramp_released = True
             for _ in range(max(0, target_workers - cold_cap)):
-                try:
-                    extract_sem.release()
-                except ValueError:
-                    break
+                extract_sem.release()
 
     def _work(fi_path: tuple[int, str | Path]) -> tuple[int, _BatchFileExtractResult]:
         nonlocal done_count
@@ -4433,12 +4531,13 @@ def compute_batch_table_rows(
     stage_pipeline: bool = False,
     stage_scan_root: str | Path | None = None,
     stage_progress_callback: Any = None,
+    io_paths_holder: list[list[str]] | None = None,
 ) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
     """
     一括実行と同一の抽出・ファイル内マージ・match_keys 時の項目横結合（Excel 書込・イベントシート追記なし）。
     戻り値: headers, table_rows, event_log_rows（§10.8 シート用行のリスト）, join_events 件数合計。
     iteration_contexts_out が指定された場合、生成行ごとの反復文脈（file_path / iter_index ほか）を追記する。
-    progress_hook: 任意。マスタデバッグ進捗用。phase は 4=ファイル読込 5=行のまとめ 6=照合 7=一覧の組立。
+    progress_hook: 任意。マスタデバッグ進捗用。phase は 4=ファイル読込 5=主キー連携組立 6=結合キー比較 7=結果一覧組立。
       本番は progress_hook(phase, detail, file_index, n_files) を試し、失敗時は (phase, detail) のみ。
       detail は「項目 j/m」「行 r/rmax」など（ファイル通番は引数で渡す）。
     probe_caller: 診断ログ用の呼び出し元タグ（任意）。
@@ -4461,6 +4560,16 @@ def compute_batch_table_rows(
             display_paths = list(paths)
     else:
         display_paths = list(paths)
+
+    def _publish_io_paths(ios: Sequence[str | Path]) -> None:
+        if io_paths_holder is None:
+            return
+        try:
+            io_paths_holder[0] = [str(p) for p in ios]
+        except Exception:
+            pass
+
+    _publish_io_paths(paths)
     items = data.get("items") or []
     if not items:
         return [], [], [], 0
@@ -4653,19 +4762,35 @@ def compute_batch_table_rows(
         if cancel_check is not None:
             cancel_check(force=True)
 
-    def _ph(sub: int, suffix: str, *, file_index: int = 1) -> None:
+    def _ph(
+        sub: int,
+        suffix: str,
+        *,
+        file_index: int = 1,
+        done_n: int | None = None,
+    ) -> None:
         _poll_cancel()
         if progress_hook is None:
             return
         try:
-            progress_hook(sub, suffix, file_index, n_files)
+            if done_n is None:
+                progress_hook(sub, suffix, file_index, n_files)
+            else:
+                progress_hook(sub, suffix, file_index, n_files, int(done_n))
         except DataAggCancelled:
             raise
         except TypeError:
             try:
-                progress_hook(sub, suffix)
+                progress_hook(sub, suffix, file_index, n_files)
             except DataAggCancelled:
                 raise
+            except TypeError:
+                try:
+                    progress_hook(sub, suffix)
+                except DataAggCancelled:
+                    raise
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -4831,6 +4956,9 @@ def compute_batch_table_rows(
 
     progress_mark_store = FileProgressMarkStore()
 
+    _par_done_n = [0]
+    _par_done_lock = threading.Lock()
+
     def _file_progress_mark(file_path: Any, *, file_index: int | None = None) -> str:
         try:
             if file_index is not None:
@@ -4843,6 +4971,15 @@ def compute_batch_table_rows(
         except Exception:
             return PROGRESS_MARK_LOC
 
+    def _parallel_done_n(event: str, done: int) -> int:
+        with _par_done_lock:
+            if event == "done":
+                try:
+                    _par_done_n[0] = max(_par_done_n[0], int(done))
+                except (TypeError, ValueError):
+                    pass
+            return int(_par_done_n[0])
+
     def _parallel_extract_progress(
         event: str,
         fi: int,
@@ -4854,11 +4991,13 @@ def compute_batch_table_rows(
             mark = ""
             if 1 <= int(fi) <= len(paths):
                 mark = _file_progress_mark(paths[int(fi) - 1], file_index=int(fi))
+            dn = _parallel_done_n(event, done)
             if event == "start":
                 _ph(
                     4,
                     "%sファイル %s/%s: %s 読込中" % (mark, fi, nf, fname),
                     file_index=fi,
+                    done_n=dn,
                 )
             elif event == "item":
                 _ph(
@@ -4866,15 +5005,22 @@ def compute_batch_table_rows(
                     "%s項目 %s/%s — %s"
                     % (mark, int(done), int(nf), fname),
                     file_index=fi,
+                    done_n=dn,
                 )
             elif event == "done":
                 _ph(
                     4,
                     "%sファイル %s/%s: %s（完了）" % (mark, fi, nf, fname),
                     file_index=fi,
+                    done_n=dn,
                 )
             else:
-                _ph(4, "並列読込 %s/%s ファイル" % (done, nf), file_index=1)
+                _ph(
+                    4,
+                    "並列読込 %s/%s ファイル" % (done, nf),
+                    file_index=1,
+                    done_n=int(done) if done else dn,
+                )
 
     def _parallel_item_progress(fi: int, item_i: int, n_items: int) -> None:
         fname = Path(str(paths[fi - 1])).name if 1 <= fi <= len(paths) else ""
@@ -4890,31 +5036,41 @@ def compute_batch_table_rows(
 
         if any(path_is_network(p) for p in display_paths):
             def _pipe_extract(fi: int, io_path: str, display_path: str) -> _BatchFileExtractResult:
-                return _batch_file_extract_and_merge(
-                    io_path,
-                    row_source_path=display_path,
-                    items=items,
-                    headers=headers,
-                    header_set=header_set,
-                    column_modes=column_modes,
-                    linked_targets=linked_targets,
-                    join_targets=join_targets,
-                    path_col=path_col or "",
-                    master_preview_cap_idx=master_preview_cap_idx,
-                    master_preview_extract_allow=master_preview_extract_allow,
-                    master_preview_join_full_read_patterns=master_preview_join_full_read_patterns,
-                    master_preview_join_full_read_specs=master_preview_join_full_read_specs,
-                    preview_master_mode=preview_master_mode,
-                    use_join_search_merge=use_join_search_merge,
-                    max_primary_rows=max_primary_rows,
-                    cancel_check=cancel_check,
-                    record_item_timing=diag_on,
-                    n_items=n_items,
-                    master_preview_debug_diag=dd if preview_master_mode else None,
-                    file_index=fi,
-                    progress_mark_store=progress_mark_store,
-                    item_progress_callback=_parallel_item_progress,
-                )
+                fname = Path(str(display_path)).name
+                with _par_done_lock:
+                    dn0 = int(_par_done_n[0])
+                _parallel_extract_progress("start", fi, n_files, fname, dn0)
+                try:
+                    return _batch_file_extract_and_merge(
+                        io_path,
+                        row_source_path=display_path,
+                        items=items,
+                        headers=headers,
+                        header_set=header_set,
+                        column_modes=column_modes,
+                        linked_targets=linked_targets,
+                        join_targets=join_targets,
+                        path_col=path_col or "",
+                        master_preview_cap_idx=master_preview_cap_idx,
+                        master_preview_extract_allow=master_preview_extract_allow,
+                        master_preview_join_full_read_patterns=master_preview_join_full_read_patterns,
+                        master_preview_join_full_read_specs=master_preview_join_full_read_specs,
+                        preview_master_mode=preview_master_mode,
+                        use_join_search_merge=use_join_search_merge,
+                        max_primary_rows=max_primary_rows,
+                        cancel_check=cancel_check,
+                        record_item_timing=diag_on,
+                        n_items=n_items,
+                        master_preview_debug_diag=dd if preview_master_mode else None,
+                        file_index=fi,
+                        progress_mark_store=progress_mark_store,
+                        item_progress_callback=_parallel_item_progress,
+                    )
+                finally:
+                    with _par_done_lock:
+                        _par_done_n[0] += 1
+                        dn1 = int(_par_done_n[0])
+                    _parallel_extract_progress("done", fi, n_files, fname, dn1)
 
             _cold_w = parallel_cold_cap if parallel_ramp_on else file_parallel_workers
             _ramp_n = parallel_ramp_files if parallel_ramp_on else n_files
@@ -4930,6 +5086,7 @@ def compute_batch_table_rows(
             )
             paths = list(_stage_batch.io_paths)
             display_paths = list(_stage_batch.display_paths)
+            _publish_io_paths(paths)
             if io_profile_on and _stage_batch.copy_ms > 0:
                 try:
                     from svc import data_agg_io_profile_temp as _iop_stage
@@ -5886,6 +6043,14 @@ def compute_batch_table_rows(
             if max_table_rows is not None and max_table_rows > 0 and len(table_rows) >= max_table_rows:
                 break
     _trunc_recs = take_extract_truncation_records()
+    if isinstance(dd, dict) and _trunc_recs:
+        from svc.data_agg_extract_limit import (  # noqa: WPS433
+            extract_truncation_records_to_dicts,
+        )
+
+        dd["extract_truncation_warnings"] = extract_truncation_records_to_dicts(
+            _trunc_recs
+        )
     if preview_master_mode and isinstance(dd, dict):
         from svc.data_agg_master_preview_perf import (  # noqa: WPS433
             master_preview_scan_row_cap,
@@ -6689,6 +6854,15 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
+    reused_scan_paths: list[Path] | None = None
+    if isinstance(scan_cfg, dict) and "file_paths" in scan_cfg:
+        reused_scan_paths = []
+        raw_scan_paths = scan_cfg.get("file_paths")
+        if isinstance(raw_scan_paths, list):
+            for _rp in raw_scan_paths:
+                _s = str(_rp or "").strip()
+                if _s:
+                    reused_scan_paths.append(Path(_s))
     from svc.data_agg_cancel import (  # noqa: WPS433
         batch_cancel_scope,
         cancel_request_path_data_agg_batch,
@@ -6815,14 +6989,18 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     )
 
     hook_mark_state = ProgressIoMarkState()
+    nm_hi: list[int] = [0] * 8
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
         fps = file_paths_holder[0]
         io_ps = io_paths_holder[0] or [str(p) for p in fps]
         nf_l = max(len(fps), 1)
         ni_l = max(len(items), 1)
-        fi_kw = int(rest[0]) if len(rest) >= 1 else None
-        nf_kw = int(rest[1]) if len(rest) >= 2 else None
+        fi_kw, nf_kw, done_kw = _batch_hook_parse_rest(rest)
+        done_kw = _batch_hook_monotonic_done(
+            sub, file_index=fi_kw, done_n=done_kw, hi=nm_hi
+        )
+        pct_fi = done_kw if done_kw is not None else fi_kw
         if cancel_check is not None:
             cancel_check(force=True)
         raw = _batch_progress_pct_from_hook(
@@ -6830,12 +7008,18 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             suffix,
             nf_l,
             ni_l,
-            file_index=fi_kw,
+            file_index=pct_fi,
             n_files_total=nf_kw,
         )
         prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
         pi = min(4, max(1, int(sub) - 3))
-        phase_txt, detail_txt = _batch_hook_progress_lines(sub, suffix)
+        phase_txt, detail_txt = _batch_hook_progress_lines(
+            sub,
+            suffix,
+            file_index=fi_kw,
+            n_files=nf_kw if nf_kw is not None else nf_l,
+            done_n=done_kw,
+        )
         cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
         phase_txt, detail_txt = apply_batch_hook_io_mark(
             phase_txt,
@@ -6844,6 +7028,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             io_paths=io_ps,
             file_index=fi_kw,
             mark_state=hook_mark_state,
+            in_memory_io=(int(sub) == 6),
         )
         prog_kw: dict[str, Any] = {
             "pct": prog_last_pct[0],
@@ -6859,10 +7044,16 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         _prog_write(**prog_kw)
 
     scan_mark = progress_scan_mark(start_path)
+    if reused_scan_paths is not None:
+        _scan_phase = str(
+            cfg_msgs.get("PHASE_SCAN_REUSE") or "走査結果を利用中..."
+        )
+    else:
+        _scan_phase = str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中...")
     _prog_write(
         pct=2,
         phase=progress_phase_with_mark(
-            str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中..."),
+            _scan_phase,
             mark=scan_mark,
         )[:120],
         phase_i=0,
@@ -6885,13 +7076,24 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     )
     with batch_cancel_scope(cancel_check):
         try:
-            file_paths = scan_mod.scan_folder(
-                start_path,
-                recursive=rec,
-                extensions=ext_t,
-                keyword=kw,
-                cancel_check=cancel_check,
-            )
+            if reused_scan_paths is not None:
+                file_paths = list(reused_scan_paths)
+                try:
+                    logger.info(
+                        "[DATA_AGG_SCAN] 走査再利用 起点=%s 件数=%s",
+                        start_path,
+                        len(file_paths),
+                    )
+                except Exception:
+                    pass
+            else:
+                file_paths = scan_mod.scan_folder(
+                    start_path,
+                    recursive=rec,
+                    extensions=ext_t,
+                    keyword=kw,
+                    cancel_check=cancel_check,
+                )
         except DataAggCancelled:
             _abort_batch_cancel(phase="scan")
             return

@@ -94,6 +94,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     from svc import svc_data_agg_scan as scan_mod  # noqa: WPS433
     from svc import svc_data_agg_write as write_mod  # noqa: WPS433
     from svc.svc_data_agg import (  # noqa: WPS433
+        _batch_hook_monotonic_done,
+        _batch_hook_parse_rest,
         _batch_hook_progress_lines,
         _batch_hook_resolve_current_file,
         _batch_progress_pct_from_hook,
@@ -416,29 +418,50 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
+    reused_scan_paths: list[Path] | None = None
+    # キー有無で再利用判定（空リスト＝0件確定。未指定時のみ再走査）
+    if isinstance(scan_cfg, dict) and "file_paths" in scan_cfg:
+        raw_scan_paths = scan_cfg.get("file_paths")
+        reused_scan_paths = []
+        if isinstance(raw_scan_paths, list):
+            for _rp in raw_scan_paths:
+                _s = str(_rp or "").strip()
+                if _s:
+                    reused_scan_paths.append(Path(_s))
+        # list 以外が来ても「再利用指定あり」として空扱い（再走査しない）
 
     file_paths_holder: list[list[Path]] = [[]]
     io_paths_holder: list[list[str]] = [[]]
     hook_mark_state = ProgressIoMarkState()
+    nm_hi: list[int] = [0] * 8
 
     def _batch_hook(sub: int, suffix: str, *rest: Any) -> None:
         fps = file_paths_holder[0]
         io_ps = io_paths_holder[0] or [str(p) for p in fps]
         nf_l = max(len(fps), 1)
         ni_l = max(len(items), 1)
-        fi_kw = int(rest[0]) if len(rest) >= 1 else None
-        nf_kw = int(rest[1]) if len(rest) >= 2 else None
+        fi_kw, nf_kw, done_kw = _batch_hook_parse_rest(rest)
+        done_kw = _batch_hook_monotonic_done(
+            sub, file_index=fi_kw, done_n=done_kw, hi=nm_hi
+        )
+        pct_fi = done_kw if done_kw is not None else fi_kw
         raw = _batch_progress_pct_from_hook(
             sub,
             suffix,
             nf_l,
             ni_l,
-            file_index=fi_kw,
+            file_index=pct_fi,
             n_files_total=nf_kw,
         )
         prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
         pi = min(4, max(1, int(sub) - 3))
-        phase_txt, detail_txt = _batch_hook_progress_lines(sub, suffix)
+        phase_txt, detail_txt = _batch_hook_progress_lines(
+            sub,
+            suffix,
+            file_index=fi_kw,
+            n_files=nf_kw if nf_kw is not None else nf_l,
+            done_n=done_kw,
+        )
         cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
         phase_txt, detail_txt = apply_batch_hook_io_mark(
             phase_txt,
@@ -447,6 +470,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             io_paths=io_ps,
             file_index=fi_kw,
             mark_state=hook_mark_state,
+            in_memory_io=(int(sub) == 6),
         )
         prog_kw: dict[str, Any] = {
             "pct": prog_last_pct[0],
@@ -462,10 +486,16 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         _prog_write(**prog_kw)
 
     scan_mark = progress_scan_mark(start_path)
+    if reused_scan_paths is not None:
+        _scan_phase = str(
+            cfg_msgs.get("PHASE_SCAN_REUSE") or "走査結果を利用中..."
+        )
+    else:
+        _scan_phase = str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中...")
     _prog_write(
         pct=2,
         phase=progress_phase_with_mark(
-            str(cfg_msgs.get("PHASE_SCAN") or "フォルダを走査中..."),
+            _scan_phase,
             mark=scan_mark,
         )[:120],
         phase_i=0,
@@ -490,13 +520,24 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     with batch_cancel_scope(cancel_check):
         try:
             t_scan0 = time.perf_counter()
-            file_paths = scan_mod.scan_folder(
-                start_path,
-                recursive=rec,
-                extensions=ext_t,
-                keyword=kw,
-                cancel_check=cancel_check,
-            )
+            if reused_scan_paths is not None:
+                file_paths = list(reused_scan_paths)
+                try:
+                    logger.info(
+                        "[DATA_AGG_SCAN] 走査再利用 起点=%s 件数=%s",
+                        start_path,
+                        len(file_paths),
+                    )
+                except Exception:
+                    pass
+            else:
+                file_paths = scan_mod.scan_folder(
+                    start_path,
+                    recursive=rec,
+                    extensions=ext_t,
+                    keyword=kw,
+                    cancel_check=cancel_check,
+                )
             try:
                 from core import core_env
 
@@ -594,11 +635,11 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             _prog_write(
                 pct=pct,
                 phase=progress_phase_with_mark(
-                    "ネットワークからコピー中",
+                    "ネットワークからマウント中",
                     mark=PROGRESS_MARK_UNC,
                 )[:120],
                 phase_i=0,
-                detail="コピー %s/%s — %s" % (done_i, total_n, fname),
+                detail="マウント %s/%s — %s" % (done_i, total_n, fname),
                 done=pct,
                 total=100,
             )
@@ -614,8 +655,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     stage_pipeline=True,
                     stage_scan_root=start_path,
                     stage_progress_callback=_stage_copy_progress,
+                    io_paths_holder=io_paths_holder,
                 )
-            io_paths_holder[0] = list(file_paths)
         else:
             with network_stage_batch(
                 file_paths,
@@ -640,6 +681,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                         probe_caller="excel_batch_submit",
                         progress_hook=_batch_hook,
                         cancel_check=cancel_check,
+                        io_paths_holder=io_paths_holder,
                     )
     except DataAggCancelled:
         dt_compute_ms = int((time.perf_counter() - t_compute) * 1000)

@@ -1099,6 +1099,7 @@ class DataAggDebugDialog(QDialog):
         self._continuous_initial_steps: int = 0
         self._continuous_was_full_master: bool = False
         self._master_full_continuous_allowed: bool = True
+        self._mpv_pending_trunc_warns: list[dict[str, Any]] = []
         self._master_step_pass_complete: bool = False
         self._master_snapshot_browse_after_cancel: bool = False
         self._master_cancel_mi: int = 0
@@ -1986,6 +1987,78 @@ class DataAggDebugDialog(QDialog):
         pool = self._mpv_join_pool_by_mi.get(int(self._mi_idx))
         if pool and join_item:
             self._mpv_last_stats_read_rows = len(pool)
+
+    def _mpv_collect_extract_truncation_warnings(self, scen: dict[str, Any]) -> None:
+        """マスタ／シナリオデバッグ compute の読取上限警告を蓄積する。"""
+        dd = scen.get("__debug_diag") if isinstance(scen, dict) else None
+        if not isinstance(dd, dict):
+            return
+        raw = dd.pop("extract_truncation_warnings", None)
+        if not isinstance(raw, list) or not raw:
+            return
+        pending = getattr(self, "_mpv_pending_trunc_warns", None)
+        if not isinstance(pending, list):
+            pending = []
+            self._mpv_pending_trunc_warns = pending
+        seen = {
+            (
+                str(x.get("file") or ""),
+                str(x.get("item") or ""),
+                int(x.get("limit") or 0),
+            )
+            for x in pending
+            if isinstance(x, dict)
+        }
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("file") or ""),
+                str(row.get("item") or ""),
+                int(row.get("limit") or 0),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            pending.append(dict(row))
+
+    def _mpv_flush_extract_truncation_warnings(self) -> None:
+        """蓄積した読取上限警告をユーザーへ表示する（本番一括では出さない）。"""
+        pending = list(getattr(self, "_mpv_pending_trunc_warns", None) or [])
+        self._mpv_pending_trunc_warns = []
+        if not pending:
+            return
+        from svc.data_agg_extract_limit import (  # noqa: WPS433
+            ExtractTruncationRecord,
+            format_extract_truncation_user_message,
+        )
+        from ui_qt.ui_common import show_warning_notice  # noqa: WPS433
+
+        recs: list[ExtractTruncationRecord] = []
+        for row in pending:
+            try:
+                recs.append(
+                    ExtractTruncationRecord(
+                        file_path=str(row.get("file_path") or row.get("file") or ""),
+                        item_label=str(row.get("item") or "-"),
+                        limit=int(row.get("limit") or 0),
+                        read_count=int(row.get("read") or 0),
+                        source_index=int(row.get("source_index") or 0),
+                    )
+                )
+            except Exception:
+                continue
+        if not recs:
+            return
+        body = format_extract_truncation_user_message(recs)
+        title = self._d(
+            "MSG_EXTRACT_TRUNCATED_DEBUG_TITLE",
+            "データ集約 デバッグ",
+        )
+        try:
+            show_warning_notice(self, title, _normalize_message_newlines(body))
+        except Exception:
+            pass
 
     def _max_phase_slots(self) -> int:
         try:
@@ -7219,6 +7292,9 @@ class DataAggDebugDialog(QDialog):
                 iteration_contexts=iter_ctx or None,
             )
         self._mpv_note_item_stats(scen)
+        self._mpv_collect_extract_truncation_warnings(scen)
+        if not self._mpv_master_run_is_continuous():
+            self._mpv_flush_extract_truncation_warnings()
         if frozen_capture_out is not None and not join_item:
             self._mpv_store_frozen_snapshot(frozen_capture_out)
         if join_item and join_pool_out:
@@ -10591,6 +10667,7 @@ class DataAggDebugDialog(QDialog):
             # n_pick=0 ステップキャッシュに戻り結合列が空に見える（結果タブと table_rows の整合が崩れる）。
         self._update_run_buttons_state()
         self._update_clear_buttons()
+        self._mpv_flush_extract_truncation_warnings()
 
     def _run_continuous_next(self) -> None:
         if not self._continuous_busy:

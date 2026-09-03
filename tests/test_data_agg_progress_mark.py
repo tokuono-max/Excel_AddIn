@@ -40,12 +40,12 @@ def test_progress_io_ref_mark_local_new(tmp_path: Path) -> None:
 
 
 def test_strip_and_extract_mark_prefix() -> None:
-    assert extract_progress_io_mark_prefix("[UNC] コピー 1/3") == PROGRESS_MARK_UNC
+    assert extract_progress_io_mark_prefix("[UNC] マウント 1/3") == PROGRESS_MARK_UNC
     assert strip_progress_io_mark("[CCH] ファイル 1/2") == "ファイル 1/2"
 
 
 def test_strip_legacy_mark_prefix() -> None:
-    assert extract_progress_io_mark_prefix("[N] コピー 1/3") == "[N] "
+    assert extract_progress_io_mark_prefix("[N] マウント 1/3") == "[N] "
     assert strip_progress_io_mark("[C] ファイル 1/2") == "ファイル 1/2"
 
 
@@ -63,7 +63,7 @@ def test_apply_batch_hook_io_mark_phase_line() -> None:
     assert "a.xlsm" not in phase
     assert "a.xlsm" in detail
     phase2, _ = apply_batch_hook_io_mark(
-        "行のまとめ",
+        "主キー連携組立",
         "項目 2/10: X",
         suffix="項目 2/10: X",
         io_paths=[r"C:\a.xlsm"],
@@ -71,6 +71,24 @@ def test_apply_batch_hook_io_mark_phase_line() -> None:
         mark_state=state,
     )
     assert phase2.startswith(PROGRESS_MARK_LOC)
+
+
+def test_apply_batch_hook_join_phase_not_unc() -> None:
+    """結合キー比較はメモリ結合のため表示パスが UNC でも [UNC] にしない。"""
+    state = ProgressIoMarkState()
+    phase, detail = apply_batch_hook_io_mark(
+        "結合キー比較",
+        "結合キー検索（プール 100 行・10 ファイル）",
+        suffix="結合キー検索（プール 100 行・10 ファイル）",
+        io_paths=[r"\\server\share\a.xlsm"],
+        file_index=10,
+        mark_state=state,
+        in_memory_io=True,
+    )
+    assert phase.startswith(PROGRESS_MARK_LOC)
+    assert "[UNC]" not in phase
+    assert "結合キー検索" in detail or detail == ""
+
 
 
 def test_progress_io_ref_mark_cached_before_network(tmp_path: Path) -> None:

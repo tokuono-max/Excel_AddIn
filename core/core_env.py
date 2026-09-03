@@ -277,14 +277,18 @@ def data_agg_network_stage_pipeline_enabled() -> bool:
 
 
 def data_agg_parallel_cold_cap() -> int:
-    """UNC 起点時の抽出並列上限（ランプ前）。DATA_AGG_PARALLEL_COLD_CAP（既定 2）。"""
+    """
+    UNC 起点時の抽出並列上限（ランプ前）。
+    DATA_AGG_PARALLEL_COLD_CAP 未設定時は min(2, 論理CPU)。明示指定時はその値（1〜8）。
+    """
     raw = os.environ.get("DATA_AGG_PARALLEL_COLD_CAP", "").strip()
+    cpu = os.cpu_count() or 4
     if not raw:
-        return 2
+        return max(1, min(2, cpu))
     try:
         return max(1, min(int(raw), 8))
     except ValueError:
-        return 2
+        return max(1, min(2, cpu))
 
 
 def data_agg_parallel_ramp_files() -> int:
@@ -415,17 +419,19 @@ def data_agg_extract_trunc_policy(
 ) -> str:
     """
     抽出打ち切り検知時の方針。HC_DATA_AGG_EXTRACT_TRUNC_POLICY:
-      abort … 結合前に DataAggExtractTruncated（本番一括の既定）
-      warn  … ログのみで続行
+      warn  … ログのみで続行（本番一括・デバッグの既定）
+      abort … 結合前に DataAggExtractTruncated（明示指定時のみ）
+
+    思想: 上限の担保はシナリオ／マスタデバッグ。本番一括はデバッグ済み前提で止めない。
     """
     raw = (get("HC_DATA_AGG_EXTRACT_TRUNC_POLICY") or "").strip().lower()
     if raw in ("warn", "continue", "log"):
         return "warn"
     if raw in ("abort", "stop", "cancel"):
         return "abort"
-    if preview_master or (probe_caller or "") not in ("excel_batch_submit",):
-        return "warn"
-    return "abort"
+    # 未設定: 常に warn（以前は excel_batch_submit のみ abort）
+    _ = (probe_caller, preview_master)
+    return "warn"
 
 
 # 常駐メイン（ルート hc_main.py）のログプレフィックス（hc_csv.log 等で grep）
