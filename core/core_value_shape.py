@@ -26,16 +26,15 @@ logger = get_logger(__name__)
 __version__ = "0.2.0"
 
 
-def tokenize_shape_script(script: str) -> list[str]:
+def tokenize_shape_script_with_spans(script: str) -> tuple[list[str], list[tuple[int, int]]]:
     """
-    先頭レベルでカンマ `,` またはセミコロン `;` で分割（コマンド境界の明示用に `;` 可）。
-    ダブルクォート内はいずれも区切りにしない。"" は " 一文字。
-    前後空白はトークンごとに strip（クォート内は保持）。
+    tokenize_shape_script と同じ分割に加え、strip 後 script 内の各トークン [start, end) を返す。
     """
     s = script.strip()
     if not s:
-        return []
+        return [], []
     tokens: list[str] = []
+    char_spans: list[tuple[int, int]] = []
     i = 0
     n = len(s)
     while i < n:
@@ -46,6 +45,7 @@ def tokenize_shape_script(script: str) -> list[str]:
         if s[i] in ",;":
             i += 1
             continue
+        tok_start = i
         if s[i] == '"':
             i += 1
             buf: list[str] = []
@@ -62,10 +62,20 @@ def tokenize_shape_script(script: str) -> list[str]:
                     i += 1
             tokens.append("".join(buf))
         else:
-            start = i
             while i < n and s[i] not in ",;":
                 i += 1
-            tokens.append(s[start:i].strip())
+            tokens.append(s[tok_start:i].strip())
+        char_spans.append((tok_start, i))
+    return tokens, char_spans
+
+
+def tokenize_shape_script(script: str) -> list[str]:
+    """
+    先頭レベルでカンマ `,` またはセミコロン `;` で分割（コマンド境界の明示用に `;` 可）。
+    ダブルクォート内はいずれも区切りにしない。"" は " 一文字。
+    前後空白はトークンごとに strip（クォート内は保持）。
+    """
+    tokens, _ = tokenize_shape_script_with_spans(script)
     return tokens
 
 
@@ -672,69 +682,81 @@ def _validate_shape_numeric_token(tok: str, cmd: str) -> tuple[bool, str]:
     return (False, "%s の引数が不正です: %s" % (cmd, err))
 
 
-def compile_shape_script(script: str | None) -> tuple[bool, str]:
+_SHAPE_KNOWN_COMMANDS = frozenset(
+    {
+        "trim",
+        "split",
+        "left",
+        "right",
+        "rep",
+        "mid",
+        "cut",
+        "ins",
+        "padr",
+        "padl",
+        "pad_r",
+        "pad_l",
+        "padright",
+        "padleft",
+        "case",
+        "wide",
+        "date",
+    }
+)
+
+
+def _shape_error_tok_end_for_unknown(
+    tokens: list[str], cmd_start: int, n_tok: int
+) -> int:
+    """未知コマンドエラー時: 次の既知コマンド名の手前までを同一コマンドとみなす。"""
+    end_tok = cmd_start + 1
+    while end_tok < n_tok:
+        t = tokens[end_tok].strip().lower()
+        if t in _SHAPE_KNOWN_COMMANDS:
+            break
+        end_tok += 1
+    return end_tok
+
+
+def _compile_shape_script_tokens(
+    tokens: list[str],
+) -> tuple[bool, str, int, int]:
     """
-    検証用: トークン化と空でないコマンド名の存在だけ確認。
-    戻り値: (ok, message)。
+    トークン列を検証。
+    戻り値: (ok, message, error_tok_start, error_tok_end)。
+    成功時は error_tok_* は 0。失敗時は [start, end) がエラーとなったコマンドのトークン範囲。
     """
-    sc = (script or "").strip()
-    if not sc:
-        return (True, "")
-    if len(sc) > 20000:
-        return (False, "整形スクリプトが長すぎます（上限 20000 文字）")
-    try:
-        tokens = tokenize_shape_script(sc)
-    except Exception as ex:
-        return (False, "トークン化エラー: %s" % ex)
     if not tokens:
-        return (True, "")
-    # 先頭がコマンドとして妥当かざっくり確認
-    known = frozenset(
-        {
-            "trim",
-            "split",
-            "left",
-            "right",
-            "rep",
-            "mid",
-            "cut",
-            "ins",
-            "padr",
-            "padl",
-            "pad_r",
-            "pad_l",
-            "padright",
-            "padleft",
-            "case",
-            "wide",
-            "date",
-        }
-    )
+        return (True, "", 0, 0)
+    known = _SHAPE_KNOWN_COMMANDS
     i = 0
     n_tok = len(tokens)
     while i < n_tok:
         cmd = tokens[i].strip().lower()
-        i += 1
         if not cmd:
+            i += 1
             continue
+        cmd_start = i
+        i += 1
         if cmd not in known:
             if re.fullmatch(r"-?\d+", cmd):
-                return (False, "不正なトークン: %s" % cmd)
-            return (False, "未知のコマンド: %s" % cmd)
+                return (False, "不正なトークン: %s" % cmd, cmd_start, i)
+            end_tok = _shape_error_tok_end_for_unknown(tokens, cmd_start, n_tok)
+            return (False, "未知のコマンド: %s" % cmd, cmd_start, end_tok)
         if cmd == "rep":
             if i + 2 > n_tok:
-                return (False, "rep の引数が不足しています")
+                return (False, "rep の引数が不足しています", cmd_start, n_tok)
             i += 2
         elif cmd == "split":
             if i + 1 > n_tok:
-                return (False, "split の引数が不足しています")
+                return (False, "split の引数が不足しています", cmd_start, n_tok)
             i += 1
         elif cmd in ("left", "right"):
             if i + 1 > n_tok:
-                return (False, "%s の引数が不足しています" % cmd)
+                return (False, "%s の引数が不足しています" % cmd, cmd_start, n_tok)
             ok, err = _validate_shape_numeric_token(tokens[i], cmd)
             if not ok:
-                return (False, err)
+                return (False, err, cmd_start, n_tok)
             i += 1
         elif cmd in (
             "mid",
@@ -747,27 +769,261 @@ def compile_shape_script(script: str | None) -> tuple[bool, str]:
             "padleft",
         ):
             if i + 2 > n_tok:
-                return (False, "%s の引数が不足しています" % cmd)
+                return (False, "%s の引数が不足しています" % cmd, cmd_start, n_tok)
             if cmd in ("mid", "cut"):
                 ok, err = _validate_shape_numeric_token(tokens[i], cmd)
                 if not ok:
-                    return (False, err)
+                    return (False, err, cmd_start, n_tok)
                 ok2, err2 = _validate_shape_numeric_token(tokens[i + 1], cmd)
                 if not ok2:
-                    return (False, err2)
+                    return (False, err2, cmd_start, n_tok)
             elif cmd in ("padr", "padl", "pad_r", "pad_l", "padright", "padleft"):
                 if _parse_int(tokens[i]) is None:
-                    return (False, "%s の引数が不正です" % cmd)
+                    return (False, "%s の引数が不正です" % cmd, cmd_start, n_tok)
             i += 2
         elif cmd == "ins":
             if i + 2 > n_tok:
-                return (False, "ins の引数が不足しています")
+                return (False, "ins の引数が不足しています", cmd_start, n_tok)
             ok, err = _validate_shape_numeric_token(tokens[i], cmd)
             if not ok:
-                return (False, err)
+                return (False, err, cmd_start, n_tok)
             i += 2
         elif cmd == "case":
             if i + 1 > n_tok:
-                return (False, "case の引数が不足しています")
+                return (False, "case の引数が不足しています", cmd_start, n_tok)
             i += 1
-    return (True, "")
+    return (True, "", 0, 0)
+
+
+def format_shape_tokens_display_from_script(
+    script: str,
+    token_char_spans: list[tuple[int, int]],
+    tok_start: int,
+    tok_end: int,
+) -> str:
+    """script 内の [tok_start, tok_end) トークン範囲を元書式の文字列で返す。"""
+    if tok_start < 0 or tok_end <= tok_start or tok_start >= len(token_char_spans):
+        return ""
+    sc = script.strip()
+    start = token_char_spans[tok_start][0]
+    last = min(tok_end, len(token_char_spans)) - 1
+    end = token_char_spans[last][1]
+    j = end
+    while j < len(sc) and sc[j] in " \t\n\r":
+        j += 1
+    if j < len(sc) and sc[j] in ",;":
+        end = j + 1
+    return sc[start:end]
+
+
+def shape_script_syntax_error_block(script: str | None) -> tuple[bool, str, str]:
+    """
+    構文検証とエラーとなったコマンドブロック（元書式）を返す。
+    戻り値: (ok, message, error_block)。成功時 error_block は空。
+    """
+    sc = (script or "").strip()
+    if not sc:
+        return (True, "", "")
+    if len(sc) > 20000:
+        return (False, "整形スクリプトが長すぎます（上限 20000 文字）", sc)
+    try:
+        tokens, char_spans = tokenize_shape_script_with_spans(sc)
+    except Exception as ex:
+        return (False, "トークン化エラー: %s" % ex, sc)
+    ok, msg, ts, te = _compile_shape_script_tokens(tokens)
+    if ok:
+        return (True, "", "")
+    block = format_shape_tokens_display_from_script(sc, char_spans, ts, te)
+    if not block:
+        block = sc
+    return (False, msg, block)
+
+
+def compile_shape_script(script: str | None) -> tuple[bool, str]:
+    """
+    検証用: トークン化と空でないコマンド名の存在だけ確認。
+    戻り値: (ok, message)。
+    """
+    ok, msg, _ = shape_script_syntax_error_block(script)
+    return (ok, msg)
+
+
+def shape_command_token_spans(tokens: list[str]) -> list[tuple[int, int]]:
+    """各コマンド（コマンド名＋引数）が占める tokens の [start, end) を返す。"""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        cmd = tokens[i].strip().lower()
+        if not cmd:
+            i += 1
+            continue
+        start = i
+        i += 1
+        if cmd in ("trim", "wide", "date"):
+            spans.append((start, i))
+            continue
+        if cmd == "split":
+            if i < n:
+                i += 1
+            spans.append((start, i))
+            continue
+        if cmd in ("left", "right"):
+            if i < n:
+                i += 1
+            spans.append((start, i))
+            continue
+        if cmd == "rep":
+            if i + 1 < n:
+                i += 2
+            spans.append((start, i))
+            continue
+        if cmd in ("mid", "cut"):
+            if i + 1 < n:
+                i += 2
+            spans.append((start, i))
+            continue
+        if cmd == "ins":
+            if i + 1 < n:
+                i += 2
+            spans.append((start, i))
+            continue
+        if cmd in ("padr", "pad_r", "padright", "padl", "pad_l", "padleft"):
+            if i + 1 < n:
+                i += 2
+            spans.append((start, i))
+            continue
+        if cmd == "case":
+            if i < n:
+                i += 1
+            spans.append((start, i))
+            continue
+        spans.append((start, i))
+    return spans
+
+
+def format_shape_command_display_from_script(
+    script: str,
+    token_char_spans: list[tuple[int, int]],
+    cmd_token_spans: list[tuple[int, int]],
+    through: int,
+) -> str:
+    """元 DSL 入力の書式を保持した累積コマンド表示。"""
+    if through <= 0 or not cmd_token_spans:
+        return ""
+    s = script.strip()
+    if not s or not token_char_spans:
+        return ""
+    lead = 0
+    while lead < len(s) and s[lead] in " \t\n\r":
+        lead += 1
+    last_cmd = cmd_token_spans[through - 1]
+    end_tok_idx = last_cmd[1] - 1
+    if end_tok_idx < 0 or end_tok_idx >= len(token_char_spans):
+        return ""
+    end = token_char_spans[end_tok_idx][1]
+    if through < len(cmd_token_spans):
+        j = end
+        while j < len(s) and s[j] in " \t\n\r":
+            j += 1
+        if j < len(s) and s[j] in ",;":
+            end = j + 1
+    else:
+        end = len(s)
+        while end > lead and s[end - 1] in " \t\n\r":
+            end -= 1
+    return s[lead:end]
+
+
+def format_shape_script_display_through(script: str, through: int) -> str:
+    """strip 済み script の先頭 through コマンド分を元書式で返す。"""
+    sc = (script or "").strip()
+    if not sc or through <= 0:
+        return ""
+    tokens, char_spans = tokenize_shape_script_with_spans(sc)
+    cmd_spans = shape_command_token_spans(tokens)
+    if not cmd_spans:
+        return ""
+    if through > len(cmd_spans):
+        through = len(cmd_spans)
+    return format_shape_command_display_from_script(sc, char_spans, cmd_spans, through)
+
+
+def format_shape_command_display(
+    tokens: list[str], spans: list[tuple[int, int]], through: int
+) -> str:
+    """先頭 through 個のコマンドを表示用文字列に連結する（トークン再構成）。"""
+    if through <= 0:
+        return ""
+    parts: list[str] = []
+    for s, e in spans[:through]:
+        parts.append(",".join(tokens[s:e]))
+    return ",".join(parts)
+
+
+def format_shape_step_command_display(
+    script: str, through: int
+) -> str:
+    """ステップ実行表示（元 DSL 入力書式を保持）。"""
+    return format_shape_script_display_through(script, through)
+
+
+def apply_value_shape_for_test(text: Any, script: str | None) -> tuple[str, str | None]:
+    """
+    DSL テスト用: 構文検証後に適用。失敗時は (元文字列, エラー文言)。
+    """
+    s = "" if text is None else str(text)
+    sc = (script or "").strip()
+    if not sc:
+        return s, None
+    ok, msg = compile_shape_script(sc)
+    if not ok:
+        return s, msg or "構文エラー"
+    try:
+        tokens = tokenize_shape_script(sc)
+        return parse_and_apply_commands(s, tokens), None
+    except Exception as ex:
+        return s, "%s: %s" % (type(ex).__name__, ex)
+
+
+def apply_value_shape_step_for_test(
+    text: Any, script: str | None, step_count: int
+) -> tuple[str, str, str | None]:
+    """
+    DSL テスト用ステップ実行。
+    step_count: 適用するコマンド数（1 始まり）。0 以下は未実行。
+    戻り値: (結果文字列, 実行コマンド表示, エラー文言 or None)
+    """
+    s = "" if text is None else str(text)
+    sc = (script or "").strip()
+    if not sc:
+        return s, "", None
+    ok, msg = compile_shape_script(sc)
+    if not ok:
+        return s, "", msg or "構文エラー"
+    tokens, char_spans = tokenize_shape_script_with_spans(sc)
+    spans = shape_command_token_spans(tokens)
+    if not spans:
+        return s, "", None
+    n_cmd = len(spans)
+    if step_count <= 0:
+        return s, "", None
+    if step_count > n_cmd:
+        step_count = n_cmd
+    end_tok = spans[step_count - 1][1]
+    display = format_shape_command_display_from_script(sc, char_spans, spans, step_count)
+    try:
+        result = parse_and_apply_commands(s, tokens[:end_tok])
+        return result, display, None
+    except Exception as ex:
+        return s, display, "%s: %s" % (type(ex).__name__, ex)
+
+
+def shape_command_count(script: str | None) -> int:
+    sc = (script or "").strip()
+    if not sc:
+        return 0
+    try:
+        return len(shape_command_token_spans(tokenize_shape_script(sc)))
+    except Exception:
+        return 0

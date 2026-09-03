@@ -178,3 +178,53 @@ def test_compile_left_right() -> None:
     ok2, msg2 = compile_shape_script("left")
     assert not ok2
     assert "不足" in msg2
+
+
+def test_shape_step_apply() -> None:
+    from core.core_value_shape import (
+        apply_value_shape_for_test,
+        apply_value_shape_step_for_test,
+        shape_command_count,
+    )
+
+    sample = "  abc  "
+    script = "trim,wide"
+    assert shape_command_count(script) == 2
+    r1, d1, e1 = apply_value_shape_step_for_test(sample, script, 1)
+    assert e1 is None
+    assert r1 == "abc"
+    assert d1 == "trim,"
+    r2, d2, e2 = apply_value_shape_step_for_test(sample, script, 2)
+    assert e2 is None
+    assert d2 == "trim,wide"
+    r_all, err = apply_value_shape_for_test(sample, script)
+    assert err is None
+    assert r_all == r2
+
+
+def test_shape_step_rep_quoted_display() -> None:
+    from core.core_value_shape import apply_value_shape_step_for_test
+
+    script = 'rep,"ー","",rep,"-",""'
+    _, d1, e1 = apply_value_shape_step_for_test("x", script, 1)
+    assert e1 is None
+    assert d1 == 'rep,"ー","",'
+    _, d2, e2 = apply_value_shape_step_for_test("x", script, 2)
+    assert e2 is None
+    assert d2 == 'rep,"ー","",rep,"-",""'
+
+
+def test_shape_step_syntax_error() -> None:
+    from core.core_value_shape import (
+        apply_value_shape_for_test,
+        shape_script_syntax_error_block,
+    )
+
+    _, err = apply_value_shape_for_test("x", "bogus")
+    assert err
+
+    script = 'rep,"ー","",rerp,"-",""'
+    ok, msg, block = shape_script_syntax_error_block(script)
+    assert not ok
+    assert "rerp" in msg
+    assert block == 'rerp,"-",""'

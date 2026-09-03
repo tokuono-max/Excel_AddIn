@@ -40,6 +40,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -83,6 +84,7 @@ from ui_qt.ui_common import (
     show_info_notice,
     show_warning_notice,
 )
+from ui_qt.ui_dsl_test_dialog import DslTestDialog, find_dsl_test_open_button
 from ui_qt.ui_data_agg_scenario_layout import (
     apply_link_def_mode_widgets,
     ascii_upper_cell_ref,
@@ -4345,6 +4347,9 @@ class _ScenarioEditDialog(QDialog):
         self._dirty: bool = False
         self._undo_snapshot: list[dict[str, Any]] | None = None
         self._undo_restore_row: int = -1
+        self._dsl_test_dialog: DslTestDialog | None = None
+        self._dsl_test_cfg: dict[str, Any] = dict(self._screen_cfg.get("DSL_TEST") or {})
+        self._scenario_focus_changed_connected = False
         self._master_items_list: list[dict[str, Any]] = list(items or [])
         self._master_item_row = -1
         for _mi, _it in enumerate(self._master_items_list):
@@ -4708,7 +4713,11 @@ class _ScenarioEditDialog(QDialog):
             detail_cell.setdefault("DETAIL_SCROLL_CONTENT_MIN_WIDTH", _sw)
             detail_name.setdefault("DETAIL_SCROLL_CONTENT_MIN_WIDTH", _sw)
         scroll_cell, self._cell_refs = build_scenario_detail_cell_scroll(
-            self._item_name, items or [], detail_cell
+            self._item_name,
+            items or [],
+            detail_cell,
+            dsl_test_opener=self._open_dsl_test,
+            dsl_test_cfg=self._dsl_test_cfg,
         )
         self._cell_refs["on_join_group_added"] = self._wire_new_join_def
         self._cell_refs["on_link_group_added"] = self._wire_new_link_def
@@ -4721,7 +4730,11 @@ class _ScenarioEditDialog(QDialog):
             self._on_link_or_join_structure_changed
         )
         scroll_name, self._name_refs = build_scenario_detail_name_scroll(
-            self._item_name, items or [], detail_name
+            self._item_name,
+            items or [],
+            detail_name,
+            dsl_test_opener=self._open_dsl_test,
+            dsl_test_cfg=self._dsl_test_cfg,
         )
         self._detail_scroll_cell = scroll_cell
         self._detail_scroll_name = scroll_name
@@ -4744,6 +4757,10 @@ class _ScenarioEditDialog(QDialog):
         # 境目ドラッグは可（手動後は再適用しない）。外枠横伸長は右だけ（STRETCH_LEFT=0）。
         self._scenario_h_splitter_user_moved = False
         self._scenario_right_wrap = right_wrap
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_scenario_focus_changed)
+            self._scenario_focus_changed_connected = True
         st0 = int(self._screen_cfg.get("SPLITTER_STRETCH_LEFT") or 0)
         st1 = int(self._screen_cfg.get("SPLITTER_STRETCH_RIGHT") or 1)
         splitter.setStretchFactor(0, max(st0, 0))
@@ -5240,9 +5257,101 @@ class _ScenarioEditDialog(QDialog):
         if isinstance(getattr(self, "_btn_undo_remove", None), QPushButton):
             self._btn_undo_remove.setEnabled(False)
 
+    def _open_dsl_test(self, le: QLineEdit) -> None:
+        """整形 DSL テスト（非モーダル）。同時 1 つ。"""
+        self._close_dsl_test_dialog(save_prefix=True)
+        hint = (le.toolTip() or "").strip()
+        if not hint:
+            for block in (
+                self._screen_cfg.get("DETAIL_CELL") or {},
+                self._screen_cfg.get("DETAIL_NAME") or {},
+            ):
+                hint = str(block.get("VALUE_SHAPE_HINT_HTML") or "").strip()
+                if hint:
+                    break
+        dlg = DslTestDialog(
+            target_line_edit=le,
+            hint_html=hint,
+            dsl_test_cfg=self._dsl_test_cfg,
+            position_anchor_widget=find_dsl_test_open_button(le) or le,
+            parent=self,
+        )
+        self._dsl_test_dialog = dlg
+        dlg.finished.connect(lambda _result: self._on_dsl_test_dialog_finished(dlg))
+        dlg.show()
+
+    def _on_dsl_test_dialog_finished(self, dlg: DslTestDialog) -> None:
+        """×／Esc 等でユーザーが閉じたとき、親側の参照を解放する。"""
+        if self._dsl_test_dialog is dlg:
+            self._dsl_test_dialog = None
+
+    def _on_scenario_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
+        """右ペインの別項目へフォーカスが移ったら DSL テストを閉じる。"""
+        if self._dsl_test_dialog is None or new is None:
+            return
+        if self._loading_source_form:
+            return
+        if self._should_close_dsl_test_on_focus(new):
+            self._close_dsl_test_dialog(save_prefix=True)
+
+    def _should_close_dsl_test_on_focus(self, widget: QWidget) -> bool:
+        dlg = self._dsl_test_dialog
+        if dlg is None:
+            return False
+        target = dlg.target_line_edit
+        w: QWidget | None = widget
+        while w is not None:
+            if w is dlg or w is target:
+                return False
+            if w.objectName() == "dsl_test_open_btn":
+                return False
+            w = w.parentWidget()
+        w = widget
+        while w is not None:
+            if w is getattr(self, "_scenario_right_wrap", None):
+                return True
+            if w is self:
+                return False
+            w = w.parentWidget()
+        return False
+
+    def _close_dsl_test_dialog(self, save_prefix: bool = True) -> None:
+        dlg = self._dsl_test_dialog
+        if dlg is None:
+            return
+        self._dsl_test_dialog = None
+        try:
+            if save_prefix:
+                dlg.save_shared_input()
+        except Exception:
+            pass
+        try:
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+    def _disconnect_scenario_focus_changed(self) -> None:
+        if not self._scenario_focus_changed_connected:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.focusChanged.disconnect(self._on_scenario_focus_changed)
+            except Exception:
+                pass
+        self._scenario_focus_changed_connected = False
+
     def reject(self) -> None:
+        self._close_dsl_test_dialog(save_prefix=True)
+        self._disconnect_scenario_focus_changed()
         self._clear_scenario_undo()
         super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._close_dsl_test_dialog(save_prefix=True)
+        self._disconnect_scenario_focus_changed()
+        super().closeEvent(event)
 
     def _on_scenario_splitter_moved(self, _pos: int, _index: int) -> None:
         """左右境目の手動ドラッグ後。以降の自動 setSizes は抑止し、右レイアウトだけ追従。"""
@@ -5824,6 +5933,9 @@ class _ScenarioEditDialog(QDialog):
     def _on_source_selection_changed(self) -> None:
         """ソース選択変更時。フォームを保存してから選択行をロード。"""
         row = self._sources_table.currentRow()
+        # 別ソース行への切替時に DSL テストを閉じる（▲▼ 並べ替えは move 側で閉じる）。
+        if row != self._current_source_index:
+            self._close_dsl_test_dialog(save_prefix=True)
         if self._current_source_index >= 0 and self._current_source_index < len(self._sources_data):
             self._apply_form_to_source(self._current_source_index, include_scenario_name=False)
         self._current_source_index = row if 0 <= row < len(self._sources_data) else -1
@@ -5869,6 +5981,7 @@ class _ScenarioEditDialog(QDialog):
             return
         if not self._prepare_source_row_before_reorder(row):
             return
+        self._close_dsl_test_dialog(save_prefix=True)
         self._sources_data[row - 1], self._sources_data[row] = (
             self._sources_data[row],
             self._sources_data[row - 1],
@@ -5890,6 +6003,7 @@ class _ScenarioEditDialog(QDialog):
             return
         if not self._prepare_source_row_before_reorder(row):
             return
+        self._close_dsl_test_dialog(save_prefix=True)
         self._sources_data[row + 1], self._sources_data[row] = (
             self._sources_data[row],
             self._sources_data[row + 1],
@@ -5909,6 +6023,7 @@ class _ScenarioEditDialog(QDialog):
         """フォームの種別変更時。スタックを切り替え、ソースの type を更新。"""
         if self._current_source_index < 0:
             return
+        self._close_dsl_test_dialog(save_prefix=True)
         new_t = self._form_combo_type.currentData() or "cell"
         new_b = _scenario_lineage_bucket(new_t)
         for j, other in enumerate(self._sources_data):

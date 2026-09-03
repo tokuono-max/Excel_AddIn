@@ -15,7 +15,7 @@ History (latest 3):
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ui_qt.ui_common import (
     FocusWheelComboBox,
@@ -509,7 +509,12 @@ def _apply_value_shape_hints(le: QLineEdit, cfg: dict[str, Any]) -> tuple[QLabel
     return lab, short
 
 
-def _value_shape_form_field(le: QLineEdit, cfg: dict[str, Any]) -> QWidget:
+def _value_shape_form_field(
+    le: QLineEdit,
+    cfg: dict[str, Any],
+    dsl_test_opener: Callable[[QLineEdit], None] | None = None,
+    dsl_test_cfg: dict[str, Any] | None = None,
+) -> QWidget:
     """整形 DSL と直下ヒントを縦詰め（別 addRow によるフォーム行間すき間を入れない）。"""
     hint_lab, short = _apply_value_shape_hints(le, cfg)
     wrap = QWidget()
@@ -517,7 +522,34 @@ def _value_shape_form_field(le: QLineEdit, cfg: dict[str, Any]) -> QWidget:
     vl = QVBoxLayout(wrap)
     vl.setContentsMargins(0, 0, 0, 0)
     vl.setSpacing(0)
-    vl.addWidget(le)
+    row = QWidget()
+    row_lay = QHBoxLayout(row)
+    row_lay.setContentsMargins(0, 0, 0, 0)
+    row_lay.setSpacing(4)
+    row_lay.addWidget(le, 1)
+    if dsl_test_opener is not None:
+        dt_cfg = dsl_test_cfg or {}
+        btn_sz = 8
+        try:
+            btn_sz = max(4, int(dt_cfg.get("BTN_OPEN_SIZE") or 8))
+        except (TypeError, ValueError):
+            btn_sz = 8
+        btn_test = QPushButton("")
+        btn_test.setObjectName("dsl_test_open_btn")
+        btn_test.setFixedSize(btn_sz, btn_sz)
+        btn_test.setToolTip(
+            _dcp(dt_cfg, "TIP_DSL_TEST_BTN", "整形 DSL をテストします")
+        )
+        btn_test.setStyleSheet(
+            "QPushButton { background-color: #888888; border: 1px solid #666666; "
+            "border-radius: 1px; min-width: %dpx; max-width: %dpx; "
+            "min-height: %dpx; max-height: %dpx; padding: 0px; margin: 0px; }"
+            "QPushButton:hover { background-color: #777777; }"
+            % (btn_sz, btn_sz, btn_sz, btn_sz)
+        )
+        btn_test.clicked.connect(lambda _=False, editor=le: dsl_test_opener(editor))
+        row_lay.addWidget(btn_test, 0)
+    vl.addWidget(row)
     if short:
         vl.addWidget(hint_lab)
     return wrap
@@ -814,6 +846,9 @@ def build_scenario_detail_cell_scroll(
     item_name: str,
     items: list[dict[str, Any]] | None = None,
     detail_cfg: dict[str, Any] | None = None,
+    *,
+    dsl_test_opener: Callable[[QLineEdit], None] | None = None,
+    dsl_test_cfg: dict[str, Any] | None = None,
 ) -> tuple[QScrollArea, dict[str, Any]]:
     """セル座標から取得。detail_cfg は SCREENS.SCENARIO_EDIT.DETAIL_CELL。refs でウィジェット参照を返す。"""
     cfg = detail_cfg or {}
@@ -1143,7 +1178,7 @@ def build_scenario_detail_cell_scroll(
     refs["value_shape_script"] = le_vshape
     f3v.addRow(
         _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
-        _value_shape_form_field(le_vshape, cfg),
+        _value_shape_form_field(le_vshape, cfg, dsl_test_opener, dsl_test_cfg),
     )
 
     wm = _write_mode_combo_from_config(cfg, for_name_detail=False)
@@ -1303,7 +1338,7 @@ def build_scenario_detail_cell_scroll(
         le_link_shape.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         gf.addRow(
             _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
-            _value_shape_form_field(le_link_shape, cfg),
+            _value_shape_form_field(le_link_shape, cfg, dsl_test_opener, dsl_test_cfg),
         )
         cb_carry_empty = QCheckBox("")
         cb_carry_empty.setChecked(False)
@@ -1644,7 +1679,7 @@ def build_scenario_detail_cell_scroll(
         le_join_shape.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         gf_key.addRow(
             _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
-            _value_shape_form_field(le_join_shape, cfg),
+            _value_shape_form_field(le_join_shape, cfg, dsl_test_opener, dsl_test_cfg),
         )
         gv.addLayout(gf_key)
         row_jbtn = QHBoxLayout()
@@ -1838,6 +1873,9 @@ def build_scenario_detail_name_scroll(
     item_name: str,
     items: list[dict[str, Any]] | None = None,
     detail_cfg: dict[str, Any] | None = None,
+    *,
+    dsl_test_opener: Callable[[QLineEdit], None] | None = None,
+    dsl_test_cfg: dict[str, Any] | None = None,
 ) -> tuple[QScrollArea, dict[str, Any]]:
     """名前・パス系。detail_cfg は SCREENS.SCENARIO_EDIT.DETAIL_NAME。"""
     cfg = detail_cfg or {}
@@ -2002,7 +2040,7 @@ def build_scenario_detail_name_scroll(
     le_nshape.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     f2.addRow(
         _field_lbl(_dcp(cfg, "LABEL_VALUE_SHAPE", "整形（DSL）")),
-        _value_shape_form_field(le_nshape, cfg),
+        _value_shape_form_field(le_nshape, cfg, dsl_test_opener, dsl_test_cfg),
     )
     wm2 = _write_mode_combo_from_config(cfg, for_name_detail=True)
     f2.addRow(_field_lbl(_dcp(cfg, "LABEL_WRITE_MODE_DETAIL", "書込みモード")), wm2)
