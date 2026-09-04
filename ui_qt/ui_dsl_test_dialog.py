@@ -170,7 +170,26 @@ def _initial_dsl_test_input_text(cfg: dict[str, Any]) -> str:
 
 
 class _DslCmdInputEdit(QPlainTextEdit):
-    """1 行 DSL 入力。Enter で改行せず、構文エラーは文字色で強調する。"""
+    """1 行 DSL 入力。Enter で改行せず、構文エラーは文字色で強調する。
+
+    固定高さ＋縦スクロールバー非表示のため、枠外への選択ドラッグで
+    Qt の縦オートスクロールが効くと行がクリップ外へ消えうる。
+    縦位置は常に先頭（0）に固定する（水平スクロールは維持）。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._locking_vscroll = False
+        self.verticalScrollBar().valueChanged.connect(self._keep_vscroll_top)
+
+    def _keep_vscroll_top(self, value: int = 0) -> None:
+        if self._locking_vscroll or value == 0:
+            return
+        self._locking_vscroll = True
+        try:
+            self.verticalScrollBar().setValue(0)
+        finally:
+            self._locking_vscroll = False
 
     def keyPressEvent(self, event: Any) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

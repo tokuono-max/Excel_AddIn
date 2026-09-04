@@ -9,14 +9,18 @@ Purpose:
   フェーズ2は主キーのみ（連続実行は一括）。空主キーの連携は結果に出さない。
   表示上限（SCENARIO_DEBUG_VALUE_ROWS）に達した主キー件数で以降のファイルを開かない。
   ファイル単位で xlsx_workbook_scope を張り、連携・結合フェーズのセル読取で load_workbook を再利用する。
+  UNC 等ネットワークパスは DATA_AGG_NETWORK_STAGE に従い TEMP へステージしてから読む（キャッシュキーは表示パスのまま）。
+  シナリオデバッグでは ScenarioDebugStageSession でシート名〜主キー／連携が同一 display→io を再利用する。
   _name_extract_association_matches も同様（名前取得デバッグの照合カウント）。
 """
 from __future__ import annotations
 
 import importlib
 import json
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 from svc.data_agg_sheet_resolve import (
@@ -182,6 +186,168 @@ def _bundle_error_stub() -> dict[str, Any]:
     }
 
 
+_DBG_FULL_EXTRACT = "_dbg_full_extract"
+_DBG_PRIMARY_ONLY = "_dbg_primary_only"
+
+
+class ScenarioDebugStageSession:
+    """
+    シナリオデバッグ用の共有ネットワークステージ。
+    シート名検索〜主キー／連携／prefetch で同一 display→io を再利用し、
+    フェーズごとの再コピーを避ける。寿命は呼び出し側（UI）が clear する。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._batch: Any = None
+        self._scan_root: str | None = None
+        self._read_map: dict[str, str] = {}
+        self._covered: frozenset[str] = frozenset()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._clear_unlocked()
+
+    def _clear_unlocked(self) -> None:
+        batch = self._batch
+        self._batch = None
+        self._scan_root = None
+        self._read_map = {}
+        self._covered = frozenset()
+        if batch is not None:
+            try:
+                batch.cleanup()
+            except Exception:
+                pass
+
+    def ensure(
+        self,
+        paths: Sequence[str],
+        *,
+        scan_root: str | None = None,
+        stage_progress_hook: Callable[[int, int, str], None] | None = None,
+        cancel_check: Callable[..., None] | None = None,
+    ) -> dict[str, str]:
+        """
+        paths をカバーする display→io を返す。
+        既にカバー済みなら再利用。不足・破損・scan_root 変更時のみ再構築。
+        """
+        from core import core_env
+        from svc.data_agg_network_stage import build_network_stage_batch
+        from svc.data_agg_path_network import path_is_network
+
+        path_list = [str(p) for p in paths if str(p or "").strip()]
+        needed = frozenset(path_list)
+        root = (str(scan_root).strip() or None) if scan_root else None
+
+        with self._lock:
+            if (
+                not path_list
+                or not core_env.data_agg_network_stage_enabled()
+                or not any(path_is_network(p) for p in path_list)
+            ):
+                # ローカルのみ／無効: 空 map（呼び出し側は表示パスのまま読む）。
+                # 前回のネットワーク batch は残さない（シナリオ切替漏れ時の和集合肥大を防ぐ）。
+                if self._batch is not None:
+                    self._clear_unlocked()
+                return {}
+
+            reuse = (
+                self._batch is not None
+                and self._scan_root == root
+                and needed <= self._covered
+            )
+            if reuse:
+                for disp in needed:
+                    io_s = self._read_map.get(disp, disp)
+                    if path_is_network(disp) and io_s != disp:
+                        try:
+                            if not Path(io_s).is_file():
+                                reuse = False
+                                break
+                        except OSError:
+                            reuse = False
+                            break
+            if reuse:
+                return {p: self._read_map.get(p, p) for p in path_list}
+
+            # 再構築: 既存カバーと今回必要分の和集合（シートで載せたファイルを主キーでも維持）
+            union_list = sorted(self._covered | needed) if self._covered else sorted(needed)
+            self._clear_unlocked()
+
+            def _stage_cb(done: int, total: int, fname: str) -> None:
+                if stage_progress_hook is None:
+                    return
+                try:
+                    stage_progress_hook(int(done), int(total), str(fname or ""))
+                except Exception:
+                    pass
+
+            batch = build_network_stage_batch(
+                union_list,
+                scan_root=root,
+                enabled=True,
+                cancel_check=cancel_check,
+                progress_callback=_stage_cb if stage_progress_hook is not None else None,
+            )
+            self._batch = batch
+            self._scan_root = root
+            self._read_map = {
+                str(d): str(i)
+                for d, i in zip(batch.display_paths, batch.io_paths)
+                if str(d)
+            }
+            self._covered = frozenset(self._read_map.keys())
+            return {p: self._read_map.get(p, p) for p in path_list}
+
+
+@contextmanager
+def _scenario_staged_read_map(
+    paths: Sequence[str],
+    *,
+    scan_root: str | None = None,
+    stage_progress_hook: Callable[[int, int, str], None] | None = None,
+    cancel_check: Callable[..., None] | None = None,
+) -> Iterator[dict[str, str]]:
+    """
+    ネットワークパスを TEMP へステージし display→io の対応を返す（ワンショット）。
+    共有セッションが無い呼び出し（テスト・名前取得など）向け。終了時に cleanup。
+    """
+    from core import core_env
+    from svc.data_agg_network_stage import network_stage_batch
+    from svc.data_agg_path_network import path_is_network
+
+    path_list = [str(p) for p in paths if str(p or "").strip()]
+    if (
+        not path_list
+        or not core_env.data_agg_network_stage_enabled()
+        or not any(path_is_network(p) for p in path_list)
+    ):
+        yield {}
+        return
+
+    def _stage_cb(done: int, total: int, fname: str) -> None:
+        if stage_progress_hook is None:
+            return
+        try:
+            stage_progress_hook(int(done), int(total), str(fname or ""))
+        except Exception:
+            pass
+
+    with network_stage_batch(
+        path_list,
+        scan_root=scan_root,
+        enabled=True,
+        cancel_check=cancel_check,
+        progress_callback=_stage_cb if stage_progress_hook is not None else None,
+    ) as batch:
+        yield {
+            str(d): str(i)
+            for d, i in zip(batch.display_paths, batch.io_paths)
+            if str(d)
+        }
+
+
 def fill_bundles_for_scenario_phase(
     item: dict[str, Any],
     paths: list[str],
@@ -192,6 +358,10 @@ def fill_bundles_for_scenario_phase(
     progress_hook: Callable[[int, int], None] | None = None,
     phase2_primary_only: bool = True,
     max_primary_rows: int | None = None,
+    scan_root: str | None = None,
+    stage_progress_hook: Callable[[int, int, str], None] | None = None,
+    cancel_check: Callable[..., None] | None = None,
+    read_map: dict[str, str] | None = None,
 ) -> None:
     """
     デバッグのシナリオフェーズに応じてキャッシュを更新する。
@@ -201,6 +371,8 @@ def fill_bundles_for_scenario_phase(
       フェーズ2で表示上限に達して開いていないファイルは開かない。
     max_primary_rows: フェーズ2で残った主キー件数がこの件数に達したら以降のファイルを開かない。
     progress_hook: 処理ファイル進捗 (done, total)。done は 1 始まり。省略時は呼ばない。
+    read_map: 共有ステージの display→io。指定時はワンショットステージしない。
+    scan_root / stage_progress_hook: read_map 未指定時の UNC ステージング用。
     """
     from svc.svc_data_agg_extract import xlsx_workbook_scope
 
@@ -230,37 +402,65 @@ def fill_bundles_for_scenario_phase(
         max_pr = 0
     kept_total = 0
 
-    for idx, fp in enumerate(process_paths, start=1):
-        if phase_slot_index >= 3:
-            if fp not in cache:
-                continue
-        elif phase_slot_index == 2 and max_pr > 0 and kept_total >= max_pr:
-            break
-        remain: int | None = None
-        if phase_slot_index == 2 and max_pr > 0:
-            remain = max_pr - kept_total
-            if remain <= 0:
+    def _run_with_map(rm: dict[str, str]) -> None:
+        nonlocal kept_total
+        for idx, fp in enumerate(process_paths, start=1):
+            if phase_slot_index >= 3:
+                if fp not in cache:
+                    continue
+            elif phase_slot_index == 2 and max_pr > 0 and kept_total >= max_pr:
                 break
-        with xlsx_workbook_scope():
-            try:
-                cache[fp] = _extract_bundles_for_matched_sheets(
-                    item,
-                    fp,
-                    item_id=item_id,
-                    jp_hdr=jp_hdr,
-                    phase_slot_index=phase_slot_index,
-                    existing=cache.get(fp),
-                    phase2_primary_only=phase2_primary_only,
-                    max_primary_rows=remain,
-                )
-            except Exception:
-                cache[fp] = _bundle_error_stub()
-        if phase_slot_index == 2:
-            kept_total += len((cache.get(fp) or {}).get("primary_values") or [])
+            remain: int | None = None
+            if phase_slot_index == 2 and max_pr > 0:
+                remain = max_pr - kept_total
+                if remain <= 0:
+                    break
+            io_fp = rm.get(fp, fp)
+            with xlsx_workbook_scope():
+                try:
+                    cache[fp] = _extract_bundles_for_matched_sheets(
+                        item,
+                        io_fp,
+                        item_id=item_id,
+                        jp_hdr=jp_hdr,
+                        phase_slot_index=phase_slot_index,
+                        existing=cache.get(fp),
+                        phase2_primary_only=phase2_primary_only,
+                        max_primary_rows=remain,
+                    )
+                except Exception:
+                    cache[fp] = _bundle_error_stub()
+            if phase_slot_index == 2:
+                kept_total += len((cache.get(fp) or {}).get("primary_values") or [])
 
-        if progress_hook is not None and n_proc > 0:
-            if idx == 1 or idx % stride == 0 or idx == n_proc:
-                progress_hook(idx, n_proc)
+            if progress_hook is not None and n_proc > 0:
+                if idx == 1 or idx % stride == 0 or idx == n_proc:
+                    try:
+                        progress_hook(idx, n_proc, io_fp)
+                    except TypeError:
+                        progress_hook(idx, n_proc)
+
+    if read_map is not None:
+        _run_with_map(read_map)
+        return
+
+    # 連携・結合でフル抽出済みなら再ステージ不要（連続実行の主キー一括後など）
+    if phase_slot_index >= 3:
+        stage_paths = [
+            fp
+            for fp in process_paths
+            if fp in cache and not (cache.get(fp) or {}).get(_DBG_FULL_EXTRACT)
+        ]
+    else:
+        stage_paths = list(process_paths)
+
+    with _scenario_staged_read_map(
+        stage_paths,
+        scan_root=scan_root,
+        stage_progress_hook=stage_progress_hook,
+        cancel_check=cancel_check,
+    ) as rm:
+        _run_with_map(rm)
 
 
 def fill_scenario_link_join_after_primary(
@@ -271,6 +471,9 @@ def fill_scenario_link_join_after_primary(
     *,
     cancel_check: Callable[..., None] | None = None,
     progress_hook: Callable[[int, int], None] | None = None,
+    scan_root: str | None = None,
+    stage_progress_hook: Callable[[int, int, str], None] | None = None,
+    read_map: dict[str, str] | None = None,
 ) -> None:
     """主キー抽出済みキャッシュへ、連携・結合を追記する（空主キーファイルは開かない）。"""
     from svc.data_agg_cancel import DataAggCancelled
@@ -284,43 +487,64 @@ def fill_scenario_link_join_after_primary(
         if fp in cache and not (cache.get(fp) or {}).get(_DBG_FULL_EXTRACT)
     ]
     n_todo = len(todo)
-    for idx, fp in enumerate(todo, start=1):
-        if cancel_check is not None:
-            cancel_check()
-        b = cache.get(fp)
-        if not isinstance(b, dict):
-            continue
-        if not (b.get("primary_values") or []):
-            cache[fp] = _mark_dbg_full_extract(b)
+
+    def _run_with_map(rm: dict[str, str]) -> None:
+        for idx, fp in enumerate(todo, start=1):
+            if cancel_check is not None:
+                cancel_check()
+            b = cache.get(fp)
+            if not isinstance(b, dict):
+                continue
+            if not (b.get("primary_values") or []):
+                cache[fp] = _mark_dbg_full_extract(b)
+                if progress_hook is not None and n_todo > 0:
+                    try:
+                        progress_hook(idx, n_todo, rm.get(fp, fp))
+                    except TypeError:
+                        progress_hook(idx, n_todo)
+                continue
+            io_fp = rm.get(fp, fp)
+            with xlsx_workbook_scope():
+                try:
+                    b3 = _extract_bundles_for_matched_sheets(
+                        item,
+                        io_fp,
+                        item_id=item_id,
+                        jp_hdr=jp_hdr,
+                        phase_slot_index=3,
+                        existing=b,
+                    )
+                    b4 = _extract_bundles_for_matched_sheets(
+                        item,
+                        io_fp,
+                        item_id=item_id,
+                        jp_hdr=jp_hdr,
+                        phase_slot_index=4,
+                        existing=b3,
+                    )
+                    cache[fp] = _mark_dbg_full_extract(b4)
+                except DataAggCancelled:
+                    raise
+                except Exception:
+                    cache[fp] = b if isinstance(b, dict) else _bundle_error_stub()
             if progress_hook is not None and n_todo > 0:
-                progress_hook(idx, n_todo)
-            continue
-        with xlsx_workbook_scope():
-            try:
-                b3 = _extract_bundles_for_matched_sheets(
-                    item,
-                    fp,
-                    item_id=item_id,
-                    jp_hdr=jp_hdr,
-                    phase_slot_index=3,
-                    existing=b,
-                )
-                b4 = _extract_bundles_for_matched_sheets(
-                    item,
-                    fp,
-                    item_id=item_id,
-                    jp_hdr=jp_hdr,
-                    phase_slot_index=4,
-                    existing=b3,
-                )
-                cache[fp] = _mark_dbg_full_extract(b4)
-            except DataAggCancelled:
-                raise
-            except Exception:
-                cache[fp] = b if isinstance(b, dict) else _bundle_error_stub()
-        if progress_hook is not None and n_todo > 0:
-            if idx == 1 or idx % 5 == 0 or idx == n_todo:
-                progress_hook(idx, n_todo)
+                if idx == 1 or idx % 5 == 0 or idx == n_todo:
+                    try:
+                        progress_hook(idx, n_todo, io_fp)
+                    except TypeError:
+                        progress_hook(idx, n_todo)
+
+    if read_map is not None:
+        _run_with_map(read_map)
+        return
+
+    with _scenario_staged_read_map(
+        todo,
+        scan_root=scan_root,
+        stage_progress_hook=stage_progress_hook,
+        cancel_check=cancel_check,
+    ) as rm:
+        _run_with_map(rm)
 
 
 def _name_extract_association_matches(
@@ -552,6 +776,7 @@ def _name_extract_debug_phase_result(
             2,
             paths_to_process=hit_files,
             max_primary_rows=max_rows,
+            scan_root=scan_root,
         )
         seen_prim: set[str] = set()
         ordered_unique: list[str] = []
@@ -587,6 +812,7 @@ def _name_extract_debug_phase_result(
             2,
             paths_to_process=hit_files,
             max_primary_rows=max_rows,
+            scan_root=scan_root,
         )
         seen_u: set[str] = set()
         for fp in hit_files:
@@ -616,6 +842,9 @@ def scenario_debug_phase_result(
     name_extract_debug_labels: dict[str, Any] | None = None,
     progress_hook: Callable[[int, int], None] | None = None,
     phase2_primary_only: bool = True,
+    stage_progress_hook: Callable[[int, int, str], None] | None = None,
+    cancel_check: Callable[..., None] | None = None,
+    stage_session: ScenarioDebugStageSession | None = None,
 ) -> tuple[list[str], list[str], list[dict[str, Any]], list[str | None]]:
     """
     シナリオフェーズ用のサマリ 5 列・値列・イベント（結合失敗等はフェーズ実行では空、抽出失敗のみ補足可）。
@@ -623,8 +852,10 @@ def scenario_debug_phase_result(
     フェーズ 0 はファイル名のみ。フェーズ 1 はシート名解決のみ（各ファイルでブックを短時間開く）。
     フェーズ 2 以降で extract_item_bundle をキャッシュに積む。
     phase2_primary_only: フェーズ2は主キーのみ（既定）。連続実行は False で一括抽出。
+    stage_session: 共有ステージ。gi>=1 で ensure しシート名〜抽出で同一 io を再利用。
     戻り値第4要素は値列と同長のツールチップ（同一列インデックス）。不要時は None。
     progress_hook: セル座標系で phase_slot_index>=2 の抽出ループ進捗 (done, total)。名前取得系では未使用。
+    stage_progress_hook: UNC ステージコピー進捗 (done, total, file_name)。
     """
     item_id = str(item.get("id") or "item")
     item_name = str(item.get("name") or item_id or "項目")
@@ -675,8 +906,17 @@ def scenario_debug_phase_result(
         summary = [na0, "-", "-", "-", "-"]
         return summary, colvals, events, [None] * len(colvals)
 
+    read_map: dict[str, str] | None = None
+    if stage_session is not None and phase_slot_index >= 1:
+        read_map = stage_session.ensure(
+            allowed,
+            scan_root=scan_root,
+            stage_progress_hook=stage_progress_hook,
+            cancel_check=cancel_check,
+        )
+
     if phase_slot_index == 1:
-        colvals = _sheet_column_preview(s0, allowed, max_rows)
+        colvals = _sheet_column_preview(s0, allowed, max_rows, read_map=read_map)
         summary = [nfs0, na0, "-", "-", "-"]
         return summary, colvals, events, [None] * len(colvals)
 
@@ -689,6 +929,10 @@ def scenario_debug_phase_result(
         progress_hook=progress_hook,
         phase2_primary_only=phase2_primary_only,
         max_primary_rows=max_rows,
+        scan_root=scan_root,
+        stage_progress_hook=stage_progress_hook,
+        cancel_check=cancel_check,
+        read_map=read_map,
     )
 
     filtered_paths = [fp for fp in paths if fp in cache]
@@ -912,10 +1156,6 @@ def _extract_link_join_across_sheets(
     return out
 
 
-_DBG_FULL_EXTRACT = "_dbg_full_extract"
-_DBG_PRIMARY_ONLY = "_dbg_primary_only"
-
-
 def _mark_dbg_full_extract(bundle: dict[str, Any]) -> dict[str, Any]:
     bundle[_DBG_FULL_EXTRACT] = True
     return bundle
@@ -1127,12 +1367,16 @@ def _sheet_column_preview(
     s0: dict[str, Any],
     file_paths: list[str],
     max_rows: int,
+    *,
+    read_map: dict[str, str] | None = None,
 ) -> list[str]:
     """ファイルごとに一致シートを左→右で列挙（複数は ', ' 結合）。"""
+    rm = read_map or {}
     out: list[str] = []
     for fp in file_paths:
         if len(out) >= max_rows:
             break
+        io_fp = rm.get(fp, fp)
         suffix = Path(fp).suffix.lower()
         if suffix == ".xls":
             from svc.data_agg_xls_io import (
@@ -1147,19 +1391,19 @@ def _sheet_column_preview(
             sn = str(s0.get("sheet_name") or "").strip()
             p0 = source_ui_block(s0) or {}
             rule = str(p0.get("sheet_rule") or "")
-            names = list_xls_sheet_names(fp)
+            names = list_xls_sheet_names(io_fp)
             if not names:
                 out.append("（.xls読取失敗）")
                 continue
             matched = resolve_all_sheet_names_by_rule(names, rule, sn)
             out.append(", ".join(matched) if matched else SHEET_MISS_LABEL)
             continue
-        sheets = _list_matching_sheet_names(fp, s0)
+        sheets = _list_matching_sheet_names(io_fp, s0)
         if sheets is None:
             sn = str(s0.get("sheet_name") or "").strip()
             p0 = source_ui_block(s0) or {}
             rule = str(p0.get("sheet_rule") or "")
-            one = _resolve_actual_sheet_name(fp, rule, sn)
+            one = _resolve_actual_sheet_name(io_fp, rule, sn)
             out.append(one if one else SHEET_MISS_LABEL)
             continue
         if not sheets:

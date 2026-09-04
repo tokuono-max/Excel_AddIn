@@ -863,8 +863,10 @@ _MASTER_DEBUG_BATCH_UI_PHASE_COUNT = 7
 # シナリオデバッグ: 連携(3)／結合(4)フェーズで、検出ファイルがこの件数以上のときだけファイル単位進捗を表示
 # （SCREENS.DEBUG.SCENARIO_PROGRESS_MIN_FILES で上書き可。0＝閾値なしで常に進捗フック）
 SCENARIO_PROGRESS_MIN_FILES = 15
+_SCENARIO_PROGRESS_PHASE_MSGPRIMARY = "主キーを取得中"
 _SCENARIO_PROGRESS_PHASE_MSGLINK = "連携キーを取得中"
 _SCENARIO_PROGRESS_PHASE_MSGJOIN = "結合キーを取得中"
+_SCENARIO_PROGRESS_PHASE_MSGSTAGE = "ネットワークからマウント中"
 
 
 def _scenario_progress_min_files_from_cfg(cfg: dict[str, Any]) -> int:
@@ -960,6 +962,9 @@ class DataAggDebugDialog(QDialog):
         self._debug_scan_paths: list[str] = list(scan_paths or [])
         self._scan_root: str | None = (str(scan_root).strip() or None) if scan_root else None
         self._scenario_bundle_caches: dict[int, dict[str, dict[str, Any]]] = {}
+        from svc.svc_data_agg_debug_run import ScenarioDebugStageSession  # noqa: WPS433
+
+        self._scenario_stage_session = ScenarioDebugStageSession()
         self._scenario_link_prefetch_gen: int = 0
         self._scenario_link_prefetch_thread: threading.Thread | None = None
         self._scenario_link_prefetch_cancel = threading.Event()
@@ -3612,7 +3617,8 @@ class DataAggDebugDialog(QDialog):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._continuous_busy = False
         self._continuous_steps_left = 0
-        self._cancel_scenario_link_prefetch(join=False)
+        self._cancel_scenario_link_prefetch(join=True)
+        self._scenario_stage_session_clear(join_prefetch=False)
         self._bump_mpv_prefetch_cancel()
         self._mpv_close_item_wb_frame()
         self._mpv_try_flush_pending_wb_frames()
@@ -4283,7 +4289,8 @@ class DataAggDebugDialog(QDialog):
         return {}
 
     def _full_reset(self, keep_selection: bool) -> None:
-        self._cancel_scenario_link_prefetch(join=False)
+        self._cancel_scenario_link_prefetch(join=True)
+        self._scenario_stage_session_clear(join_prefetch=False)
         self._bump_mpv_prefetch_cancel()
         self._mpv_close_item_wb_frame()
         self._mpv_try_flush_pending_wb_frames()
@@ -4416,9 +4423,9 @@ class DataAggDebugDialog(QDialog):
         return "-"
 
     def _scenario_wants_file_progress(self, phase_gi: int, n_paths: int) -> bool:
-        """シナリオモードは常時進捗表示し、連携・結合フェーズでは常にファイル単位更新も出す。"""
+        """主キー・連携・結合はファイル単位で進捗を更新する（止まって見えるのを防ぐ）。"""
         _ = n_paths
-        return int(phase_gi) in (3, 4)
+        return int(phase_gi) in (2, 3, 4)
 
     def _show_scenario_step_progress_start(
         self,
@@ -4440,29 +4447,96 @@ class DataAggDebugDialog(QDialog):
         )
 
     def _scenario_file_progress_phase_message(self, phase_gi: int) -> str:
-        return (
-            _SCENARIO_PROGRESS_PHASE_MSGLINK
-            if int(phase_gi) == 3
-            else _SCENARIO_PROGRESS_PHASE_MSGJOIN
-        )
+        gi = int(phase_gi)
+        if gi == 2:
+            return _SCENARIO_PROGRESS_PHASE_MSGPRIMARY
+        if gi == 3:
+            return _SCENARIO_PROGRESS_PHASE_MSGLINK
+        return _SCENARIO_PROGRESS_PHASE_MSGJOIN
 
     def _scenario_make_file_progress_hook(
         self, phase_msg: str
-    ) -> Callable[[int, int], None]:
+    ) -> Callable[..., None]:
         wt = self._scenario_progress_window_title()
 
-        def hook(done: int, total: int) -> None:
+        def hook(done: int, total: int, io_path: str = "") -> None:
+            from pathlib import Path
+
+            from svc.data_agg_progress_mark import (  # noqa: WPS433
+                PROGRESS_MARK_LOC,
+                progress_io_ref_mark,
+                progress_phase_with_mark,
+            )
+
             n = max(1, int(total))
             d = max(0, min(n, int(done)))
+            io_s = str(io_path or "").strip()
+            try:
+                mark = progress_io_ref_mark(io_s) if io_s else PROGRESS_MARK_LOC
+            except Exception:
+                mark = PROGRESS_MARK_LOC
+            cur_name = Path(io_s).name if io_s else ""
+            phase = progress_phase_with_mark(
+                phase_msg, mark=mark, cur_file=cur_name
+            )
+            detail = "ファイル %s/%s" % (d, n) if n > 0 else ""
+            if cur_name:
+                detail = "%s — %s" % (detail, cur_name) if detail else cur_name
             self._show_run_progress(
-                phase_msg,
+                phase,
                 d,
                 n,
                 window_title=wt,
-                detail="ファイル %s/%s" % (d, n) if n > 0 else "",
+                detail=detail,
+                current_file=cur_name,
             )
 
         return hook
+
+    def _scenario_make_stage_progress_hook(
+        self,
+    ) -> Callable[[int, int, str], None]:
+        """UNC マウント（ステージ）中の進捗。本番／マスタと同じ [UNC] 文頭。"""
+        wt = self._scenario_progress_window_title()
+
+        def hook(done: int, total: int, fname: str) -> None:
+            from svc.data_agg_progress_mark import (  # noqa: WPS433
+                PROGRESS_MARK_UNC,
+                progress_phase_with_mark,
+            )
+
+            n = max(1, int(total))
+            d = max(0, min(n, int(done)))
+            name = str(fname or "").strip()
+            phase = progress_phase_with_mark(
+                _SCENARIO_PROGRESS_PHASE_MSGSTAGE,
+                mark=PROGRESS_MARK_UNC,
+                cur_file=name,
+            )
+            detail = "マウント %s/%s" % (d, n)
+            if name:
+                detail = "%s — %s" % (detail, name)
+            self._show_run_progress(
+                phase,
+                d,
+                n,
+                window_title=wt,
+                detail=detail,
+                current_file=name,
+            )
+
+        return hook
+
+    def _scenario_stage_session_clear(self, *, join_prefetch: bool = True) -> None:
+        """共有ステージ破棄。prefetch が TEMP を読んでいる間は join してから clear。"""
+        if join_prefetch:
+            self._cancel_scenario_link_prefetch(join=True)
+        sess = getattr(self, "_scenario_stage_session", None)
+        if sess is not None:
+            try:
+                sess.clear()
+            except Exception:
+                pass
 
     def _reload_left_table(self) -> None:
         self.left_table.blockSignals(True)
@@ -4537,7 +4611,8 @@ class DataAggDebugDialog(QDialog):
             return
         if self._mode == 0:
             if r != self._sc_idx:
-                self._cancel_scenario_link_prefetch(join=False)
+                self._cancel_scenario_link_prefetch(join=True)
+                self._scenario_stage_session_clear(join_prefetch=False)
                 self._persist_scenario_state()
                 self._sc_idx = r
                 self._load_scenario_state(self._sc_idx)
@@ -9940,6 +10015,8 @@ class DataAggDebugDialog(QDialog):
         item_id = str(item.get("id") or "item")
         cancel_ev = self._scenario_link_prefetch_cancel
         bridge = self._scenario_link_prefetch_bridge
+        scan_root = str(getattr(self, "_scan_root", None) or "") or None
+        sess = self._scenario_stage_session
 
         def _cancel_check(*, force: bool = False) -> None:
             from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
@@ -9955,12 +10032,24 @@ class DataAggDebugDialog(QDialog):
                     fill_scenario_link_join_after_primary,
                 )
 
+                # フェーズ側 ensure(allowed) と揃える。cache キー⊆カバーなら再コピーしない。
+                # 全 scan_paths で ensure するとフィルタ外パスで和集合再構築が走る。
+                ensure_paths = [fp for fp in cache.keys() if str(fp or "").strip()]
+                if not ensure_paths:
+                    ensure_paths = list(paths)
+                read_map = sess.ensure(
+                    ensure_paths,
+                    scan_root=scan_root,
+                    cancel_check=_cancel_check,
+                )
                 fill_scenario_link_join_after_primary(
                     item,
                     paths,
                     cache,
                     item_id,
                     cancel_check=_cancel_check,
+                    scan_root=scan_root,
+                    read_map=read_map,
                 )
             except DataAggCancelled:
                 pass
@@ -9980,7 +10069,8 @@ class DataAggDebugDialog(QDialog):
         th.start()
 
     def _clear_current_scenario_results_only(self) -> None:
-        self._cancel_scenario_link_prefetch(join=False)
+        self._cancel_scenario_link_prefetch(join=True)
+        self._scenario_stage_session_clear(join_prefetch=False)
         self._scenario_bundle_caches.pop(self._sc_idx, None)
         self._phase_idx = 0
         self._summary_rows.clear()
@@ -10081,10 +10171,13 @@ class DataAggDebugDialog(QDialog):
                 cache = self._scenario_bundle_caches.setdefault(self._sc_idx, {})
                 n_scan = len(self._debug_scan_paths or [])
                 prog_hook: Callable[[int, int], None] | None = None
+                stage_hook: Callable[[int, int, str], None] | None = None
                 if self._scenario_wants_file_progress(gi, n_scan):
                     prog_hook = self._scenario_make_file_progress_hook(
                         self._scenario_file_progress_phase_message(gi)
                     )
+                if int(gi) >= 1:
+                    stage_hook = self._scenario_make_stage_progress_hook()
                 continuous = bool(getattr(self, "_continuous_busy", False))
                 if gi >= 3:
                     self._cancel_scenario_link_prefetch(join=True)
@@ -10099,6 +10192,8 @@ class DataAggDebugDialog(QDialog):
                         name_extract_debug_labels=self._cfg.get("NAME_EXTRACT_DEBUG"),
                         progress_hook=prog_hook,
                         phase2_primary_only=not continuous,
+                        stage_progress_hook=stage_hook,
+                        stage_session=self._scenario_stage_session,
                     )
                 finally:
                     self._close_run_progress()
