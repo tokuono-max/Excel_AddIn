@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
@@ -12,6 +15,8 @@ from svc.svc_data_agg import (  # noqa: E402
     _apply_join_key_search_write,
     _batch_file_extract_and_merge,
     _build_cross_file_join_search_plan,
+    _build_join_search_index,
+    _cross_join_should_use_emit_driven,
     _join_search_pool_scope,
     _join_search_rows_for_slice_with_host_supplement,
     _row_satisfies_join_and,
@@ -449,3 +454,281 @@ def test_batch_extract_skips_items_without_matching_file_pattern(tmp_path: Path)
     )
     assert join_compare_display_key((res.bundles[0].get("primary_values") or [])[0]) == "HOSTVAL"
     assert res.bundles[1] == {}
+
+
+def test_cross_join_emit_driven_gate_auto_threshold(monkeypatch: Any) -> None:
+    idx = _build_join_search_index(
+        [{"K": "a", "Out": None}],
+        [{"item": "K"}],
+    )
+    monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN", "auto")
+    monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN_MIN_SLICES", "2000")
+    assert not _cross_join_should_use_emit_driven(
+        cross_file=True,
+        stacked_join=False,
+        n_join=232,
+        search_pool_len=15710,
+        join_index=idx,
+    )
+    # ホスト ≫ emit
+    assert _cross_join_should_use_emit_driven(
+        cross_file=True,
+        stacked_join=False,
+        n_join=47076,
+        search_pool_len=15710,
+        join_index=idx,
+    )
+    # ホスト ＜ emit でも閾値以上なら発火（PT / ダミーQR 年次）
+    assert _cross_join_should_use_emit_driven(
+        cross_file=True,
+        stacked_join=False,
+        n_join=4958,
+        search_pool_len=15710,
+        join_index=idx,
+    )
+    assert not _cross_join_should_use_emit_driven(
+        cross_file=True,
+        stacked_join=True,
+        n_join=47076,
+        search_pool_len=15710,
+        join_index=idx,
+    )
+    monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN", "off")
+    assert not _cross_join_should_use_emit_driven(
+        cross_file=True,
+        stacked_join=False,
+        n_join=47076,
+        search_pool_len=15710,
+        join_index=idx,
+    )
+
+
+def test_join_search_rows_for_slice_indexed_no_list_copy() -> None:
+    """索引ヒットは共有参照を返し、毎スライスの list() コピーをしない。"""
+    from svc.svc_data_agg import (
+        _join_cell_compare_norm,
+        _join_search_rows_for_slice_indexed,
+    )
+
+    rows = [{"K": "a", "Out": None}, {"K": "a", "Out": None}]
+    idx_cols, idx_map = _build_join_search_index(rows, [{"item": "K"}])
+    key = (_join_cell_compare_norm("a"),)
+    stored = idx_map[key]
+    hit = _join_search_rows_for_slice_indexed(idx_cols, idx_map, {"K": ["a"]}, 0)
+    assert hit is stored
+    assert _join_search_rows_for_slice_indexed(idx_cols, idx_map, {"K": ["missing"]}, 0) == []
+
+
+def _clone_join_pool(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(r) for r in pool]
+
+
+def test_emit_driven_cross_join_matches_classic_paired_fill_in(
+    monkeypatch: Any,
+) -> None:
+    """同一キー複数ホスト寄与でも fill_in の最終状態が classic と一致する。"""
+    item = {
+        "name": "出荷番号",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "file_pattern": "出荷指示書",
+                    "join_defs": [
+                        {"item": "出荷年月日", "cell": "A1"},
+                        {"item": "型名", "cell": "G1"},
+                    ],
+                    "link_defs": [
+                        {"item": "エンドユーザ", "cell": "C1", "mode": "セル座標"},
+                    ],
+                },
+            }
+        ],
+    }
+    # emit（比較側）
+    emit = [
+        {
+            "出荷年月日": "20220101",
+            "型名": "T1",
+            "出荷番号": None,
+            "エンドユーザ": None,
+            "__file_path": r"C:\光.xlsx",
+            "__iter_index": 0,
+        },
+        {
+            "出荷年月日": "20220101",
+            "型名": "T1",
+            "出荷番号": None,
+            "エンドユーザ": None,
+            "__file_path": r"C:\光.xlsx",
+            "__iter_index": 1,
+        },
+        {
+            "出荷年月日": "20220102",
+            "型名": "T2",
+            "出荷番号": "KEEP",
+            "エンドユーザ": "OLD",
+            "__file_path": r"C:\光.xlsx",
+            "__iter_index": 2,
+        },
+    ]
+    host_rows = [
+        {
+            "出荷年月日": "20220101",
+            "型名": "T1",
+            "出荷番号": "H0",
+            "__file_path": r"C:\指示.xlsx",
+            "__iter_index": 0,
+        },
+        {
+            "出荷年月日": "20220101",
+            "型名": "T1",
+            "出荷番号": "H1",
+            "__file_path": r"C:\指示.xlsx",
+            "__iter_index": 1,
+        },
+    ]
+    bundle = {
+        "primary_values": ["S0", "S1", "S2"],
+        "join_values": {
+            "出荷年月日": ["20220101", "20220101", "20220102"],
+            "型名": ["T1", "T1", "T2"],
+        },
+        "link_values": {"エンドユーザ": ["U0", "U1", "U2"]},
+    }
+    join_defs = [{"item": "出荷年月日"}, {"item": "型名"}]
+    header_set = {"出荷番号", "出荷年月日", "型名", "エンドユーザ"}
+
+    def _run(path_mode: str) -> list[dict[str, Any]]:
+        monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN", path_mode)
+        pool = _clone_join_pool(emit + host_rows)
+        emit_part = pool[: len(emit)]
+        host_part = pool[len(emit) :]
+        join_index = _build_join_search_index(emit_part, join_defs)
+        _apply_join_key_search_write(
+            pool,
+            item,
+            "出荷番号",
+            bundle,
+            "fill_in",
+            search_pool=emit_part,
+            cross_file=True,
+            join_index=join_index,
+            join_host_rows=host_part,
+            header_set=header_set,
+        )
+        return pool
+
+    classic = _run("off")
+    driven = _run("force")
+    assert len(classic) == len(driven)
+    for a, b in zip(classic, driven):
+        assert a.get("出荷番号") == b.get("出荷番号")
+        assert a.get("エンドユーザ") == b.get("エンドユーザ")
+    # fill_in: 先勝ち → T1 行は S0 / U0、KEEP は維持
+    assert classic[0]["出荷番号"] == "S0"
+    assert classic[0]["エンドユーザ"] == "U0"
+    assert classic[2]["出荷番号"] == "KEEP"
+    assert classic[2]["エンドユーザ"] == "OLD"
+
+
+def test_emit_driven_cross_join_matches_classic_1prim_overwrite(
+    monkeypatch: Any,
+) -> None:
+    item = {
+        "name": "Out",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "join_defs": [{"item": "KeyCol", "cell": "X1"}],
+                    "link_defs": [
+                        {"item": "L", "cell": "Y1", "mode": "セル座標"},
+                    ],
+                },
+            }
+        ],
+    }
+    emit = [
+        {"KeyCol": "a", "Out": None, "L": None, "__file_path": r"C:\e.xlsx"},
+        {"KeyCol": "b", "Out": None, "L": None, "__file_path": r"C:\e.xlsx"},
+    ]
+    bundle = {
+        "primary_values": ["MAIN"],
+        "join_values": {"KeyCol": ["a", "b", "a"]},
+        "link_values": {"L": ["L0", "L1", "L2"]},
+    }
+    def _run(mode: str) -> list[dict[str, Any]]:
+        monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN", mode)
+        pool = _clone_join_pool(emit)
+        join_index = _build_join_search_index(pool, [{"item": "KeyCol"}])
+        _apply_join_key_search_write(
+            pool,
+            item,
+            "Out",
+            bundle,
+            "overwrite",
+            search_pool=pool,
+            cross_file=True,
+            join_index=join_index,
+            join_host_rows=[],
+            header_set={"Out", "KeyCol", "L"},
+        )
+        return pool
+
+    classic = _run("off")
+    driven = _run("force")
+    assert classic[0]["Out"] == driven[0]["Out"] == "MAIN"
+    assert classic[1]["Out"] == driven[1]["Out"] == "MAIN"
+    # overwrite: 同一キー a は L0→L2 で最終 L2
+    assert classic[0]["L"] == driven[0]["L"] == "L2"
+    assert classic[1]["L"] == driven[1]["L"] == "L1"
+
+
+def test_emit_driven_cancel_during_by_key_build(monkeypatch: Any) -> None:
+    """emit_driven の by_key 構築中も poll され、途中中止できる。"""
+    from svc.data_agg_cancel import DataAggCancelled, batch_cancel_scope
+
+    monkeypatch.setenv("HC_DATA_AGG_JOIN_EMIT_DRIVEN", "force")
+    n = 40
+    emit = [{"K": "k%s" % i, "Out": None, "__file_path": r"C:\e.xlsx"} for i in range(n)]
+    item = {
+        "name": "Out",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "file_pattern": "host",
+                    "join_defs": [{"item": "K", "cell": "A1"}],
+                },
+            }
+        ],
+    }
+    bundle = {
+        "primary_values": ["MAIN"],
+        "join_values": {"K": ["k%s" % i for i in range(n)]},
+    }
+    polls = {"n": 0}
+
+    def _chk(*, force: bool = False) -> None:
+        polls["n"] += 1
+        if polls["n"] >= 8:
+            raise DataAggCancelled()
+
+    join_index = _build_join_search_index(emit, [{"item": "K"}])
+    with batch_cancel_scope(_chk):
+        with pytest.raises(DataAggCancelled):
+            _apply_join_key_search_write(
+                emit,
+                item,
+                "Out",
+                bundle,
+                "fill_in",
+                search_pool=emit,
+                cross_file=True,
+                join_index=join_index,
+                join_host_rows=[],
+            )
+    assert polls["n"] >= 8
+    # 途中中止のため全行が埋まっている必要はない
+    assert sum(1 for r in emit if r.get("Out") == "MAIN") < n

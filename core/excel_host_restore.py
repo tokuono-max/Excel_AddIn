@@ -12,22 +12,44 @@ logger = get_logger(__name__)
 _XL_CURSOR_DEFAULT = -4143
 
 
-def restore_excel_host_ui_state(parent_hwnd: int, sheet_id: str = "") -> bool:
-    """Interactive / ScreenUpdating / CommandBars / 子 HWND をベストエフォートで復元する。
-
-    svc ワーカー強制終了で suspend_sheet_updates の finally が走らない場合の救済。
-    """
+def unlock_excel_host_window(parent_hwnd: int) -> bool:
+    """Win32 のみで Excel 子 HWND を再有効化（COM なし・OLE 待ちを起こさない）。"""
     ph = int(parent_hwnd or 0)
     if ph <= 0:
         return False
-    restored = False
     try:
         from ui_qt.ui_common import enable_excel_window  # noqa: WPS433
 
         enable_excel_window(ph, True)
-        restored = True
+        return True
     except Exception as ex:
-        logger.debug("[EXCEL_RESTORE] enable_excel_window failed hwnd=%s ex=%r", ph, ex)
+        logger.debug("[EXCEL_RESTORE] unlock_excel_host_window failed hwnd=%s ex=%r", ph, ex)
+        return False
+
+
+def restore_excel_host_ui_state(
+    parent_hwnd: int,
+    sheet_id: str = "",
+    *,
+    com: bool = True,
+) -> bool:
+    """Interactive / ScreenUpdating / CommandBars / 子 HWND をベストエフォートで復元する。
+
+    svc ワーカー強制終了で suspend_sheet_updates の finally が走らない場合の救済。
+    com=False のときは Win32 解除のみ（キャンセル直後の即時復帰用）。
+    """
+    ph = int(parent_hwnd or 0)
+    if ph <= 0:
+        return False
+    restored = unlock_excel_host_window(ph)
+    if not com:
+        if restored:
+            logger.info(
+                "[EXCEL_RESTORE] unlocked(win32) hwnd=%s sheet_id=%r",
+                ph,
+                str(sheet_id or "") or "-",
+            )
+        return restored
     try:
         from core.core_xlc import (  # noqa: WPS433
             excel_try_set_main_commandbars_enabled,

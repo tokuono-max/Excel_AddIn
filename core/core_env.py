@@ -173,6 +173,37 @@ def data_agg_join_dump_enabled() -> bool:
     )
 
 
+def data_agg_join_emit_driven_mode() -> str:
+    """
+    横断結合の emit 駆動経路。
+    - auto（既定）: 閾値を満たすときだけ emit 駆動
+    - off: 常に現行（ホスト軸）経路
+    - force: cross_file かつ非 stacked なら常に emit 駆動（テスト用）
+    """
+    raw = str(
+        get_first("HC_DATA_AGG_JOIN_EMIT_DRIVEN", "DATA_AGG_JOIN_EMIT_DRIVEN") or ""
+    ).strip().lower()
+    if raw in ("0", "off", "false", "no"):
+        return "off"
+    if raw in ("force", "always", "2"):
+        return "force"
+    return "auto"
+
+
+def data_agg_join_emit_driven_min_slices() -> int:
+    """emit 駆動を検討する最小 n_join（auto 時）。"""
+    raw = get_first(
+        "HC_DATA_AGG_JOIN_EMIT_DRIVEN_MIN_SLICES",
+        "DATA_AGG_JOIN_EMIT_DRIVEN_MIN_SLICES",
+        default="2000",
+    )
+    try:
+        v = int(str(raw or "2000").strip())
+        return max(0, min(v, 10_000_000))
+    except ValueError:
+        return 2000
+
+
 def data_agg_join_dump_max_slices() -> int:
     raw = get_first(
         "HC_DIAG_DATA_AGG_JOIN_MAX_SLICES",

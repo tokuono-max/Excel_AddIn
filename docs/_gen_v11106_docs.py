@@ -78,7 +78,7 @@ def new_doc() -> Document:
     styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "游ゴシック")
     pf = styles["Normal"].paragraph_format
     pf.space_after = Pt(6)
-    pf.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+    pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
     return doc
 
 

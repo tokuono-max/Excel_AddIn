@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -146,7 +149,12 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     )
     monkeypatch.setattr(
         "core.excel_host_restore.restore_excel_host_ui_state",
-        lambda hwnd, sheet_id="": called.__setitem__("restore", called["restore"] + 1) or True,
+        lambda hwnd, sheet_id="", **kwargs: called.__setitem__("restore", called["restore"] + 1)
+        or True,
+    )
+    monkeypatch.setattr(
+        "core.excel_host_restore.unlock_excel_host_window",
+        lambda hwnd: True,
     )
 
     ok = force_data_agg_batch_cancel_from_ui(
@@ -164,6 +172,47 @@ def test_force_cancel_appends_event_on_terminate(monkeypatch: pytest.MonkeyPatch
     assert called["restore"] >= 2
     d = __import__("ui_qt.ipc_file", fromlist=["read_pickle"]).read_pickle(progress_path)
     assert isinstance(d, dict) and str(d.get("status", "")).upper() == "CANCEL"
+    assert batch_cancel_tombstone_path(sid, tmp_path).is_file()
+
+
+def test_force_terminate_no_com_skips_event_log_and_com_restore(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """COM なしコアはイベントログ／restore を呼ばない（UI スレッド分離用）。"""
+    from svc.data_agg_cancel import run_data_agg_batch_force_terminate_no_com
+
+    sid = "SHEET_NOCOM"
+    cancel_path = cancel_request_path_data_agg_batch(sid, tmp_path)
+    cancel_path.parent.mkdir(parents=True, exist_ok=True)
+    called = {"append": 0, "restore": 0}
+
+    monkeypatch.setattr(
+        "svc.data_agg_cancel.wait_batch_worker_exit_adaptive",
+        lambda *args, **kwargs: (False, False),
+    )
+    monkeypatch.setattr(
+        "svc.data_agg_cancel.terminate_batch_worker",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "svc.data_agg_cancel.append_cancel_event_log_from_ui",
+        lambda **kwargs: called.__setitem__("append", called["append"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "core.excel_host_restore.restore_excel_host_ui_state",
+        lambda *a, **k: called.__setitem__("restore", called["restore"] + 1) or True,
+    )
+    monkeypatch.setattr("svc.svc_host.ensure_svc_server", lambda: None)
+
+    r = run_data_agg_batch_force_terminate_no_com(
+        cancel_path=cancel_path,
+        ipc_root=tmp_path,
+        cooperative_wait_ms=0,
+    )
+    assert r.get("terminated") is True
+    assert r.get("need_event_log") is True
+    assert called["append"] == 0
+    assert called["restore"] == 0
     assert batch_cancel_tombstone_path(sid, tmp_path).is_file()
 
 
@@ -311,3 +360,64 @@ def test_clear_batch_cancel_tombstone(tmp_path: Path) -> None:
     assert batch_cancel_tombstone_blocks(sid, tmp_path, "r1") is True
     clear_batch_cancel_tombstone(sid, tmp_path)
     assert batch_cancel_tombstone_blocks(sid, tmp_path, "r1") is False
+
+
+def test_abort_pending_futures_cancels_not_started() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from svc.data_agg_cancel import abort_pending_futures
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow() -> str:
+        started.set()
+        release.wait(timeout=5.0)
+        return "done"
+
+    def _queued() -> str:
+        return "queued"
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    fut_run = pool.submit(_slow)
+    assert started.wait(timeout=2.0)
+    fut_q = pool.submit(_queued)
+    abort_pending_futures([fut_run, fut_q], executor=pool, wait=False)
+    assert fut_q.cancelled()
+    release.set()
+
+
+def test_parallel_extract_cancel_aborts_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """キャンセル時に未開始 future を切り、全ファイル完了を待たない。"""
+    from svc import svc_data_agg as mod
+    from svc.data_agg_cancel import DataAggCancelled
+
+    n_calls = {"n": 0}
+    cancel_flag = threading.Event()
+
+    def _fake_merge(*_a, **_k):
+        n_calls["n"] += 1
+        if n_calls["n"] == 1:
+            cancel_flag.set()
+        time.sleep(0.12)
+        return MagicMock()
+
+    monkeypatch.setattr(mod, "_batch_file_extract_and_merge", _fake_merge)
+
+    def _chk(*, force: bool = False) -> None:
+        if cancel_flag.is_set():
+            raise DataAggCancelled()
+
+    paths = ["a.xlsx", "b.xlsx", "c.xlsx", "d.xlsx", "e.xlsx", "f.xlsx"]
+    t0 = time.perf_counter()
+    with pytest.raises(DataAggCancelled):
+        mod._run_batch_files_extract_parallel(
+            paths,
+            workers=2,
+            extract_kwargs={},
+            cancel_check=_chk,
+        )
+    elapsed = time.perf_counter() - t0
+    # wait=False により全件 sleep 完了を待たない
+    assert elapsed < 1.2
+    assert n_calls["n"] <= 4

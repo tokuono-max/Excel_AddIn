@@ -140,3 +140,48 @@ def test_pipeline_ramp_cold_to_target_no_semaphore_error(
         assert len(results) == 24
     finally:
         batch.cleanup()
+
+
+def test_pipeline_cancel_stops_queueing(monkeypatch, tmp_path: Path) -> None:
+    """キャンセル後は extract 投入を止め、未開始 future を打ち切る。"""
+    from svc.data_agg_cancel import DataAggCancelled
+    from svc.data_agg_stage_pipeline import run_stage_extract_pipeline
+
+    files = []
+    for i in range(12):
+        p = tmp_path / ("f%s.xlsx" % i)
+        p.write_bytes(b"x")
+        files.append(str(p.resolve()))
+
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage.path_is_network",
+        lambda _p: True,
+    )
+
+    extract_calls: list[int] = []
+    cancel_after = {"n": 3}
+
+    def _extract(fi: int, io: str, disp: str) -> MagicMock:
+        extract_calls.append(fi)
+        time.sleep(0.05)
+        return MagicMock(name="res_%s" % fi)
+
+    polls = {"n": 0}
+
+    def _chk(*, force: bool = False) -> None:
+        polls["n"] += 1
+        if polls["n"] >= cancel_after["n"]:
+            raise DataAggCancelled()
+
+    with pytest.raises(DataAggCancelled):
+        run_stage_extract_pipeline(
+            files,
+            scan_root=tmp_path,
+            cancel_check=_chk,
+            progress_callback=None,
+            extract_work=_extract,
+            target_workers=2,
+            cold_workers=1,
+            ramp_files=1,
+        )
+    assert len(extract_calls) < 12

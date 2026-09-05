@@ -9,8 +9,9 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 _CANCEL_POLL_INTERVAL_SEC = 0.05
 _COOP_WAIT_INITIAL_MS = 400
@@ -114,6 +115,34 @@ def poll_active_cancel_every(index: int, *, stride: int = 16, force: bool = Fals
     if index % stride != 0:
         return
     poll_active_cancel(force=force)
+
+
+def abort_pending_futures(
+    futures: Iterable[Future[Any]],
+    *,
+    executor: ThreadPoolExecutor | None = None,
+    wait: bool = False,
+) -> None:
+    """
+    協調キャンセル時に未開始 future をキャンセルし、必要なら executor を即時シャットダウンする。
+    実行中ワーカーは止められないが、待ち行列への投入は止める（完走時の正しさは不問）。
+    """
+    for fut in futures:
+        try:
+            fut.cancel()
+        except Exception:
+            pass
+    if executor is None:
+        return
+    try:
+        executor.shutdown(wait=wait, cancel_futures=True)
+    except TypeError:
+        try:
+            executor.shutdown(wait=wait)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def batch_coop_cancel_detected_path(sheet_id: str, ipc_root: Path) -> Path:
@@ -617,51 +646,58 @@ def append_cancel_event_log_from_ui(
         return False
 
 
-def force_data_agg_batch_cancel_from_ui(
+def _resolve_cancel_ipc_root(
+    cancel_path: Path | str,
+    ipc_root: Path | str | None,
+) -> Path:
+    if ipc_root:
+        return Path(ipc_root)
+    try:
+        from core import core_env  # noqa: WPS433
+
+        raw = core_env.ipc_dir_raw()
+        if raw:
+            return Path(raw)
+    except Exception:
+        pass
+    return Path(cancel_path).parent.parent
+
+
+def run_data_agg_batch_force_terminate_no_com(
     *,
     cancel_path: Path | str,
     progress_path: Path | str | None = None,
     ipc_root: Path | str | None = None,
     notify_parent: bool = False,
-    parent_hwnd: int = 0,
-    scenario_id: str = "",
-    scenario_path: str = "",
+    write_progress_cancel: bool = True,
     cooperative_wait_ms: int = _COOP_WAIT_INITIAL_MS,
     cooperative_wait_extended_ms: int = _COOP_WAIT_EXTENDED_MS,
-) -> bool:
+) -> dict[str, Any]:
     """
-    進捗のキャンセル押下: 協調フラグに加え compute ワーカーを強制終了する。
-    ワーカーが協調キャンセルを検知した場合は extended まで自然終了を待ち、kill を避ける。
-    openpyxl 等の長時間ブロック中でも UI から即座に止める。
+    一括キャンセルのファイル／プロセス処理（COM なし）。
+
+    UI スレッドを塞がないよう進捗ダイアログからバックグラウンドで呼ぶ。
+    Excel COM（イベントログ追記・Interactive 復元）は呼び出し側が UI スレッドで行う。
     """
     sid = sheet_id_from_cancel_path(cancel_path)
+    empty: dict[str, Any] = {
+        "ok": False,
+        "sheet_id": "",
+        "terminated": False,
+        "exited_cooperatively": False,
+        "coop_detected": False,
+        "need_event_log": False,
+        "purged_svc_req": 0,
+        "run_id": "",
+    }
     if not sid:
-        return False
-    root: Path | None = None
-    if ipc_root:
-        root = Path(ipc_root)
-    else:
-        try:
-            from core import core_env  # noqa: WPS433
-
-            raw = core_env.ipc_dir_raw()
-            if raw:
-                root = Path(raw)
-        except Exception:
-            pass
-        if root is None:
-            root = Path(cancel_path).parent.parent
-    if progress_path:
+        return empty
+    root = _resolve_cancel_ipc_root(cancel_path, ipc_root)
+    if write_progress_cancel and progress_path:
         try:
             write_progress_cancel_status(Path(progress_path))
         except Exception:
             pass
-    try:
-        from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
-
-        restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
-    except Exception:
-        pass
     exited_cooperatively, coop_detected = wait_batch_worker_exit_adaptive(
         sid,
         root,
@@ -670,39 +706,12 @@ def force_data_agg_batch_cancel_from_ui(
     )
     terminated = False
     if not exited_cooperatively:
-        try:
-            from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
-
-            restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
-        except Exception:
-            pass
         terminated = terminate_batch_worker(sid, root)
     if terminated:
-        try:
-            append_cancel_event_log_from_ui(
-                parent_hwnd=int(parent_hwnd or 0),
-                sheet_id=sid,
-                scenario_id=str(scenario_id or ""),
-                scenario_path=str(scenario_path or ""),
-            )
-        except Exception:
-            pass
         try:
             from svc.svc_host import ensure_svc_server  # noqa: WPS433
 
             ensure_svc_server()
-        except Exception:
-            pass
-    elif exited_cooperatively:
-        # 協調キャンセル: batch_write（abort spill）が tombstone/purge で届かない場合の補完。
-        # batch_write が先に追記済みなら _has_recent_cancel_summary で重複しない。
-        try:
-            append_cancel_event_log_from_ui(
-                parent_hwnd=int(parent_hwnd or 0),
-                sheet_id=sid,
-                scenario_id=str(scenario_id or ""),
-                scenario_path=str(scenario_path or ""),
-            )
         except Exception:
             pass
     active_run_id = ""
@@ -735,19 +744,14 @@ def force_data_agg_batch_cancel_from_ui(
         except Exception:
             pass
     clear_batch_coop_cancel_detected(sid, root)
-    try:
-        from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
-
-        restore_excel_host_ui_state(int(parent_hwnd or 0), sid)
-    except Exception:
-        pass
+    need_event_log = bool(terminated or exited_cooperatively)
     try:
         from core.core_log import get_logger  # noqa: WPS433
 
         get_logger(__name__).info(
             "[DATA_AGG] batch force terminate from UI sheet_id=%s terminated=%s "
             "cooperative_done=%s coop_detected=%s wait_ms=%s wait_ext_ms=%s "
-            "progress=%s purged_svc_req=%s run_id=%s",
+            "progress=%s purged_svc_req=%s run_id=%s com=deferred",
             sid,
             terminated,
             exited_cooperatively,
@@ -760,4 +764,79 @@ def force_data_agg_batch_cancel_from_ui(
         )
     except Exception:
         pass
+    return {
+        "ok": True,
+        "sheet_id": sid,
+        "terminated": terminated,
+        "exited_cooperatively": exited_cooperatively,
+        "coop_detected": coop_detected,
+        "need_event_log": need_event_log,
+        "purged_svc_req": purged,
+        "run_id": active_run_id,
+    }
+
+
+def force_data_agg_batch_cancel_from_ui(
+    *,
+    cancel_path: Path | str,
+    progress_path: Path | str | None = None,
+    ipc_root: Path | str | None = None,
+    notify_parent: bool = False,
+    parent_hwnd: int = 0,
+    scenario_id: str = "",
+    scenario_path: str = "",
+    cooperative_wait_ms: int = _COOP_WAIT_INITIAL_MS,
+    cooperative_wait_extended_ms: int = _COOP_WAIT_EXTENDED_MS,
+    apply_com_side_effects: bool = True,
+) -> bool:
+    """
+    進捗のキャンセル押下互換 API: 協調待ちのうえ compute ワーカーを強制終了する。
+
+    既定では Win32 即時解除 →（wait/kill・ファイル処理）→ COM 復元／イベントログ。
+    進捗ダイアログ本番経路は run_data_agg_batch_force_terminate_no_com を非同期実行し、
+    COM は UI 側で遅延適用する（本関数の同期呼び出しでは UI を塞ぎ得る）。
+    """
+    sid = sheet_id_from_cancel_path(cancel_path)
+    if not sid:
+        return False
+    ph = int(parent_hwnd or 0)
+    try:
+        from core.excel_host_restore import unlock_excel_host_window  # noqa: WPS433
+
+        unlock_excel_host_window(ph)
+    except Exception:
+        pass
+    result = run_data_agg_batch_force_terminate_no_com(
+        cancel_path=cancel_path,
+        progress_path=progress_path,
+        ipc_root=ipc_root,
+        notify_parent=notify_parent,
+        write_progress_cancel=True,
+        cooperative_wait_ms=cooperative_wait_ms,
+        cooperative_wait_extended_ms=cooperative_wait_extended_ms,
+    )
+    terminated = bool(result.get("terminated"))
+    if apply_com_side_effects:
+        try:
+            from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
+
+            restore_excel_host_ui_state(ph, sid, com=True)
+        except Exception:
+            pass
+        if result.get("need_event_log"):
+            try:
+                append_cancel_event_log_from_ui(
+                    parent_hwnd=ph,
+                    sheet_id=sid,
+                    scenario_id=str(scenario_id or ""),
+                    scenario_path=str(scenario_path or ""),
+                )
+            except Exception:
+                pass
+        try:
+            from core.excel_host_restore import restore_excel_host_ui_state  # noqa: WPS433
+
+            restore_excel_host_ui_state(ph, sid, com=True)
+        except Exception:
+            pass
     return terminated

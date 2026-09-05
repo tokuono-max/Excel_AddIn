@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from core.core_log import get_logger
+from svc.data_agg_cancel import DataAggCancelled, abort_pending_futures
 from svc.data_agg_network_stage import (
     NetworkStageBatch,
     StageProgressCallback,
@@ -79,6 +80,7 @@ def run_stage_extract_pipeline(
                 pass
 
     extract_pool = ThreadPoolExecutor(max_workers=target_workers)
+    extract_aborted = False
 
     def _extract_job(fi: int, io_path: str, display_path: str) -> tuple[int, Any]:
         with extract_sem:
@@ -89,6 +91,9 @@ def run_stage_extract_pipeline(
         return fi, res
 
     def _on_file_staged(idx: int, disp: str, io_path: str) -> None:
+        # ステージ完了後の投入直前でも中止を見て、待ち行列を増やさない
+        if cancel_check is not None:
+            cancel_check(force=True)
         fi = int(idx) + 1
         fut = extract_pool.submit(_extract_job, fi, io_path, disp)
         pending_futs.append(fut)
@@ -110,12 +115,22 @@ def run_stage_extract_pipeline(
             fi, res = fut.result()
             with results_lock:
                 results[int(fi)] = res
+    except DataAggCancelled:
+        extract_aborted = True
+        abort_pending_futures(pending_futs, executor=extract_pool, wait=False)
+        if batch is not None:
+            batch.cleanup()
+        raise
     except BaseException:
+        extract_aborted = True
+        abort_pending_futures(pending_futs, executor=None)
+        extract_pool.shutdown(wait=True)
         if batch is not None:
             batch.cleanup()
         raise
     finally:
-        extract_pool.shutdown(wait=True)
+        if not extract_aborted:
+            extract_pool.shutdown(wait=True)
 
     assert batch is not None
     return batch, results

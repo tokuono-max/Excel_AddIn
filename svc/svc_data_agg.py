@@ -1214,6 +1214,8 @@ def _join_search_rows_for_slice_with_host_supplement(
     else:
         side = []
     if not host_rows:
+        # side は索引共有参照のため、呼び出し側へ渡す前にコピーしない
+        #（書込みは行 dict のみ。リスト構造は変更しない前提）
         return side
     host = _join_search_rows_for_slice(host_rows, join_defs, jv, targets, k)
     if not side:
@@ -1487,6 +1489,10 @@ def _join_search_rows_for_slice_indexed(
     join_values: dict[str, Any],
     k: int,
 ) -> list[dict[str, Any]]:
+    """
+    索引ヒット行を返す。戻り list は索引内部の共有参照（構造の破壊的変更禁止）。
+    行 dict への書込みは可。リストへ append/extend する場合は呼び出し側で copy すること。
+    """
     if not index_cols:
         return []
     key_parts: list[str] = []
@@ -1494,7 +1500,8 @@ def _join_search_rows_for_slice_indexed(
         vals = join_values.get(c) or []
         ev = vals[k] if isinstance(vals, list) and k < len(vals) else None
         key_parts.append(_join_cell_compare_norm(ev))
-    return list(index_map.get(tuple(key_parts), []))
+    hit = index_map.get(tuple(key_parts))
+    return hit if hit is not None else []
 
 
 JoinSearchIndex = tuple[list[str], dict[tuple[str, ...], list[dict[str, Any]]]]
@@ -1841,6 +1848,278 @@ def _join_dump_post_merge_file(
         )
 
 
+_CROSS_JOIN_EMIT_DRIVEN_PROGRESS_STRIDE = 64
+
+
+def _cross_join_should_use_emit_driven(
+    *,
+    cross_file: bool,
+    stacked_join: bool,
+    n_join: int,
+    search_pool_len: int,
+    join_index: Optional[JoinSearchIndex],
+) -> bool:
+    """
+    横断結合でホスト軸ループの代わりに emit/キー軸経路を使うか。
+    stacked_join・非 cross・索引なしは常に False（現行維持）。
+    auto 時は n_join が閾値以上なら発火（search_pool 大小は問わない）。
+    """
+    if not cross_file or stacked_join:
+        return False
+    if n_join < 1:
+        return False
+    if join_index is None:
+        return False
+    idx_cols, idx_map = join_index
+    if not idx_cols or not isinstance(idx_map, dict):
+        return False
+    from core import core_env  # noqa: WPS433
+
+    mode = core_env.data_agg_join_emit_driven_mode()
+    if mode == "off":
+        return False
+    if mode == "force":
+        return True
+    min_sl = core_env.data_agg_join_emit_driven_min_slices()
+    if n_join < int(min_sl):
+        return False
+    # search_pool_len は診断・将来拡張用（発火判定には使わない）
+    _ = search_pool_len
+    return True
+
+
+def _join_key_tuple_from_values(
+    index_cols: list[str],
+    join_values: dict[str, Any],
+    k: int,
+) -> tuple[str, ...]:
+    parts: list[str] = []
+    for c in index_cols:
+        vals = join_values.get(c) or []
+        ev = vals[k] if isinstance(vals, list) and k < len(vals) else None
+        parts.append(_join_cell_compare_norm(ev))
+    return tuple(parts)
+
+
+def _join_key_tuple_from_row(
+    index_cols: list[str],
+    row: dict[str, Any],
+) -> tuple[str, ...]:
+    return tuple(_join_cell_compare_norm(row.get(c)) for c in index_cols)
+
+
+def _collapse_host_contribs_for_write_mode(
+    write_mode: str,
+    contribs: list[tuple[int, str]],
+    link_targets: list[str],
+    link_values: dict[str, Any],
+) -> list[tuple[int, str]] | None:
+    """
+    同一 key への複数寄与を、write_mode 上の最終結果と同値になる最小列に畳む。
+    prepend / append_end 等は順序依存のため None（畳み込みしない）。
+    """
+    from svc.svc_data_agg_write import (  # noqa: WPS433
+        MODE_APPEND,
+        MODE_DUPLICATE_APPEND,
+        MODE_FILL_IN,
+        MODE_OVERWRITE,
+    )
+
+    if not contribs:
+        return []
+    m = (write_mode or "").strip().lower()
+    if m in (MODE_OVERWRITE, MODE_APPEND, MODE_DUPLICATE_APPEND):
+        # classic は空 pk を skip。最後に実際適用された k のみが残る。
+        return [contribs[-1]]
+    if m == MODE_FILL_IN:
+        # 各セルは「最初の非空」が残る。pk / link それぞれ先勝ちで埋まる寄与だけ残す。
+        chosen_pk = contribs[0][1]
+        out: list[tuple[int, str]] = []
+        need_pk = True
+        need_links = {t: True for t in link_targets}
+        for k, pk_write in contribs:
+            take = False
+            if need_pk and pk_write:
+                take = True
+                need_pk = False
+            if link_targets:
+                for tgt in link_targets:
+                    if not need_links.get(tgt):
+                        continue
+                    vals = link_values.get(tgt) or []
+                    new_v = vals[k] if isinstance(vals, list) and k < len(vals) else None
+                    if new_v is not None and new_v != "":
+                        take = True
+                        need_links[tgt] = False
+            if take:
+                out.append((k, pk_write if pk_write else chosen_pk))
+            if not need_pk and not any(need_links.values()):
+                break
+        return out or [contribs[0]]
+    return None
+
+
+def _apply_cross_join_emit_driven(
+    *,
+    item_col: str,
+    write_mode: str,
+    prim_vals: list[Any],
+    join_values: dict[str, Any],
+    n_prim: int,
+    n_join: int,
+    join_index: JoinSearchIndex,
+    join_host_rows: Optional[list[dict[str, Any]]],
+    link_targets: list[str],
+    link_values: dict[str, Any],
+    join_slice_progress: Optional[Callable[[int, int], None]],
+    join_dump_ctx: Optional[dict[str, Any]],
+    _jd_on: bool,
+    _pfx: str,
+    search_pool_len: int,
+) -> None:
+    """
+    横断結合の同値高速経路: ホスト寄与を key ごとにまとめ、emit(+host補完)へ k 昇順で merge。
+    現行ホスト軸ループと同じ最終セル状態になること。
+    """
+    from svc.data_agg_cancel import poll_active_cancel, poll_active_cancel_every  # noqa: WPS433
+    from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: WPS433
+
+    idx_cols, idx_map = join_index
+    t0 = time.perf_counter()
+    single_pk = ""
+    if n_prim == 1:
+        n_op = n_join
+        pk0 = prim_vals[0] if prim_vals else None
+        single_pk = (
+            _coerce_cell_scalar_to_full_text(pk0).strip() if pk0 is not None else ""
+        )
+        if not single_pk:
+            if _jd_on:
+                _agg_diag.info(
+                    "[DATA_AGG_JOIN_DUMP] phase=skip %s reason=primary_empty item_col=%s path=emit_driven",
+                    _pfx,
+                    item_col,
+                )
+            return
+    else:
+        n_op = min(n_prim, n_join)
+
+    # key → [(k, pk_write), ...]（k 昇順）
+    # 構築中も classic のスライス毎 force ポールに近づけ、長い無ポール区間を作らない。
+    by_key: dict[tuple[str, ...], list[tuple[int, str]]] = {}
+    key_order: list[tuple[str, ...]] = []
+    for k in range(n_op):
+        poll_active_cancel(force=True)
+        if n_prim == 1:
+            pk_write = single_pk
+        else:
+            pk = prim_vals[k]
+            pk_write = (
+                _coerce_cell_scalar_to_full_text(pk).strip() if pk is not None else ""
+            )
+            if not pk_write:
+                continue
+        key = _join_key_tuple_from_values(idx_cols, join_values, k)
+        if key not in by_key:
+            by_key[key] = []
+            key_order.append(key)
+        by_key[key].append((k, pk_write))
+
+    host_by_key: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    if join_host_rows:
+        for hi, r in enumerate(join_host_rows):
+            poll_active_cancel_every(hi, stride=32, force=True)
+            if not isinstance(r, dict):
+                continue
+            hk = _join_key_tuple_from_row(idx_cols, r)
+            host_by_key.setdefault(hk, []).append(r)
+
+    n_write = 0
+    n_link = 0
+    n_keys = len(key_order)
+    n_contrib_in = 0
+    n_contrib_applied = 0
+    for ki, key in enumerate(key_order):
+        # classic と同様、外側ループ毎に force（キー数が n_op 以下のため追加コストは限定的）
+        poll_active_cancel(force=True)
+        contribs = by_key.get(key) or []
+        if not contribs:
+            continue
+        n_contrib_in += len(contribs)
+        collapsed = _collapse_host_contribs_for_write_mode(
+            write_mode, contribs, link_targets, link_values
+        )
+        use_contribs = collapsed if collapsed is not None else contribs
+        n_contrib_applied += len(use_contribs)
+        if join_slice_progress is not None and (
+            ki == 0
+            or ki == n_keys - 1
+            or ki % _CROSS_JOIN_EMIT_DRIVEN_PROGRESS_STRIDE == 0
+        ):
+            join_slice_progress(use_contribs[-1][0], n_op)
+
+        emit_rows = idx_map.get(key) or []
+        host_extra = host_by_key.get(key) or []
+        if not emit_rows and not host_extra:
+            continue
+        seen: set[int] = set()
+        targets: list[dict[str, Any]] = []
+        for r in emit_rows:
+            rid = id(r)
+            if rid in seen:
+                continue
+            seen.add(rid)
+            targets.append(r)
+        for r in host_extra:
+            rid = id(r)
+            if rid in seen:
+                continue
+            seen.add(rid)
+            targets.append(r)
+        if not targets:
+            continue
+
+        for k, pk_write in use_contribs:
+            if not pk_write and n_prim != 1:
+                continue
+            pk_use = pk_write or single_pk
+            if not pk_use:
+                continue
+            for ri, r in enumerate(targets):
+                poll_active_cancel_every(ri, stride=32)
+                r[item_col] = merge_cell_for_write_mode(
+                    r.get(item_col), pk_use, write_mode
+                )
+                n_write += 1
+                if link_targets:
+                    for tgt in link_targets:
+                        vals = link_values.get(tgt) or []
+                        if not isinstance(vals, list):
+                            continue
+                        new_v = vals[k] if k < len(vals) else None
+                        r[tgt] = merge_cell_for_write_mode(
+                            r.get(tgt), new_v, write_mode
+                        )
+                        n_link += 1
+
+    if _jd_on:
+        _agg_diag.info(
+            "[DATA_AGG_JOIN_DUMP] phase=done %s mode=emit_driven item_col=%s "
+            "n_op=%s n_keys=%s contrib_in=%s contrib_applied=%s row_writes=%s "
+            "link_writes=%s search_pool=%s ms=%s",
+            _pfx,
+            item_col,
+            n_op,
+            n_keys,
+            n_contrib_in,
+            n_contrib_applied,
+            n_write,
+            n_link,
+            search_pool_len,
+            int((time.perf_counter() - t0) * 1000),
+        )
+
+
 def _apply_join_key_search_write(
     pool: list[dict[str, Any]],
     item: dict[str, Any],
@@ -1968,6 +2247,42 @@ def _apply_join_key_search_write(
     else:
         idx_cols, idx_map = _build_join_search_index(_search, join_defs)
     idx_hit = bool(idx_cols) and bool(idx_map)
+    effective_index: JoinSearchIndex = (idx_cols, idx_map)
+
+    if _cross_join_should_use_emit_driven(
+        cross_file=cross_file,
+        stacked_join=stacked_join,
+        n_join=n_join,
+        search_pool_len=len(_search),
+        join_index=effective_index if idx_hit else None,
+    ):
+        try:
+            _agg_diag.info(
+                "[DATA_AGG_DIAG] join_write_path=emit_driven item=%s n_join=%s search_pool=%s",
+                item_col,
+                n_join,
+                len(_search),
+            )
+        except Exception:
+            pass
+        _apply_cross_join_emit_driven(
+            item_col=item_col,
+            write_mode=write_mode,
+            prim_vals=prim_vals,
+            join_values=jv,
+            n_prim=n_prim,
+            n_join=n_join,
+            join_index=effective_index,
+            join_host_rows=join_host_rows,
+            link_targets=link_targets,
+            link_values=lv,
+            join_slice_progress=join_slice_progress,
+            join_dump_ctx=join_dump_ctx,
+            _jd_on=_jd_on,
+            _pfx=_pfx,
+            search_pool_len=len(_search),
+        )
+        return
 
     def _rows_for_slice(k: int) -> list[dict[str, Any]]:
         if join_host_rows is not None and join_index is not None:
@@ -2604,6 +2919,25 @@ def _apply_join_key_search_across_file_passes(
                     }
             except Exception:
                 _jd_ctx = None
+            # 調査プローブ用（結合挙動は変更しない）: ホスト bundle のスライス規模
+            _probe_n_prim = 0
+            _probe_n_join = 0
+            _probe_index_keys = 0
+            _probe_host_rows = 0
+            try:
+                _probe_n_prim = len(list(jb.get("primary_values") or []))
+                _jv = jb.get("join_values") or {}
+                _probe_targets = _join_search_targets_from_defs(join_defs_item)
+                _probe_n_join = _join_search_n_join_slices(
+                    _jv if isinstance(_jv, dict) else {},
+                    _probe_targets,
+                )
+                if join_index is not None and isinstance(join_index, tuple) and len(join_index) >= 2:
+                    _probe_index_keys = len(join_index[1] or {})
+                if join_host_rows is not None:
+                    _probe_host_rows = len(join_host_rows)
+            except Exception:
+                pass
             _apply_join_key_search_write(
                 global_pool,
                 jit_eff,
@@ -2623,11 +2957,18 @@ def _apply_join_key_search_across_file_passes(
             )
             try:
                 _agg_diag.info(
-                    "[DATA_AGG_DIAG] join_pass item=%s file=%s cross_file=%s search_pool=%s elapsed_ms=%s%s",
+                    "[DATA_AGG_DIAG] join_pass item=%s file=%s path=%s cross_file=%s "
+                    "search_pool=%s n_prim=%s n_join=%s host_rows=%s index_keys=%s "
+                    "elapsed_ms=%s%s",
                     item_col or ("item_%s" % ji),
                     Path(file_path).name if file_path else "-",
+                    file_path or "-",
                     cross,
                     search_pool_len,
+                    _probe_n_prim,
+                    _probe_n_join,
+                    _probe_host_rows,
+                    _probe_index_keys,
                     int((time.perf_counter() - t_pair) * 1000),
                     (" topology_join=%s" % (jit_eff is not jit,))
                     if preview_master_mode
@@ -4506,13 +4847,26 @@ def _run_batch_files_extract_parallel(
             progress_callback("done", fi, n_paths, fname, dc_done)
         return fi, res
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(_work, (fi, fp)) for fi, fp in enumerate(paths, start=1)]
+    from svc.data_agg_cancel import DataAggCancelled, abort_pending_futures  # noqa: WPS433
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futs = [pool.submit(_work, (fi, fp)) for fi, fp in enumerate(paths, start=1)]
+    try:
         for fut in as_completed(futs):
             if cancel_check is not None:
                 cancel_check(force=True)
             fi, res = fut.result()
             out[fi] = res
+    except DataAggCancelled:
+        # 未開始ジョブを切り、wait=True で実行中ファイル読取完了を待たない
+        abort_pending_futures(futs, executor=pool, wait=False)
+        raise
+    except BaseException:
+        abort_pending_futures(futs, executor=None)
+        pool.shutdown(wait=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
     return out
 
 

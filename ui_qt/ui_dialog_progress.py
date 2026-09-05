@@ -24,6 +24,7 @@ History (latest 3):
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -623,32 +624,118 @@ class ProgressDialog(QDialog):
                 except Exception:
                     pass
         if is_data_agg_batch:
-            try:
-                from svc.data_agg_cancel import force_data_agg_batch_cancel_from_ui  # noqa: WPS433
-
-                force_data_agg_batch_cancel_from_ui(
-                    cancel_path=Path(p),
-                    progress_path=getattr(self, "_progress_path", None),
-                    notify_parent=bool(self._req.get("data_agg_batch_notify_parent")),
-                    parent_hwnd=int(self._parent_hwnd or 0),
-                    scenario_id=str(self._req.get("data_agg_batch_scenario_id") or ""),
-                    scenario_path=str(self._req.get("data_agg_batch_scenario_path") or ""),
-                )
-            except Exception as _term_exc:
-                if _log is not None:
-                    try:
-                        _log.warning(
-                            "[DATA_AGG] batch force terminate failed: %s",
-                            _term_exc,
-                        )
-                    except Exception:
-                        pass
+            self._start_data_agg_batch_force_cancel_async(Path(p))
         try:
             b = getattr(self, "_btn_cancel", None)
             if b is not None:
                 b.setEnabled(False)
         except Exception:
             pass
+
+    def _start_data_agg_batch_force_cancel_async(self, cancel_path: Path) -> None:
+        """
+        一括キャンセル: UI を即復帰させ、wait/kill はバックグラウンド、COM は遅延で UI スレッド実行。
+        （旧実装は force を同期呼び出しし、OLE 待ちで Excel が固まることがあった）
+        """
+        from svc.data_agg_cancel import (  # noqa: WPS433
+            append_cancel_event_log_from_ui,
+            run_data_agg_batch_force_terminate_no_com,
+            sheet_id_from_cancel_path,
+            write_progress_cancel_status,
+        )
+        from core.excel_host_restore import (  # noqa: WPS433
+            restore_excel_host_ui_state,
+            unlock_excel_host_window,
+        )
+
+        ph = int(self._parent_hwnd or 0)
+        sid = sheet_id_from_cancel_path(cancel_path)
+        scenario_id = str(self._req.get("data_agg_batch_scenario_id") or "")
+        scenario_path = str(self._req.get("data_agg_batch_scenario_path") or "")
+        notify_parent = bool(self._req.get("data_agg_batch_notify_parent"))
+        progress_path = getattr(self, "_progress_path", None)
+
+        # 1) CANCEL 状態を先に書き、進捗 teardown / Win32 unlock / カーソル解除を即時
+        try:
+            if progress_path is not None:
+                write_progress_cancel_status(Path(progress_path))
+        except Exception:
+            pass
+        try:
+            unlock_excel_host_window(ph)
+        except Exception:
+            pass
+        try:
+            self._teardown_progress_shared_state(excel_unlock=True, cursor_off=True)
+        except Exception:
+            pass
+        try:
+            self._terminal_handled = True
+            self._stop_progress_timers()
+        except Exception:
+            pass
+        try:
+            self.accept()
+        except Exception:
+            pass
+        try:
+            _close_all_modeless()
+        except Exception:
+            pass
+
+        holder: dict[str, Any] = {}
+
+        def _bg() -> None:
+            try:
+                holder["r"] = run_data_agg_batch_force_terminate_no_com(
+                    cancel_path=cancel_path,
+                    progress_path=None,
+                    notify_parent=notify_parent,
+                    write_progress_cancel=False,
+                )
+            except Exception as ex:
+                holder["e"] = ex
+                if _log is not None:
+                    try:
+                        _log.warning(
+                            "[DATA_AGG] batch force terminate (bg) failed: %s",
+                            ex,
+                        )
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_bg, name="data_agg_batch_force_cancel", daemon=True).start()
+
+        def _restore_com() -> None:
+            try:
+                restore_excel_host_ui_state(ph, sid, com=True)
+            except Exception:
+                pass
+
+        # 2) COM 復元は UI スレッドで遅延リトライ（kill 完了前でも Interactive 等を戻す）
+        QTimer.singleShot(0, _restore_com)
+        QTimer.singleShot(300, _restore_com)
+
+        def _after_bg() -> None:
+            if "r" not in holder and "e" not in holder:
+                QTimer.singleShot(50, _after_bg)
+                return
+            _restore_com()
+            result = holder.get("r") if isinstance(holder.get("r"), dict) else {}
+            if result.get("need_event_log"):
+                try:
+                    append_cancel_event_log_from_ui(
+                        parent_hwnd=ph,
+                        sheet_id=str(result.get("sheet_id") or sid),
+                        scenario_id=scenario_id,
+                        scenario_path=scenario_path,
+                    )
+                except Exception:
+                    pass
+            # kill 直後の取り残し向け再試行
+            QTimer.singleShot(500, _restore_com)
+
+        QTimer.singleShot(50, _after_bg)
 
     def _apply_show_front_stack(self) -> None:
         """表示直後にオーナー→中央→前面化を同期適用（comdlg32 終了後 FG=Excel の空白を埋める）。"""
