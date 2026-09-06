@@ -254,3 +254,133 @@ def test_hc_updater_defer_skips_mutex_gate_with_single_confirm(
     assert "skip_mutex_gate=True" in log_text
     assert "mutex_busy graceful_shutdown" not in log_text
     assert "deferred_inline_bin_apply" in log_text
+
+
+def test_patch_materialize_fail_falls_back_to_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = _minimal_install(tmp_path)
+    paths = build_paths(install)
+    patch_zip = install / "patch_src.zip"
+    patch_zip.write_bytes(b"patch")
+    full_zip = install / "full_src.zip"
+    full_zip.write_bytes(b"full-bytes")
+    write_pending(
+        paths,
+        {
+            "schema_version": 2,
+            "apply_scope": "bin_only",
+            "skip_apply_confirm": True,
+            "mode": "patch",
+            "target_bin_version": "1.1.10.6",
+            "catalog_path": "",
+            "state": "downloaded",
+            "patch": {"local_path": str(patch_zip), "sha256": ""},
+            "full": {"local_path": str(full_zip), "sha256": ""},
+        },
+    )
+
+    monkeypatch.setattr(ub, "_ProgressUi", _FakeProgressUi)
+    monkeypatch.setattr(ub, "_try_apply_bootstrap_swap", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(
+        ub,
+        "materialize_manifest_patch_zip",
+        lambda **_k: (patch_zip, None, None, "bsdiff old_sha256 mismatch: app/bin/hc_main.exe"),
+    )
+
+    with patch.object(upc, "is_hc_svc_server_process", return_value=False):
+        with patch.object(upc, "is_hc_updater_process", return_value=True):
+            res = ub._apply_pending_update_impl(install)
+
+    assert res.get("ok") is True
+    assert res.get("deferred_to_updater") is True
+    assert res.get("worker_apply_mode") == "full"
+    worker = Path(str(res.get("worker_zip_path") or ""))
+    assert worker.is_file()
+    assert worker.read_bytes() == b"full-bytes"
+    log_text = paths.log_path.read_text(encoding="utf-8")
+    assert "fallback_patch_to_full=true" in log_text
+    assert "patch materialize failed" in log_text
+
+
+def test_reinstall_defer_persists_setup_exe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = _minimal_install(tmp_path)
+    paths = build_paths(install)
+    setup = install / "CSV_Tool_Setup.exe"
+    setup.write_bytes(b"MZ-setup")
+    (install / "setup.ini").write_text("[Setup]\nDeployRoot=C:\\UNC\\release\n", encoding="ascii")
+    write_pending(
+        paths,
+        {
+            "schema_version": 2,
+            "apply_scope": "bin_only",
+            "skip_apply_confirm": True,
+            "mode": "reinstall",
+            "target_bin_version": "1.1.10.6",
+            "catalog_path": "",
+            "state": "downloaded",
+            "installer": {"local_path": str(setup), "relative_path": str(setup), "sha256": ""},
+        },
+    )
+    monkeypatch.setattr(ub, "_ProgressUi", _FakeProgressUi)
+    monkeypatch.setattr(ub, "_try_apply_bootstrap_swap", lambda *_a, **_k: (None, None))
+
+    with patch.object(upc, "is_hc_svc_server_process", return_value=False):
+        with patch.object(upc, "is_hc_updater_process", return_value=True):
+            res = ub._apply_pending_update_impl(install)
+
+    assert res.get("ok") is True
+    assert res.get("deferred_to_updater") is True
+    assert res.get("worker_apply_mode") == "reinstall"
+    worker = Path(str(res.get("worker_zip_path") or ""))
+    assert worker.name == "pending_hc_updater_setup.exe"
+    assert worker.read_bytes() == b"MZ-setup"
+    sidecar = worker.parent / "setup.ini"
+    assert sidecar.is_file()
+    assert "C:\\UNC\\release" in sidecar.read_text(encoding="ascii")
+
+
+def test_mode_text_reinstall() -> None:
+    assert ub._mode_text("patch") == "差分"
+    assert ub._mode_text("full") == "フル"
+    assert ub._mode_text("reinstall") == "再インストール"
+
+
+def test_persist_zip_keeps_exe_suffix(tmp_path: Path) -> None:
+    src = tmp_path / "CSV_Tool_Setup.exe"
+    src.write_bytes(b"MZ")
+    dest = ub._persist_zip_for_hc_updater(src, tmp_path / "payload")
+    assert dest.name == "pending_hc_updater_setup.exe"
+    zip_src = tmp_path / "a.zip"
+    zip_src.write_bytes(b"zip")
+    dest_zip = ub._persist_zip_for_hc_updater(zip_src, tmp_path / "payload")
+    assert dest_zip.name == "pending_hc_updater_bin.zip"
+    assert not (tmp_path / "payload" / "setup.ini").exists()
+
+
+def test_persist_setup_exe_copies_sibling_setup_ini(tmp_path: Path) -> None:
+    src_dir = tmp_path / "deploy"
+    src_dir.mkdir()
+    src = src_dir / "CSV_Tool_Setup.exe"
+    src.write_bytes(b"MZ")
+    (src_dir / "setup.ini").write_text("[Setup]\nDeployRoot=C:\\UNC\\release\n", encoding="ascii")
+    payload = tmp_path / "payload"
+    dest = ub._persist_zip_for_hc_updater(src, payload)
+    assert dest.name == "pending_hc_updater_setup.exe"
+    copied = payload / "setup.ini"
+    assert copied.is_file()
+    assert "C:\\UNC\\release" in copied.read_text(encoding="ascii")
+
+
+def test_persist_setup_exe_copies_setup_ini_from_catalog_dir(tmp_path: Path) -> None:
+    ver = tmp_path / "deploy" / "1.1.11.6"
+    ver.mkdir(parents=True)
+    src = ver / "CSV_Tool_Setup.exe"
+    src.write_bytes(b"MZ")
+    catalog_dir = tmp_path / "deploy"
+    (catalog_dir / "setup.ini").write_text("[Setup]\nDeployRoot=C:\\UNC\\release\n", encoding="ascii")
+    payload = tmp_path / "payload"
+    ub._persist_zip_for_hc_updater(src, payload, extra_setup_ini_dirs=[catalog_dir])
+    assert (payload / "setup.ini").is_file()

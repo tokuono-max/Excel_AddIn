@@ -13,7 +13,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 _UPDATE_CHECK_BUSY_DIALOG: UpdateCheckBusyDialog | None = None
 
@@ -196,6 +196,7 @@ class UpdateCheckDialog(QDialog):
         self._cfg = cfg or {}
         self._button = "ok"
         self._excel_unlocked = False
+        self._ready_path = str(self._req.get("ready_path") or "").strip()
 
         try:
             self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -340,8 +341,20 @@ class UpdateCheckDialog(QDialog):
             except Exception:
                 pass
 
+    def _write_ready(self) -> None:
+        rp = self._ready_path
+        if not rp:
+            return
+        try:
+            p = Path(rp)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("ready", encoding="utf-8")
+        except Exception:
+            pass
+
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._write_ready()
         try:
             from ui_qt.ui_notification_sound import play_notification_sound
 

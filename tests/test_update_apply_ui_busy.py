@@ -84,6 +84,39 @@ def test_queue_pending_bin_update_fast_skips_local_copy(
     assert '"local_path": ""' in pending.replace(" ", "") or '"local_path":""' in pending.replace(" ", "")
 
 
+def test_queue_pending_reinstall_copies_setup_ini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = tmp_path / "inst"
+    install.mkdir()
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    setup = deploy / "CSV_Tool_Setup.exe"
+    setup.write_bytes(b"MZ-setup")
+    (deploy / "setup.ini").write_text("[Setup]\nDeployRoot=C:\\UNC\\release\n", encoding="ascii")
+    st = {
+        "latest_bin_version": "1.1.11.6",
+        "catalog_path": str(deploy / "catalog.json"),
+        "bin_zip_path": str(setup),
+        "bin_apply_mode": "reinstall",
+        "bin_zip_sha256_expected": "",
+        "bin_full_zip_path": "",
+        "bin_full_zip_sha256_expected": "",
+    }
+    monkeypatch.setattr(pu, "_install_root", lambda: install)
+    ok, _msg = pu._queue_pending_bin_update(
+        st,
+        source="test",
+        skip_apply_confirm=True,
+        copy_payload=True,
+    )
+    assert ok is True
+    payload = build_paths(install).payload_root
+    assert (payload / "setup.exe").read_bytes() == b"MZ-setup"
+    assert (payload / "setup.ini").is_file()
+    assert "C:\\UNC\\release" in (payload / "setup.ini").read_text(encoding="ascii")
+
+
 def test_apply_pending_creates_progress_ui_before_mutex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

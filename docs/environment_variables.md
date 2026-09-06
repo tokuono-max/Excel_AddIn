@@ -133,7 +133,7 @@ VBA（`HC_Log`）と Python（`core_log`）が **同じファイル名** で追�
 | `HC_PROJECT_ROOT` | — | 子プロセス起動時に内部で設定されることがある。 |
 | `HC_INSTALL_ROOT` | — | 配布ツリーのルート（例: `CSV_Tool`）。`core.runtime_layout` が参照。短寿命 `xlwings_short_runner` はここを `sys.path` 先頭にし `chdir` する。 |
 | `HC_PACKAGED_DEPLOYMENT` | — | `1` / `true` / `yes` で「配布（EXE）モード」を意味する。`svc_host` の子プロセス起動が **`app\bin\hc_main.exe`** 等（**`hc_svc_server.exe` / `hc_ui_server.exe`** は同じ **`app\bin\`**）に切り替わる条件の一部。VBA `xlwings.bas` も `RunPython` の短寿命経路判定に参照（`USE_PACKAGED_RUNPYTHON` と併用可）。配布時、`svc_host` / `ui_data_agg` が **`hc_*.exe` を起動するとき**子プロセスの **`PATH` 先頭**に **`%HC_INSTALL_ROOT%\app\bin`** と **`%HC_INSTALL_ROOT%`**（インストールルート）を足す（**`runtime_layout.env_with_packaged_dll_search_path`**）。 |
-| `HC_DEPLOY_ROOT` | — | **共有側の配布ルート**（`catalog.json` は通常 **`%HC_DEPLOY_ROOT%\catalog.json`**）。**`installer\CSV_Tool_Setup.iss`** が **`SHAREPAYLOAD` の親フォルダ**をインストール時に `HKCU\Environment` へ書く。詳細は **`docs\インストールと運用（利用者・運用向け）.md` §1.5**。薄いインストーラ EXE のビルド手順は **`docs\インストーラ化（開発者向け）.md` §2**（**`installer\build_csv_tool_setup.bat`**）。 |
+| `HC_DEPLOY_ROOT` | — | **共有側の配布ルート**（`catalog.json` は通常 **`%HC_DEPLOY_ROOT%\catalog.json`**）。薄いインストーラがインストール時に `HKCU\Environment` へ書く値は、**起動 EXE 隣の `setup.ini` の `DeployRoot`**（あれば）またはコンパイル時 **`SHAREPAYLOAD`**。詳細は **`docs\インストールと運用（利用者・運用向け）.md` §1.5**、`setup.ini` は **`docs\インストーラ化（開発者向け）.md` §2.6**。 |
 | `HC_CATALOG_PATH` | — | **`catalog.json` のフルパス**（任意）。設定時は **`HC_DEPLOY_ROOT`** より優先（`core.packaged_update`）。 |
 | `HC_UPDATE_CHECK_AT_STARTUP` | — | **`0` / `false`** で、アドイン起動直後の **版通知（`catalog.json` 照合）**を行わない。未設定は **有効**（ただし **配布モード**かつカタログ解決可能なときだけ実際に読む）。 |
 

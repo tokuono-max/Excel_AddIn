@@ -16,6 +16,7 @@ from hc_updater import (
     _copy_merge_tree,
     _mirror_tree,
     _running_from_tree_root,
+    _spawn_uninstall_then_setup,
 )
 
 
@@ -100,3 +101,70 @@ def test_mirror_tree_refuses_when_running_from_dst(tmp_path: Path) -> None:
             raised = True
             assert "mirror refused" in str(e)
     assert raised
+
+
+def test_spawn_uninstall_then_setup_copies_and_launches_cmd(tmp_path: Path) -> None:
+    install = tmp_path / "CSV_Tool"
+    install.mkdir()
+    (install / "unins000.exe").write_bytes(b"MZ-unins")
+    (install / "unins000.dat").write_text("dat", encoding="utf-8")
+    setup = tmp_path / "CSV_Tool_Setup.exe"
+    setup.write_bytes(b"MZ-setup")
+    log = tmp_path / "hc_update.log"
+    calls: list[object] = []
+
+    class _Popen:
+        def __init__(self, args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    with patch("hc_updater.subprocess.Popen", _Popen):
+        work = _spawn_uninstall_then_setup(
+            install_root=install,
+            setup_exe=setup,
+            log_path=log,
+        )
+
+    assert calls
+    args, _kw = calls[0]
+    assert args[0] == "cmd.exe"
+    assert args[1] == "/c"
+    bat = work / "run_reinstall.cmd"
+    text = bat.read_text(encoding="utf-8")
+    assert "unins000.exe" in text
+    assert "/VERYSILENT" in text
+    assert "/NORESTART" in text
+    assert "CSV_Tool_Setup.exe" in text
+    assert (work / "unins000.exe").is_file()
+    assert (work / "unins000.dat").is_file()
+    assert (work / "CSV_Tool_Setup.exe").read_bytes() == b"MZ-setup"
+    assert not (work / "setup.ini").exists()
+    log_text = log.read_text(encoding="utf-8")
+    assert "setup_ini=absent" in log_text
+
+
+def test_spawn_uninstall_then_setup_copies_sibling_setup_ini(tmp_path: Path) -> None:
+    install = tmp_path / "CSV_Tool"
+    install.mkdir()
+    (install / "unins000.exe").write_bytes(b"MZ-unins")
+    setup_dir = tmp_path / "deploy"
+    setup_dir.mkdir()
+    setup = setup_dir / "pending_hc_updater_setup.exe"
+    setup.write_bytes(b"MZ-setup")
+    (setup_dir / "setup.ini").write_text("[Setup]\r\nDeployRoot=C:\\UNC\\release\r\n", encoding="ascii")
+    log = tmp_path / "hc_update.log"
+
+    class _Popen:
+        def __init__(self, args: object, **kwargs: object) -> None:
+            pass
+
+    with patch("hc_updater.subprocess.Popen", _Popen):
+        work = _spawn_uninstall_then_setup(
+            install_root=install,
+            setup_exe=setup,
+            log_path=log,
+        )
+
+    copied = work / "setup.ini"
+    assert copied.is_file()
+    assert "DeployRoot=C:\\UNC\\release" in copied.read_text(encoding="ascii")
+    assert "setup_ini=copied" in log.read_text(encoding="utf-8")

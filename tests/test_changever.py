@@ -89,16 +89,33 @@ def test_format_from_ui_help_json() -> None:
     path = Path(__file__).resolve().parents[1] / "config" / "ui_help.json"
     cfg = json.loads(path.read_text(encoding="utf-8"))
     block = format_ver_history_update_block(
-        cfg, kind="bin", installed="1.1.8.4", latest="1.1.9.4"
+        cfg, kind="bin", installed="1.1.8.4", latest="1.1.9.5"
     )
-    assert "1.1.9.4" in block
+    assert "1.1.9.5" in block
     assert "複数セル結合" in block
     assert "blank singleton" in block
+    assert "1.1.10.6" not in block
     assert "旧版バックアップ" not in block
     viewer = format_ver_history_viewer_text(cfg)
-    assert "[CSV Tool 1.1.9.4]" in viewer
+    assert "[CSV Tool 1.1.9.5]" in viewer
+    assert "[CSV Tool 1.1.10.6]" in viewer
     assert "[bootstrap 1.0.9]" in viewer
     assert "旧版バックアップ" in viewer
+
+
+def test_format_set_range_shows_next_not_current() -> None:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "config" / "ui_help.json"
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    block = format_ver_history_update_block(
+        cfg, kind="bin", installed="1.1.9.5", latest="1.1.10.6"
+    )
+    assert "1.1.10.6" in block
+    assert "次版履歴" in block
+    assert "1.1.9.5" not in block
+    assert "left/rightコマンド" not in block
 
 
 def test_viewer_shows_all_kinds() -> None:

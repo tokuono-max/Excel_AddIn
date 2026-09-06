@@ -16,9 +16,11 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DSHAREPAYLOAD=\\server\share\CSV_Tool CSV_Tool_Setup.iss
 ;
 ; 【埋め込みされる値】コンパイル時に確定するもの:
-;   - SHAREPAYLOAD … 配布ルート（catalog.json がある場所）。互換で ...\current 指定も可
+;   - SHAREPAYLOAD … 配布ルートの既定（catalog.json がある場所）。互換で ...\current 指定も可
 ;   - DefaultDirName … ウィザードの「既定のインストール先」（ユーザーは通常、別パスに変更可能）
 ;   変更したら必ず再コンパイルすること。
+; 【実行時上書き】起動した EXE と同じフォルダの setup.ini（[Setup] DeployRoot / InstallDir）。
+;   詳細は docs\インストーラ化（開発者向け）.md §2.6。
 ;
 ; 【前提】エンドユーザーの PC から、インストール時に SHAREPAYLOAD が参照できること（VPN・UNC・権限）。
 ;

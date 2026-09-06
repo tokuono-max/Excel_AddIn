@@ -44,6 +44,10 @@ logger = get_logger(__name__)
 
 _UPDATE_CHECK_UI_LOCK = threading.Lock()
 _UPDATE_BUSY_ACTIVE = False
+# Qt 確認が画面に出たあとは結果を長く待つ（タイムアウト後も Win32 には落とさない）。
+_UI_DIALOG_READY_TIMEOUT_SEC = 8.0
+_UI_DIALOG_AFTER_READY_TIMEOUT_SEC = 24 * 3600.0
+_UI_DIALOG_TIMEOUT_STATUS = "TIMEOUT"
 
 # True when apply_pending_update returned deferred (No on pending-apply confirm).
 # Suppresses duplicate bin prompt in maybe_check_updates_on_startup same process launch.
@@ -102,20 +106,43 @@ def _update_check_title() -> str:
     return _um("UPDATE_CHECK_DIALOG_TITLE", "CSV Tool 更新")
 
 
-def _changever_block_for_status(st: dict[str, Any], *, kind: str) -> str:
-    """ui_help.json の VER_HISTORY から差分履歴を組み立てる（CHANGEVER.txt は使わない）。"""
+def _installed_set_version_from_status(st: dict[str, Any]) -> str:
+    composed = _compose_set_version(st.get("installed_bin"), st.get("installed_config"))
+    if composed:
+        return composed
+    return _normalize_set_version_text(str(st.get("installed_bin") or "")) or ""
+
+
+def _latest_set_version_from_status(st: dict[str, Any]) -> str:
+    display = _normalize_set_version_text(str(st.get("display_version") or ""))
+    if display:
+        return display
+    return _compose_set_version(st.get("latest_bin_version"), st.get("latest_config_version")) or ""
+
+
+def _changever_bounds_for_status(st: dict[str, Any], *, kind: str) -> tuple[str, str]:
     if kind == "bootstrap":
         installed = str(st.get("installed_bootstrap_version") or "").strip()
         latest = str(st.get("latest_bootstrap_version") or "").strip()
-    else:
-        installed = str(st.get("installed_bin") or "").strip()
-        latest = str(st.get("latest_bin_version") or "").strip()
+        return installed, latest
+    return _installed_set_version_from_status(st), _latest_set_version_from_status(st)
+
+
+def _changever_block_for_status(st: dict[str, Any], *, kind: str) -> str:
+    """配布 cfg zip の VER_HISTORY から、今の版より新しい節だけを組み立てる。"""
+    installed, latest = _changever_bounds_for_status(st, kind=kind)
+    if not installed or not latest:
+        return ""
+    cfg = load_help_ui_from_catalog_cfg_zip(st.get("catalog_path"))
+    if not cfg:
+        return ""
     block = ver_history_block_for_update(
         kind=kind,
         installed=installed,
         latest=latest,
         header=_um("BIN_UPDATE_CHANGELOG_HEADER", "変更内容:"),
         more=_um("BIN_UPDATE_CHANGELOG_MORE", "（続きはヘルプの変更履歴）"),
+        cfg=cfg,
     )
     return ("\n\n" + block) if block else ""
 
@@ -1235,7 +1262,10 @@ def _show_update_dialog_via_ui_server(
     owner_hwnd: int,
     sheet_id: str = "",
     timeout_sec: float = 120.0,
+    ready_timeout_sec: float | None = None,
+    after_ready_timeout_sec: float | None = None,
 ) -> dict[str, Any] | None:
+    _ = timeout_sec
     try:
         from svc.svc_host import ensure_ui_server
         from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle
@@ -1250,29 +1280,61 @@ def _show_update_dialog_via_ui_server(
 
     ts_ms = int(time.time() * 1000)
     pid = os.getpid()
-    res_dir = Path(get_ipc_root()) / "result"
+    ipc_root = Path(get_ipc_root())
+    res_dir = ipc_root / "result"
     res_dir.mkdir(parents=True, exist_ok=True)
+    ready_dir = ipc_root / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
     result_path = res_dir / f"res_update_check_{ts_ms}_{pid}.pkl"
+    ready_path = ready_dir / f"ready_update_check_{ts_ms}_{pid}.pkl"
+    try:
+        ready_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    req_ui = dict(req_dict or {})
+    req_ui["ready_path"] = str(ready_path)
     payload = {
         "parent_hwnd": int(owner_hwnd or 0),
         "result_path": str(result_path),
-        "ready_path": "",
+        "ready_path": str(ready_path),
         "sheet_id": str(sheet_id or "_"),
         "log_path": "",
         "action": "update_check",
         "module": "ui_qt.ui_update_check",
-        "req_dict": req_dict,
+        "req_dict": req_ui,
     }
     req_path = get_request_dir() / f"req_update_check_{ts_ms}_{pid}.pkl"
+    ready_wait = (
+        _UI_DIALOG_READY_TIMEOUT_SEC if ready_timeout_sec is None else float(ready_timeout_sec)
+    )
+    result_wait = (
+        _UI_DIALOG_AFTER_READY_TIMEOUT_SEC
+        if after_ready_timeout_sec is None
+        else float(after_ready_timeout_sec)
+    )
     try:
         write_pickle(req_path, payload)
-        return _wait_ui_dispatch_result(result_path, timeout_sec=timeout_sec)
+        if not _wait_ready_path(ready_path, timeout_sec=ready_wait):
+            return None
+        got = _wait_ui_dispatch_result(result_path, timeout_sec=result_wait)
+        if isinstance(got, dict):
+            return got
+        return {
+            "status": _UI_DIALOG_TIMEOUT_STATUS,
+            "button": "no",
+            "rc": 0,
+            "qt_shown": True,
+        }
     except Exception as e:
         logger.warning("packaged_update UI request failed: %s", e)
         return None
     finally:
         try:
             result_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            ready_path.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1333,6 +1395,9 @@ def _message_box(
             sheet_id=sheet_id,
         )
         if isinstance(got, dict):
+            if str(got.get("status") or "").strip().upper() == _UI_DIALOG_TIMEOUT_STATUS:
+                _append_update_log(_install_root(), "ui_update_dialog=qt_shown_no_result")
+                return IDNO if is_confirm else 0
             if is_confirm:
                 button = str(got.get("button") or "").strip().lower()
                 rc = int(got.get("rc", 0) or 0)
@@ -1744,6 +1809,129 @@ def _catalog_resolve_payload(catalog_path: Path, relative_path: str) -> Path:
     return (catalog_path.parent / p).resolve()
 
 
+def _pick_zip_ui_help_member(names: list[str]) -> str | None:
+    cands: list[str] = []
+    for raw in names:
+        n = str(raw or "").replace("\\", "/").lstrip("/")
+        if not n or n.endswith("/"):
+            continue
+        if n.rsplit("/", 1)[-1] != "ui_help.json":
+            continue
+        if n.startswith("__MACOSX/"):
+            continue
+        cands.append(n)
+    if not cands:
+        return None
+    for prefer in ("config/ui_help.json", "ui_help.json"):
+        if prefer in cands:
+            return prefer
+    return sorted(cands, key=lambda s: (s.count("/"), len(s)))[0]
+
+
+def load_help_ui_from_catalog_cfg_zip(catalog_path: str | Path | None) -> dict[str, Any]:
+    """catalog の cfg zip から ui_help.json を読む。適用はしない。失敗時は空 dict。"""
+    raw_path = str(catalog_path or "").strip()
+    if not raw_path:
+        return {}
+    p = Path(raw_path)
+    data = load_catalog(p)
+    if not isinstance(data, dict):
+        return {}
+    cfg = data.get("config")
+    if not isinstance(cfg, dict):
+        return {}
+    payload = cfg.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    rel = str((payload.get("relative_path") or "").strip())
+    if not rel:
+        return {}
+    zp = _catalog_resolve_payload(p, rel)
+    if not zp.is_file():
+        return {}
+    try:
+        with zipfile.ZipFile(zp, "r") as zf:
+            member = _pick_zip_ui_help_member(zf.namelist())
+            if not member:
+                return {}
+            raw = zf.read(member)
+        obj = json.loads(raw.decode("utf-8-sig"))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _catalog_require_uninstall_reinstall(catalog: dict[str, Any]) -> bool:
+    """catalog.bin.require_uninstall_reinstall。未記載・未対応クライアントは無視される。"""
+    b = catalog.get("bin")
+    if not isinstance(b, dict):
+        return False
+    raw = b.get("require_uninstall_reinstall")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    txt = str(raw or "").strip().lower()
+    return txt in ("1", "true", "yes", "on")
+
+
+def _resolve_setup_exe(catalog_path: Path, catalog: dict[str, Any] | None = None) -> Path | None:
+    """配布元の CSV_Tool_Setup.exe。catalog.installer.relative_path があれば優先。"""
+    if isinstance(catalog, dict):
+        inst = catalog.get("installer")
+        if isinstance(inst, dict):
+            rel = str((inst.get("relative_path") or "")).strip()
+            if rel:
+                p = _catalog_resolve_payload(catalog_path, rel)
+                if p.is_file():
+                    return p
+    parent = catalog_path.parent
+    for name in ("CSV_Tool_Setup.exe", "CSV_Tool_setup.exe"):
+        cand = parent / name
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _copy_setup_ini_sidecar(dest_dir: Path, *source_dirs: Path | None) -> Path | None:
+    """起動する Setup EXE と同じフォルダへ setup.ini を置く。
+
+    薄いインストーラは {srcexe} 隣の setup.ini だけを読む。ファイルが無いときは
+    何もしない（InitializeSetup がコンパイル時 SHAREPAYLOAD にフォールバックする）。
+    """
+    src: Path | None = None
+    seen: set[str] = set()
+    for raw in source_dirs:
+        if raw is None:
+            continue
+        folder = Path(raw)
+        try:
+            key = str(folder.resolve())
+        except OSError:
+            key = str(folder)
+        if key in seen:
+            continue
+        seen.add(key)
+        cand = folder / "setup.ini"
+        if cand.is_file():
+            src = cand
+            break
+    if src is None:
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "setup.ini"
+    try:
+        if src.resolve() == dest.resolve():
+            return dest
+    except OSError:
+        pass
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None
+    return dest
+
+
 def _copy_payload_to_local(local_path: Path, source_path: Path) -> None:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = local_path.with_suffix(local_path.suffix + ".new")
@@ -1772,7 +1960,7 @@ def _queue_pending_bin_update(
     if not patch_zip:
         return False, "bin zip path missing"
     patch_mode = str(st.get("bin_apply_mode") or "patch").strip().lower()
-    if patch_mode not in ("patch", "full"):
+    if patch_mode not in ("patch", "full", "reinstall"):
         patch_mode = "patch"
     patch_src = Path(patch_zip)
     if not patch_src.is_file():
@@ -1813,9 +2001,23 @@ def _queue_pending_bin_update(
     paths = build_paths(root)
     paths.update_root.mkdir(parents=True, exist_ok=True)
     paths.payload_root.mkdir(parents=True, exist_ok=True)
-    patch_local = paths.payload_root / "patch.zip"
+    patch_local = (
+        paths.payload_root / "setup.exe" if patch_mode == "reinstall" else paths.payload_root / "patch.zip"
+    )
     if copy_payload:
         _copy_payload_to_local(patch_local, patch_src)
+        if patch_mode == "reinstall":
+            sidecar_dirs = [patch_src.parent]
+            if catalog_path:
+                sidecar_dirs.append(Path(catalog_path).parent)
+            copied_ini = _copy_setup_ini_sidecar(paths.payload_root, *sidecar_dirs)
+            _append_update_log(
+                root,
+                "apply_bin: reinstall setup.ini sidecar={s} dest={d}".format(
+                    s="copied" if copied_ini is not None else "absent",
+                    d=paths.payload_root / "setup.ini",
+                ),
+            )
     patch_local_s = str(patch_local) if copy_payload else ""
 
     full_local = paths.payload_root / "full.zip"
@@ -1887,6 +2089,15 @@ def _queue_pending_bin_update(
             "local_path": patch_local_s,
         },
         "full": full_obj,
+        "installer": {
+            "relative_path": str(
+                st.get("installer_path") or (str(patch_src) if patch_mode == "reinstall" else "")
+            ),
+            "sha256": "",
+            "local_path": (
+                (str(patch_src) if not copy_payload else patch_local_s) if patch_mode == "reinstall" else ""
+            ),
+        },
         "bootstrap": bootstrap_obj,
         "retry": {
             "patch_retry_in_run": 0,
@@ -2130,7 +2341,9 @@ def _hint_bin_apply_mode(
     catalog_path: Path,
     installed_bin: str,
 ) -> str:
-    """sha256 なしで patch / full の想定モードを返す（UI ヒント・ログ用）。"""
+    """sha256 なしで patch / full / reinstall の想定モードを返す（UI ヒント・ログ用）。"""
+    if _catalog_require_uninstall_reinstall(catalog):
+        return "reinstall"
     b = catalog.get("bin")
     if not isinstance(b, dict):
         return ""
@@ -2176,6 +2389,7 @@ def prepare_bin_update_status(st: dict[str, Any]) -> dict[str, Any]:
     st["bin_zip_path"] = str(zp) if zp else None
     st["bin_zip_sha256_expected"] = zsha
     st["bin_update_prepare_error"] = prep_err
+    st["installer_path"] = str(zp) if mode == "reinstall" and zp else None
     full_zp, full_sha, _full_err = _resolve_bin_full_zip_path(data, cat_path)
     st["bin_full_zip_path"] = str(full_zp) if full_zp else None
     st["bin_full_zip_sha256_expected"] = full_sha
@@ -2214,6 +2428,7 @@ def _resolve_bin_apply_paths_light(st: dict[str, Any]) -> str | None:
     st["bin_apply_mode"] = mode
     st["bin_zip_path"] = str(zp)
     st["bin_zip_sha256_expected"] = zsha
+    st["installer_path"] = str(zp) if mode == "reinstall" else st.get("installer_path")
     full_zp, full_sha, _full_err = _resolve_bin_full_zip_path(data, cat_path)
     st["bin_full_zip_path"] = str(full_zp) if full_zp else None
     st["bin_full_zip_sha256_expected"] = full_sha
@@ -2255,7 +2470,7 @@ def _prepare_bin_apply(
     Resolve bin zip for user-confirmed apply: prefer catalog.bin.patch when eligible, else bin.full.
 
     Returns: (mode, zip_path, expected_sha_or_none, error_or_none)
-    mode is 'patch' or 'full'; on total failure mode is '' and zip None.
+    mode is 'patch', 'full', or 'reinstall'; on total failure mode is '' and zip None.
     """
     b = catalog.get("bin")
     if not isinstance(b, dict):
@@ -2265,6 +2480,18 @@ def _prepare_bin_apply(
         if log_root is not None:
             _append_update_log(log_root, line)
 
+    if _catalog_require_uninstall_reinstall(catalog):
+        setup = _resolve_setup_exe(catalog_path, catalog)
+        if setup is None:
+            log("bin_apply: reinstall requested but CSV_Tool_Setup.exe missing")
+            return (
+                "reinstall",
+                None,
+                None,
+                "配布元にインストーラ（CSV_Tool_Setup.exe）が見つかりません。",
+            )
+        log(f"bin_apply: prepared reinstall setup={setup} installed={installed_bin}")
+        return "reinstall", setup, None, None
     patch = b.get("patch")
     if isinstance(patch, dict):
         rel_p = str((patch.get("relative_path") or "").strip())
@@ -2491,6 +2718,8 @@ def check_for_updates(
         "bin_apply_mode": None,
         "bin_full_zip_path": None,
         "bin_full_zip_sha256_expected": None,
+        "require_uninstall_reinstall": False,
+        "installer_path": None,
     }
 
     root = _install_root()
@@ -2599,8 +2828,15 @@ def check_for_updates(
         data_for_hint = data
         cat_p = cat_path
         ib = installed_bin
-        hint = _hint_bin_apply_mode(data_for_hint, cat_p, ib)
-        out["bin_apply_mode"] = hint or None
+        reinstall = _catalog_require_uninstall_reinstall(data_for_hint)
+        out["require_uninstall_reinstall"] = reinstall
+        if reinstall:
+            out["bin_apply_mode"] = "reinstall"
+            setup = _resolve_setup_exe(cat_p, data_for_hint)
+            out["installer_path"] = str(setup) if setup is not None else None
+        else:
+            hint = _hint_bin_apply_mode(data_for_hint, cat_p, ib)
+            out["bin_apply_mode"] = hint or None
         # zip の sha256 検証は prepare_bin_update_status（必要時）または hc_updater 側で実施
 
     # config update is silent by policy (failure only notifies).
@@ -2641,7 +2877,7 @@ def check_for_updates(
         "source={s} installed_bin={ib} latest_bin={lb} needs_bin={nb} bin_mode={bm} "
         "installed_cfg={ic} latest_cfg={lc} needs_cfg={nc} "
         "installed_bootstrap={ibt} latest_bootstrap={lbt} needs_bootstrap={nbt} "
-        "cfg_applied={ca} cfg_err={ce} set={sv} catalog={cp}".format(
+        "require_reinstall={rr} cfg_applied={ca} cfg_err={ce} set={sv} catalog={cp}".format(
             s=source,
             ib=installed_bin,
             lb=latest_bin,
@@ -2653,6 +2889,7 @@ def check_for_updates(
             ibt=installed_bootstrap or "-",
             lbt=latest_bootstrap or "-",
             nbt=need_bootstrap,
+            rr=out.get("require_uninstall_reinstall"),
             ca=out["config_update_applied"],
             ce=out["config_update_error"],
             sv=display_version or "-",
@@ -3122,14 +3359,23 @@ def _show_bin_update_prompt(
     owner_hwnd: int | None = None,
     sheet_id: str = "",
 ) -> None:
+    installed_set = _installed_set_version_from_status(st) or str(st.get("installed_bin") or "-")
+    latest_set = _latest_set_version_from_status(st) or str(st.get("latest_bin_version") or "-")
     msg = _um(
         "BIN_UPDATE_SINGLE_CONFIRM_TEMPLATE",
         "新しいバージョンがあります。\n\n"
         "お使いの版: {installed_bin}\n"
         "新しい版: {latest_bin}",
-        installed_bin=str(st.get("installed_bin") or "-"),
-        latest_bin=str(st.get("latest_bin_version") or "-"),
+        installed_bin=installed_set,
+        latest_bin=latest_set,
     )
+    if str(st.get("bin_apply_mode") or "").strip().lower() == "reinstall":
+        extra = _um(
+            "REINSTALL_CONFIRM_EXTRA",
+            "この版は、いったん CSV Tool アプリを削除してから入れ直す必要があります。\n"
+            "インストーラーによるインストールを実施します。",
+        )
+        msg = str(msg).rstrip() + "\n\n" + str(extra).strip()
     msg = str(msg).rstrip() + _changever_block_for_status(st, kind="bin")
     dlg_title = _um("BIN_UPDATE_SINGLE_CONFIRM_TITLE", "CSV Tool の更新")
     btn_yes = _um("BIN_UPDATE_SINGLE_BTN_APPLY_NOW", "すぐに更新")

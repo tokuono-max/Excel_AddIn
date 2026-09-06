@@ -13,7 +13,8 @@
       "sha256": "",
       "from_min_version": "0.9.0",
       "from_max_version": "0.9.99"
-    }
+    },
+    "require_uninstall_reinstall": false
   },
   "config": {
     "latest_version": "2026.04.20",

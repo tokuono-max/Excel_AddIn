@@ -171,7 +171,7 @@
 | **ui_dt_ymd.json** | 日付変換 YYYY/MM/DD | MESSAGES, SCREENS（PROGRESS, DONE, WARNING） |
 | **ui_dt_hm.json** | 日付・時刻変換 YYYY/MM/DD HH:MM | MESSAGES, SCREENS（PROGRESS, DONE, WARNING） |
 | **ui_trm_ex.json** | 文頭・文末トリム | MESSAGES, SCREENS（CHOICE, DONE, NO_TARGET） |
-| **ui_help.json** | 操作マニュアル（Info.txt 表示） | MESSAGES, SCREENS.HELP |
+| **ui_help.json** | 操作マニュアル＋版履歴 | MESSAGES, SCREENS.HELP / VER_HISTORY。ヘルプ「変更履歴」はインストール済み JSON。更新確認の次版履歴は catalog の cfg zip 内の同ファイル |
 | **ui_data_agg.json** | データ集約・クレンジング | WINDOW, MAIN, MESSAGES, SCREENS（PROGRESS, DONE, WARNING, STEP_POPUP, **SCENARIO_EDIT** ほか）。**シナリオ編集の詳細キー（DETAIL_CELL / DETAIL_NAME 等）の意味の正本は「データ集約ツール要求定義書.md」§12**（実体は `config/ui_data_agg.json`）。 |
 
 読込対象の機能キーは上記一覧に準ずる（csv_mg, csv_ld, csv_sv, csv_sp, hd_nr, undo, dupli, row_dl, col_dl, dt_ymd, dt_hm, trm_ex, help, data_agg 等）。

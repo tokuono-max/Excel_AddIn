@@ -38,6 +38,7 @@ from core.update_process_cleanup import (
 from core.update_housekeeping import cleanup_update_payload_dir, post_deferred_bin_success_housekeeping
 from core.packaged_update import (
     _bin_apply_success_marker_path,
+    _copy_setup_ini_sidecar,
     _resolve_install_scope,
     display_name_for_install_scope,
     notify_installed_apps_list_changed,
@@ -140,7 +141,13 @@ def _is_patch_apply_mode(apply_mode: str) -> bool:
     return str(apply_mode or "").strip().lower() == "patch"
 
 
+def _is_reinstall_apply_mode(apply_mode: str) -> bool:
+    return str(apply_mode or "").strip().lower() == "reinstall"
+
+
 def updater_busy_title(ui_msgs: dict[str, str], apply_mode: str) -> str:
+    if _is_reinstall_apply_mode(apply_mode):
+        return str(ui_msgs.get("UPDATER_PHASE_BUSY_TITLE_REINSTALL") or "再インストール準備中")
     if _is_patch_apply_mode(apply_mode):
         return str(ui_msgs.get("UPDATER_PHASE_BUSY_TITLE_PATCH") or "差分更新中")
     return str(ui_msgs.get("UPDATER_PHASE_BUSY_TITLE_FULL") or "フル更新中")
@@ -154,6 +161,11 @@ def updater_busy_body(
     *,
     apply_phase: bool = False,
 ) -> str:
+    if _is_reinstall_apply_mode(apply_mode):
+        return str(
+            ui_msgs.get("REINSTALL_PROGRESS_MSG")
+            or "インストーラーによるインストールを実施します。"
+        )
     if apply_phase:
         if _is_patch_apply_mode(apply_mode):
             return str(
@@ -538,6 +550,8 @@ class Job:
     target_bin_version: str
     cleanup_path: str
     notify_marker_path: str
+    full_zip_path: str = ""
+    full_zip_sha: str = ""
 
 
 def _phase(log_path: Path, ui: _ProgressUi, key: str, title: str, msg: str, progress: int) -> None:
@@ -577,6 +591,8 @@ def _job_from_deferred_inline_result(
         target_bin_version=str(res.get("target_bin_version") or "").strip(),
         cleanup_path="",
         notify_marker_path=str(_bin_apply_success_marker_path(install_root).resolve()),
+        full_zip_path=str(res.get("worker_full_zip_path") or "").strip(),
+        full_zip_sha=str(res.get("worker_full_zip_sha") or "").strip().lower(),
     )
 
 
@@ -745,7 +761,67 @@ def _load_job(job_path: Path) -> Job:
         target_bin_version=str(raw.get("TargetBinVersion", "")).strip(),
         cleanup_path=str(raw.get("CleanupPath", "")).strip(),
         notify_marker_path=str(raw.get("NotifyMarkerPath", "")).strip(),
+        full_zip_path=str(raw.get("FullZipPath", "")).strip(),
+        full_zip_sha=str(raw.get("FullZipSha", "")).strip().lower(),
     )
+
+
+def _operator_full_fail_message(ui_msgs: dict[str, str]) -> str:
+    return str(
+        ui_msgs.get("UPDATER_FULL_FAILED_TEMPLATE")
+        or (
+            "更新できませんでした。Excel を終了し、もう一度試してください。"
+            "解消しない場合は 設定からCSV Tool をアンインストールしてから、"
+            "インストーラでインストールしてください。"
+        )
+    ).strip()
+
+
+def _spawn_uninstall_then_setup(
+    *,
+    install_root: Path,
+    setup_exe: Path,
+    log_path: Path,
+) -> Path:
+    """unins000 と Setup を temp にコピーし、遅延実行の cmd をデタッチ起動する。"""
+    unins = install_root / "unins000.exe"
+    if not unins.is_file():
+        raise FileNotFoundError("unins000.exe")
+    work = Path(tempfile.mkdtemp(prefix="csv_tool_reinstall_"))
+    for src in install_root.glob("unins000.*"):
+        if src.is_file():
+            shutil.copy2(src, work / src.name)
+    setup_local = work / setup_exe.name
+    shutil.copy2(setup_exe, setup_local)
+    setup_ini_local = _copy_setup_ini_sidecar(work, setup_exe.parent)
+    unins_local = work / "unins000.exe"
+    bat = work / "run_reinstall.cmd"
+    bat.write_text(
+        "@echo off\r\n"
+        "ping -n 4 127.0.0.1 >nul\r\n"
+        f'"{unins_local}" /VERYSILENT /NORESTART\r\n'
+        f'start "" "{setup_local}"\r\n',
+        encoding="utf-8",
+    )
+    flags = 0
+    if os.name == "nt":
+        flags = (
+            int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0)
+            | int(getattr(subprocess, "DETACHED_PROCESS", 0) or 0)
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) or 0)
+        )
+    subprocess.Popen(
+        ["cmd.exe", "/c", str(bat)],
+        cwd=str(work),
+        close_fds=True,
+        creationflags=flags,
+    )
+    _append_with_cap(
+        log_path,
+        f"{_ts()} apply_bin: reinstall spawned work={work} setup={setup_local} "
+        f"unins={unins_local} setup_ini={'copied' if setup_ini_local is not None else 'absent'}\n",
+    )
+    return work
 
 
 def _write_marker(path_text: str, target_bin_version: str, display_version: str, log_path: Path) -> None:
@@ -784,11 +860,11 @@ def _run_bin_apply_job(
             f"{_ts()} apply_bin: updater job loaded pid={os.getpid()} job={job_path or '-'}\n",
         )
         if not job.install_root.is_dir():
-            raise RuntimeError(f"InstallRoot not found: {job.install_root}")
+            raise RuntimeError(_operator_full_fail_message(ui_msgs))
         if not job.zip_path.is_file():
-            raise RuntimeError(f"ZipPath not found: {job.zip_path}")
+            raise RuntimeError(_operator_full_fail_message(ui_msgs))
         if not str(job.log_path):
-            raise RuntimeError("LogPath is empty")
+            raise RuntimeError(_operator_full_fail_message(ui_msgs))
 
         _phase(
             job.log_path,
@@ -814,6 +890,60 @@ def _run_bin_apply_job(
                 raise RuntimeError(timeout_tpl)
             sleep_with_ui_pulse(2.0, ui_pulse=_wait_pulse)
         sleep_with_ui_pulse(1.0, ui_pulse=_wait_pulse)
+
+        if _is_reinstall_apply_mode(job.apply_mode):
+            reinstall_msg = str(
+                ui_msgs.get("REINSTALL_PROGRESS_MSG")
+                or "インストーラーによるインストールを実施します。"
+            )
+            _phase(
+                job.log_path,
+                ui,
+                "reinstall",
+                busy_title,
+                reinstall_msg,
+                40,
+            )
+            try:
+                _spawn_uninstall_then_setup(
+                    install_root=job.install_root,
+                    setup_exe=job.zip_path,
+                    log_path=job.log_path,
+                )
+            except Exception:
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: reinstall spawn failed traceback={traceback.format_exc()[:1500]}\n",
+                )
+                raise RuntimeError(_operator_full_fail_message(ui_msgs)) from None
+            _phase(
+                job.log_path,
+                ui,
+                "done",
+                ui_msgs.get("UPDATER_PHASE_DONE_TITLE", "完了"),
+                reinstall_msg,
+                100,
+            )
+            _write_updater_result(
+                result_path,
+                ok=True,
+                target_bin_version=job.target_bin_version,
+                display_version=job.display_version,
+            )
+            launched = str(
+                ui_msgs.get("REINSTALL_LAUNCHED_MESSAGE")
+                or (
+                    "インストーラーによるインストールを実施します。\n\n"
+                    "表示されたインストーラーの案内に従ってください。"
+                )
+            )
+            _message_box(
+                launched,
+                ui_msgs.get("UPDATER_WINDOW_TITLE", "CSV Tool の更新"),
+                0x40,
+            )
+            exit_code = 0
+            return exit_code
 
         _phase(
             job.log_path,
@@ -845,10 +975,48 @@ def _run_bin_apply_job(
         )
         shutil.copy2(job.zip_path, zip_local)
 
+        apply_mode = str(job.apply_mode or "full").strip().lower() or "full"
+
+        def _switch_to_full_zip(reason: str) -> None:
+            nonlocal zip_local, apply_mode, apply_msg
+            full_p = Path(str(job.full_zip_path or "").strip())
+            if not full_p.is_file():
+                raise RuntimeError(_operator_full_fail_message(ui_msgs))
+            fb_msg = str(
+                ui_msgs.get("PATCH_FALLBACK_TO_FULL_MESSAGE")
+                or "差分更新に失敗しました。 フル更新をトライします。"
+            )
+            _append_with_cap(
+                job.log_path,
+                f"{_ts()} apply_bin: fallback_patch_to_full=true reason={reason} zip={full_p}\n",
+            )
+            _phase(job.log_path, ui, "fallback_full", busy_title, fb_msg, 28)
+            zip_local = dl_tmp / full_p.name
+            shutil.copy2(full_p, zip_local)
+            if job.full_zip_sha:
+                got_full = _sha256_file(zip_local)
+                if got_full != job.full_zip_sha:
+                    raise RuntimeError(_operator_full_fail_message(ui_msgs))
+            apply_mode = "full"
+            apply_msg = updater_busy_body(
+                ui_msgs,
+                "full",
+                "UPDATER_PHASE_APPLY_MESSAGE",
+                "更新ファイルを適用しています。",
+                apply_phase=True,
+            )
+
         if job.expected_sha:
             got = _sha256_file(zip_local)
             if got != job.expected_sha:
-                raise RuntimeError(f"sha256 mismatch got={got}")
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: sha256 mismatch got={got} expected={job.expected_sha}\n",
+                )
+                if apply_mode == "patch":
+                    _switch_to_full_zip("sha256_mismatch")
+                else:
+                    raise RuntimeError(_operator_full_fail_message(ui_msgs))
 
         extract_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_extract_"))
         try:
@@ -870,13 +1038,31 @@ def _run_bin_apply_job(
             ui.set(extract_title, extract_msg, 55)
             from bootstrap.update_bootstrap import _pulse_while_blocking
 
-            _pulse_while_blocking(
-                ui,
-                extract_title,
-                extract_msg,
-                55,
-                lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
-            )
+            try:
+                _pulse_while_blocking(
+                    ui,
+                    extract_title,
+                    extract_msg,
+                    55,
+                    lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
+                )
+            except Exception:
+                if apply_mode != "patch":
+                    raise
+                _append_with_cap(
+                    job.log_path,
+                    f"{_ts()} apply_bin: patch extract failed traceback={traceback.format_exc()[:1500]}\n",
+                )
+                _switch_to_full_zip("extract_failed")
+                shutil.rmtree(extract_tmp, ignore_errors=True)
+                extract_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_extract_"))
+                _pulse_while_blocking(
+                    ui,
+                    extract_title,
+                    extract_msg,
+                    55,
+                    lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
+                )
             cfg = load_runtime_config(job.install_root)
             stop_msg = updater_busy_body(
                 ui_msgs,
@@ -913,46 +1099,79 @@ def _run_bin_apply_job(
                 75,
             )
 
-            if job.apply_mode == "patch":
+            apply_mode = str(apply_mode or "full").strip().lower() or "full"
+            if apply_mode == "patch":
                 patch_app = extract_tmp / "app" / "bin"
                 patch_addin = extract_tmp / "addin"
-                if not patch_app.exists() and not patch_addin.exists():
-                    raise RuntimeError("invalid patch zip: need app/bin and/or addin")
-                if patch_app.exists():
-                    dst_bin = job.install_root / "app" / "bin"
-                    dst_bin.mkdir(parents=True, exist_ok=True)
-                    _cleanup_stale_renamed_updaters(dst_bin, job.log_path)
-                    _copy_merge_tree(
-                        patch_app,
-                        dst_bin,
-                        job.log_path,
-                        ui=ui,
-                        ui_title=apply_title,
-                        ui_message=apply_msg,
-                        progress_lo=75,
-                        progress_hi=88,
+                layout_ok = patch_app.exists() or patch_addin.exists()
+                if not layout_ok:
+                    _switch_to_full_zip("invalid_patch_layout")
+                    shutil.rmtree(extract_tmp, ignore_errors=True)
+                    extract_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_extract_"))
+                    _pulse_while_blocking(
+                        ui,
+                        extract_title,
+                        extract_msg,
+                        55,
+                        lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
                     )
-                if patch_addin.exists():
-                    dst_addin = job.install_root / "addin"
-                    dst_addin.mkdir(parents=True, exist_ok=True)
-                    _copy_merge_tree(
-                        patch_addin,
-                        dst_addin,
-                        job.log_path,
-                        ui=ui,
-                        ui_title=apply_title,
-                        ui_message=apply_msg,
-                        progress_lo=88,
-                        progress_hi=95,
-                    )
-                _apply_delete_list(job.install_root, extract_tmp / "__delete_list.txt")
-                if job.target_bin_version:
-                    (job.install_root / "VERSION.txt").write_text(job.target_bin_version + "\n", encoding="utf-8")
-                _append_with_cap(job.log_path, f"{_ts()} apply_bin: patch merged TargetBinVersion={job.target_bin_version}\n")
-            else:
+                else:
+                    try:
+                        dst_bin = job.install_root / "app" / "bin"
+                        dst_bin.mkdir(parents=True, exist_ok=True)
+                        _cleanup_stale_renamed_updaters(dst_bin, job.log_path)
+                        if patch_app.exists():
+                            _copy_merge_tree(
+                                patch_app,
+                                dst_bin,
+                                job.log_path,
+                                ui=ui,
+                                ui_title=apply_title,
+                                ui_message=apply_msg,
+                                progress_lo=75,
+                                progress_hi=88,
+                            )
+                        if patch_addin.exists():
+                            dst_addin = job.install_root / "addin"
+                            dst_addin.mkdir(parents=True, exist_ok=True)
+                            _copy_merge_tree(
+                                patch_addin,
+                                dst_addin,
+                                job.log_path,
+                                ui=ui,
+                                ui_title=apply_title,
+                                ui_message=apply_msg,
+                                progress_lo=88,
+                                progress_hi=95,
+                            )
+                        _apply_delete_list(job.install_root, extract_tmp / "__delete_list.txt")
+                        if job.target_bin_version:
+                            (job.install_root / "VERSION.txt").write_text(
+                                job.target_bin_version + "\n", encoding="utf-8"
+                            )
+                        _append_with_cap(
+                            job.log_path,
+                            f"{_ts()} apply_bin: patch merged TargetBinVersion={job.target_bin_version}\n",
+                        )
+                    except Exception:
+                        _append_with_cap(
+                            job.log_path,
+                            f"{_ts()} apply_bin: patch apply failed traceback={traceback.format_exc()[:1500]}\n",
+                        )
+                        _switch_to_full_zip("patch_apply_failed")
+                        shutil.rmtree(extract_tmp, ignore_errors=True)
+                        extract_tmp = Path(tempfile.mkdtemp(prefix="csv_tool_bin_extract_"))
+                        _pulse_while_blocking(
+                            ui,
+                            extract_title,
+                            extract_msg,
+                            55,
+                            lambda: shutil.unpack_archive(str(zip_local), str(extract_tmp)),
+                        )
+            if apply_mode != "patch":
                 src_bin = extract_tmp / "app" / "bin"
                 if not src_bin.is_dir():
-                    raise RuntimeError("invalid zip: missing app/bin")
+                    raise RuntimeError(_operator_full_fail_message(ui_msgs))
                 dst_bin_full = job.install_root / "app" / "bin"
                 dst_bin_full.mkdir(parents=True, exist_ok=True)
                 _cleanup_stale_renamed_updaters(dst_bin_full, job.log_path)

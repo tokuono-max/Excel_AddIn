@@ -308,7 +308,22 @@ def _ui_pulse(ui: _ProgressUi, title: str, msg: str, progress: float) -> None:
 
 
 def _mode_text(mode: str) -> str:
-    return "差分" if str(mode or "").strip().lower() == "patch" else "フル"
+    m = str(mode or "").strip().lower()
+    if m == "patch":
+        return "差分"
+    if m == "reinstall":
+        return "再インストール"
+    return "フル"
+
+
+def _operator_full_fail_message(install_root: Path) -> str:
+    return _ui_update_message(
+        install_root,
+        "UPDATER_FULL_FAILED_TEMPLATE",
+        "更新できませんでした。Excel を終了し、もう一度試してください。"
+        "解消しない場合は 設定からCSV Tool をアンインストールしてから、"
+        "インストーラでインストールしてください。",
+    )
 
 
 def _ui_update_message(install_root: Path, key: str, default: str) -> str:
@@ -462,7 +477,11 @@ def _normalize_bootstrap_version(raw: Any) -> str:
 
 
 def _is_immediate_full_error(code: str) -> bool:
-    return code in {"E_PATCH_SHA_MISMATCH", "E_PATCH_MANIFEST_INVALID"}
+    return code in {
+        "E_PATCH_SHA_MISMATCH",
+        "E_PATCH_MANIFEST_INVALID",
+        "E_PATCH_MATERIALIZE_FAILED",
+    }
 
 
 def _apply_zip(install_root: Path, zip_path: Path, expected_sha: str, mode: str, target_bin: str, ui: _ProgressUi, log_path: Path) -> None:
@@ -681,7 +700,7 @@ def _try_apply_bootstrap_swap(install_root: Path, pending: dict[str, Any], log_p
 
 
 def _resolve_payload(install_root: Path, payload: dict[str, Any], catalog_path: str) -> tuple[Path | None, str]:
-    local = str(payload.get("local_path") or "").strip()
+    local = str(payload.get("local_path") or payload.get("zip_path") or "").strip()
     if local and Path(local).is_file():
         return Path(local), str(payload.get("sha256") or "").strip().lower()
     rel = str(payload.get("relative_path") or "").strip()
@@ -713,10 +732,21 @@ def _catalog_display_version_for_pending(catalog_path: str) -> str:
     return ""
 
 
-def _persist_zip_for_hc_updater(src: Path, payload_root: Path) -> Path:
+def _persist_zip_for_hc_updater(
+    src: Path,
+    payload_root: Path,
+    extra_setup_ini_dirs: list[Path] | tuple[Path, ...] | None = None,
+) -> Path:
     payload_root.mkdir(parents=True, exist_ok=True)
-    dest = payload_root / "pending_hc_updater_bin.zip"
+    is_setup_exe = src.suffix.lower() == ".exe"
+    dest_name = "pending_hc_updater_setup.exe" if is_setup_exe else "pending_hc_updater_bin.zip"
+    dest = payload_root / dest_name
     shutil.copy2(src, dest)
+    if is_setup_exe:
+        from core.packaged_update import _copy_setup_ini_sidecar
+
+        extra = list(extra_setup_ini_dirs or ())
+        _copy_setup_ini_sidecar(payload_root, src.parent, *extra)
     return dest
 
 
@@ -971,7 +1001,7 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
         full_total = int(retry.get("full_fail_total", 0) or 0)
         # 速度優先: 旧版 full_prev バックアップは作らない（差分→フルで新版適用に一本化）。
 
-        if mode not in ("patch", "full"):
+        if mode not in ("patch", "full", "reinstall"):
             mode = "patch"
         _append(
             paths.log_path,
@@ -980,13 +1010,19 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                 t=target_bin or "-",
             ),
         )
-        pending["state"] = "applying_patch" if mode == "patch" else "applying_full"
+        pending["state"] = (
+            "applying_patch"
+            if mode == "patch"
+            else ("applying_reinstall" if mode == "reinstall" else "applying_full")
+        )
         write_pending(paths, pending)
         payload_patch = _as_dict(pending.get("patch"))
         payload_full = _as_dict(pending.get("full"))
         worker_zip: Path | None = None
         worker_mode = "full"
         worker_sha = ""
+        worker_full_zip: Path | None = None
+        worker_full_sha = ""
         defer_bin_to_updater = os.environ.get("CSV_TOOL_APPLY_PENDING_INLINE_BIN") != "1"
         _append(
             paths.log_path,
@@ -1002,6 +1038,61 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
             p_retry["last_failed_at"] = _ts()
             p_retry["last_error_code"] = str(p_retry.get("last_error_code") or "")
             pending["retry"] = p_retry
+
+        if mode == "reinstall":
+            inst_payload = _as_dict(pending.get("installer"))
+            if not inst_payload.get("relative_path") and not inst_payload.get("local_path"):
+                inst_payload = _as_dict(pending.get("patch"))
+            setup_path, _setup_sha = _resolve_payload(install_root, inst_payload, cat_path)
+            if setup_path is None or not setup_path.is_file():
+                pending["state"] = "failed"
+                pending["retry"] = {
+                    "patch_retry_in_run": 0,
+                    "patch_fail_total": patch_total,
+                    "full_fail_total": full_total + 1,
+                    "last_error_code": "E_SETUP_EXE_MISSING",
+                    "last_error_message": "配布元にインストーラ（CSV_Tool_Setup.exe）が見つかりません。",
+                    "last_failed_at": _ts(),
+                }
+                write_pending(paths, pending)
+                _append(paths.log_path, "apply_bin: reinstall aborted setup_exe missing")
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": "配布元にインストーラ（CSV_Tool_Setup.exe）が見つかりません。",
+                }
+            persist_title = _ui_update_message(
+                install_root, "PROGRESS_PREPARE_TITLE", "準備中"
+            )
+            persist_msg = _ui_update_message(
+                install_root,
+                "REINSTALL_PROGRESS_MSG",
+                "インストーラーによるインストールを実施します。",
+            )
+            _ui_pulse(ui, persist_title, persist_msg, 10)
+            if defer_bin_to_updater:
+                setup_ini_dirs = [Path(cat_path).parent] if str(cat_path or "").strip() else []
+                worker_zip = _pulse_while_blocking(
+                    ui,
+                    persist_title,
+                    persist_msg,
+                    12,
+                    lambda: _persist_zip_for_hc_updater(
+                        setup_path,
+                        paths.payload_root,
+                        extra_setup_ini_dirs=setup_ini_dirs,
+                    ),
+                )
+                worker_mode = "reinstall"
+                worker_sha = ""
+            else:
+                pending["state"] = "failed"
+                write_pending(paths, pending)
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": "この更新経路はサポートされなくなりました。",
+                }
 
         if mode == "patch":
             patch_path, patch_sha = _resolve_payload(install_root, payload_patch, cat_path)
@@ -1061,10 +1152,17 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                         if mstats is not None:
                             _append(paths.log_path, f"patch materialize ok stats={mstats}")
                         elif merr:
+                            fb_msg = _ui_update_message(
+                                install_root,
+                                "PATCH_FALLBACK_TO_FULL_MESSAGE",
+                                "差分更新に失敗しました。 フル更新をトライします。",
+                            )
                             _append(
                                 paths.log_path,
-                                f"patch materialize note err={merr}",
+                                f"patch materialize failed err={merr}",
                             )
+                            _ui_pulse(ui, mat_title, fb_msg, 8)
+                            raise UpdateApplyError("E_PATCH_MATERIALIZE_FAILED", fb_msg)
                         apply_sha = "" if mstats is not None else patch_sha
                         try:
                             if defer_bin_to_updater:
@@ -1077,6 +1175,14 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                                 )
                                 worker_mode = "patch"
                                 worker_sha = apply_sha
+                                full_src, full_src_sha = _resolve_payload(
+                                    install_root, payload_full, cat_path
+                                )
+                                if full_src is not None and full_src.is_file():
+                                    full_keep = paths.payload_root / "pending_hc_updater_full.zip"
+                                    shutil.copy2(full_src, full_keep)
+                                    worker_full_zip = full_keep
+                                    worker_full_sha = full_src_sha
                             else:
                                 _apply_zip(install_root, mz, apply_sha, "patch", target_bin, ui, paths.log_path)
                         finally:
@@ -1105,7 +1211,12 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                             p_retry = _as_dict(pending.get("retry"))
                             p_retry["last_error_code"] = code
                             pending["retry"] = p_retry
-                            _update_err("更新ファイルの整合性検証または差分情報の解析に失敗しました。")
+                            fb_msg = _ui_update_message(
+                                install_root,
+                                "PATCH_FALLBACK_TO_FULL_MESSAGE",
+                                "差分更新に失敗しました。 フル更新をトライします。",
+                            )
+                            _update_err(fb_msg)
                             _append(paths.log_path, "apply_bin: fallback_patch_to_full=true reason={c}".format(c=code))
                             write_pending(paths, pending)
                             break
@@ -1118,19 +1229,37 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     p_retry = _as_dict(pending.get("retry"))
                     p_retry["last_error_code"] = str(p_retry.get("last_error_code") or "E_PATCH_RETRY_EXHAUSTED")
                     pending["retry"] = p_retry
-                    _update_err("差分更新の適用に失敗したためフル更新へ切り替えます。")
+                    fb_msg = _ui_update_message(
+                        install_root,
+                        "PATCH_FALLBACK_TO_FULL_MESSAGE",
+                        "差分更新に失敗しました。 フル更新をトライします。",
+                    )
+                    _update_err(fb_msg)
                     _append(paths.log_path, "apply_bin: fallback_patch_to_full=true reason=retry_exhausted")
                     write_pending(paths, pending)
 
         if mode == "full":
+            if patch_total > 0:
+                fb_msg = _ui_update_message(
+                    install_root,
+                    "PATCH_FALLBACK_TO_FULL_MESSAGE",
+                    "差分更新に失敗しました。 フル更新をトライします。",
+                )
+                _ui_pulse(
+                    ui,
+                    _ui_update_message(install_root, "PROGRESS_PREPARE_TITLE", "準備中"),
+                    fb_msg,
+                    12,
+                )
             full_path, full_sha = _resolve_payload(install_root, payload_full, cat_path)
             if full_path is None:
+                fail_msg = _operator_full_fail_message(install_root)
                 _append(paths.log_path, "bootstrap full failed: フル更新ファイルを取得できません。")
                 pending["state"] = "failed"
-                pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total + 1, "last_error_code": "E_FULL_PAYLOAD_MISSING", "last_error_message": "フル更新ファイルを取得できません。", "last_failed_at": _ts()}
+                pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total + 1, "last_error_code": "E_FULL_PAYLOAD_MISSING", "last_error_message": fail_msg, "last_failed_at": _ts()}
                 write_pending(paths, pending)
                 _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
-                return {"ok": False, "applied": False, "error": "フル更新ファイルを取得できません。"}
+                return {"ok": False, "applied": False, "error": fail_msg}
             if defer_bin_to_updater:
                 persist_title = _ui_update_message(
                     install_root, "PROGRESS_PREPARE_TITLE", "準備中"
@@ -1218,10 +1347,11 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     pending["retry"] = {"patch_retry_in_run": 0, "patch_fail_total": patch_total, "full_fail_total": full_total + 1, "last_error_code": code, "last_error_message": msg, "last_failed_at": _ts()}
                     write_pending(paths, pending)
                     _append(paths.log_path, "apply_bin: apply_mode_final={m} apply_result=failed restart_required=false".format(m=mode))
-                    return {"ok": False, "applied": False, "error": msg}
+                    return {"ok": False, "applied": False, "error": _operator_full_fail_message(install_root)}
 
         if defer_bin_to_updater:
             if worker_zip is None or not worker_zip.is_file():
+                fail_msg = _operator_full_fail_message(install_root)
                 _append(paths.log_path, "apply_bin: deferred_to_updater aborted worker_zip missing")
                 pending["state"] = "failed"
                 pending["retry"] = {
@@ -1229,14 +1359,14 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     "patch_fail_total": patch_total,
                     "full_fail_total": full_total + 1,
                     "last_error_code": "E_WORKER_ZIP_MISSING",
-                    "last_error_message": "hc_updater 用の zip を用意できませんでした。",
+                    "last_error_message": fail_msg,
                     "last_failed_at": _ts(),
                 }
                 write_pending(paths, pending)
                 return {
                     "ok": False,
                     "applied": False,
-                    "error": "更新 zip の準備に失敗しました。ログを確認してください。",
+                    "error": fail_msg,
                 }
             display_ver = _catalog_display_version_for_pending(cat_path)
             from core.update_process_cleanup import is_hc_updater_process
@@ -1261,6 +1391,8 @@ def _apply_pending_update_impl(install_root: Path) -> dict[str, Any]:
                     "worker_zip_path": str(worker_zip.resolve()),
                     "worker_zip_sha": worker_sha,
                     "worker_apply_mode": worker_mode,
+                    "worker_full_zip_path": str(worker_full_zip.resolve()) if worker_full_zip else "",
+                    "worker_full_zip_sha": worker_full_sha,
                     "target_bin_version": target_bin,
                     "display_version": display_ver,
                 }

@@ -34,3 +34,19 @@ def test_updater_busy_json_override() -> None:
     assert updater_busy_body(
         msgs, "patch", "UPDATER_PHASE_START_MESSAGE", "更新処理を開始しています。"
     ) == "差分 更新処理を開始しています。"
+
+
+def test_updater_busy_reinstall() -> None:
+    msgs: dict[str, str] = {}
+    assert updater_busy_title(msgs, "reinstall") == "再インストール準備中"
+    assert updater_busy_body(
+        msgs, "reinstall", "UPDATER_PHASE_START_MESSAGE", "更新処理を開始しています。"
+    ) == "インストーラーによるインストールを実施します。"
+    msgs = {
+        "UPDATER_PHASE_BUSY_TITLE_REINSTALL": "再インストール準備中",
+        "REINSTALL_PROGRESS_MSG": "インストーラーによるインストールを実施します。",
+    }
+    assert updater_busy_title(msgs, "reinstall") == "再インストール準備中"
+    assert updater_busy_body(
+        msgs, "reinstall", "UPDATER_PHASE_APPLY_MESSAGE", "x", apply_phase=True
+    ) == "インストーラーによるインストールを実施します。"

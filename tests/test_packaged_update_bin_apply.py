@@ -13,6 +13,8 @@ import pytest
 
 from core.packaged_update import (
     _catalog_bootstrap_latest,
+    _copy_setup_ini_sidecar,
+    _hint_bin_apply_mode,
     _materialize_patch_zip_for_worker,
     _parse_bootstrap_triplet,
     _patch_meta_eligible,
@@ -259,3 +261,125 @@ def test_materialize_patch_legacy_keeps_original_zip(tmp_path: Path) -> None:
     assert out_zip == patch_zip
     assert str(cleanup_dir) in (".", "")
     assert stats is None
+
+
+def test_prepare_bin_reinstall_flag_uses_setup_even_if_patch_eligible(tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    sub = deploy / "releases" / "1.0.1"
+    sub.mkdir(parents=True)
+    patch_zip = sub / "bin_d.zip"
+    patch_zip.write_text("p", encoding="utf-8")
+    full_zip = sub / "bin_full.zip"
+    full_zip.write_bytes(b"full")
+    setup = deploy / "CSV_Tool_Setup.exe"
+    setup.write_bytes(b"MZ")
+    cat = deploy / "catalog.json"
+    catalog_obj = {
+        "bin": {
+            "latest_version": "1.0.1",
+            "require_uninstall_reinstall": True,
+            "full": {"relative_path": "releases/1.0.1/bin_full.zip", "sha256": _sha256_file(full_zip)},
+            "patch": {
+                "relative_path": "releases/1.0.1/bin_d.zip",
+                "sha256": _sha256_file(patch_zip),
+                "from_min_version": "1.0.0",
+                "from_max_version": "1.0.0",
+            },
+        },
+    }
+    cat.write_text(json.dumps(catalog_obj), encoding="utf-8")
+
+    mode, zp, zsha, err = _prepare_bin_apply(catalog_obj, cat, "1.0.0", None)
+    assert err is None
+    assert mode == "reinstall"
+    assert zp == setup.resolve()
+    assert zsha is None
+    assert _hint_bin_apply_mode(catalog_obj, cat, "1.0.0") == "reinstall"
+
+
+def test_prepare_bin_reinstall_missing_setup(tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    cat = deploy / "catalog.json"
+    catalog_obj = {"bin": {"latest_version": "1.0.1", "require_uninstall_reinstall": True}}
+    cat.write_text(json.dumps(catalog_obj), encoding="utf-8")
+    mode, zp, _zsha, err = _prepare_bin_apply(catalog_obj, cat, "1.0.0", None)
+    assert mode == "reinstall"
+    assert zp is None
+    assert err is not None
+    assert "インストーラ" in err
+
+
+def test_prepare_bin_omitted_reinstall_flag_keeps_patch(tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    sub = deploy / "releases" / "1.0.1"
+    sub.mkdir(parents=True)
+    patch_zip = sub / "bin_d.zip"
+    patch_zip.write_text("p", encoding="utf-8")
+    sha = _sha256_file(patch_zip)
+    full_zip = sub / "bin_full.zip"
+    full_zip.write_bytes(b"full")
+    cat = deploy / "catalog.json"
+    catalog_obj = {
+        "bin": {
+            "latest_version": "1.0.1",
+            "full": {"relative_path": "releases/1.0.1/bin_full.zip", "sha256": _sha256_file(full_zip)},
+            "patch": {
+                "relative_path": "releases/1.0.1/bin_d.zip",
+                "sha256": sha,
+                "from_min_version": "1.0.0",
+                "from_max_version": "1.0.0",
+            },
+        },
+    }
+    cat.write_text(json.dumps(catalog_obj), encoding="utf-8")
+    mode, zp, zsha, err = _prepare_bin_apply(catalog_obj, cat, "1.0.0", None)
+    assert err is None
+    assert mode == "patch"
+    assert zp == patch_zip.resolve()
+    assert zsha == sha
+    assert _hint_bin_apply_mode(catalog_obj, cat, "1.0.0") == "patch"
+
+
+def test_prepare_bin_reinstall_uses_installer_relative_path(tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    sub = deploy / "pkg"
+    sub.mkdir(parents=True)
+    setup = sub / "MySetup.exe"
+    setup.write_bytes(b"MZ")
+    cat = deploy / "catalog.json"
+    catalog_obj = {
+        "bin": {"latest_version": "1.0.1", "require_uninstall_reinstall": True},
+        "installer": {"relative_path": "pkg/MySetup.exe"},
+    }
+    cat.write_text(json.dumps(catalog_obj), encoding="utf-8")
+    mode, zp, _zsha, err = _prepare_bin_apply(catalog_obj, cat, "1.0.0", None)
+    assert err is None
+    assert mode == "reinstall"
+    assert zp == setup.resolve()
+
+
+def test_copy_setup_ini_sidecar_copies_first_existing(tmp_path: Path) -> None:
+    dest = tmp_path / "work"
+    missing = tmp_path / "empty"
+    missing.mkdir()
+    src = tmp_path / "deploy"
+    src.mkdir()
+    (src / "setup.ini").write_text("[Setup]\nDeployRoot=X\n", encoding="ascii")
+    copied = _copy_setup_ini_sidecar(dest, missing, src)
+    assert copied == dest / "setup.ini"
+    assert copied is not None
+    assert copied.read_text(encoding="ascii").startswith("[Setup]")
+
+
+def test_copy_setup_ini_sidecar_absent_is_ok(tmp_path: Path) -> None:
+    dest = tmp_path / "work"
+    dest.mkdir()
+    assert _copy_setup_ini_sidecar(dest, tmp_path / "nowhere") is None
+    assert not (dest / "setup.ini").exists()
+
+
+def test_copy_setup_ini_sidecar_same_dir_is_noop(tmp_path: Path) -> None:
+    src = tmp_path / "setup.ini"
+    src.write_text("[Setup]\n", encoding="ascii")
+    assert _copy_setup_ini_sidecar(tmp_path, tmp_path) == src
