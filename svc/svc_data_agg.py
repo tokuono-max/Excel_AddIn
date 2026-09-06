@@ -4108,6 +4108,39 @@ def _snapshot_rows_for_path_trace(
     return out
 
 
+def _align_display_paths_to_io_paths(
+    new_io_paths: Sequence[str | Path],
+    old_io_paths: Sequence[str | Path],
+    old_display_paths: Sequence[str | Path],
+) -> list[str]:
+    """
+    io パス列の並べ替え／間引きに合わせて display パス列を同期する。
+
+    UNC ステージ後など io≠display のペアを崩さない。
+    ローカルのみ（io==display）のときは new_io をそのまま返す。
+    """
+    new_ios = [str(p) for p in new_io_paths]
+    old_ios = [str(p) for p in old_io_paths]
+    old_disp = [str(p) for p in old_display_paths]
+    if not new_ios:
+        return []
+    if len(old_ios) != len(old_disp):
+        return list(new_ios)
+    if old_ios == old_disp:
+        return list(new_ios)
+    buckets: dict[str, list[str]] = {}
+    for io_p, disp_p in zip(old_ios, old_disp):
+        buckets.setdefault(io_p, []).append(disp_p)
+    out: list[str] = []
+    for io_p in new_ios:
+        q = buckets.get(io_p)
+        if q:
+            out.append(q.pop(0))
+        else:
+            out.append(io_p)
+    return out
+
+
 def filter_file_paths_by_item_file_patterns(
     file_paths: Sequence[str | Path],
     items: list[dict[str, Any]],
@@ -4989,6 +5022,8 @@ def compute_batch_table_rows(
             pass
     n_paths_before = len(paths)
     if preview_master_mode and paths:
+        _pair_io_before = list(paths)
+        _pair_disp_before = list(display_paths)
         paths = filter_file_paths_for_master_preview(paths, items, dd)
         if (
             max_primary_rows is not None
@@ -5009,6 +5044,10 @@ def compute_batch_table_rows(
         paths = apply_master_preview_max_files(
             paths, items, dd, log=_agg_diag
         )
+        display_paths = _align_display_paths_to_io_paths(
+            paths, _pair_io_before, _pair_disp_before
+        )
+        _publish_io_paths(paths)
         master_preview_join_full_read_patterns = _master_preview_join_full_read_patterns(
             dd
         )
@@ -5027,7 +5066,13 @@ def compute_batch_table_rows(
         and core_env.data_agg_batch_file_path_filter_enabled()
     ):
         n_pf_in = len(paths)
+        _pair_io_before = list(paths)
+        _pair_disp_before = list(display_paths)
         paths = filter_file_paths_by_item_file_patterns(paths, items)
+        display_paths = _align_display_paths_to_io_paths(
+            paths, _pair_io_before, _pair_disp_before
+        )
+        _publish_io_paths(paths)
         if n_pf_in != len(paths):
             try:
                 logger.info(

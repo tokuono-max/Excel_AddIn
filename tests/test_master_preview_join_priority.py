@@ -13,6 +13,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from svc.svc_data_agg import (  # noqa: E402
+    _align_display_paths_to_io_paths,
     _master_preview_join_item_effective,
     _master_preview_per_file_pool_cap,
     compute_batch_table_rows,
@@ -51,6 +52,37 @@ def test_master_preview_per_file_pool_cap_reserves_cross_file_room() -> None:
     assert cap == 100
 
 
+def test_align_display_paths_to_io_paths_local_identity() -> None:
+    """ローカル（io==display）は new_io をそのまま返す。"""
+    old = ["a.xlsx", "b.xlsx"]
+    assert _align_display_paths_to_io_paths(["b.xlsx", "a.xlsx"], old, old) == [
+        "b.xlsx",
+        "a.xlsx",
+    ]
+
+
+def test_align_display_paths_to_io_paths_keeps_unc_pairs() -> None:
+    """io 並べ替え後も UNC display ペアを維持する。"""
+    ios = [r"C:\tmp\a.xlsx", r"C:\tmp\b.xlsx"]
+    disp = [r"\\share\a.xlsx", r"\\share\b.xlsx"]
+    new_ios = [r"C:\tmp\b.xlsx", r"C:\tmp\a.xlsx"]
+    assert _align_display_paths_to_io_paths(new_ios, ios, disp) == [
+        r"\\share\b.xlsx",
+        r"\\share\a.xlsx",
+    ]
+
+
+def test_align_display_paths_to_io_paths_filter_subset() -> None:
+    """間引き後も残った io に対応する display だけ残る。"""
+    ios = [r"C:\tmp\a.xlsx", r"C:\tmp\b.xlsx", r"C:\tmp\c.xlsx"]
+    disp = [r"\\share\a.xlsx", r"\\share\b.xlsx", r"\\share\c.xlsx"]
+    new_ios = [r"C:\tmp\c.xlsx", r"C:\tmp\a.xlsx"]
+    assert _align_display_paths_to_io_paths(new_ios, ios, disp) == [
+        r"\\share\c.xlsx",
+        r"\\share\a.xlsx",
+    ]
+
+
 def test_master_preview_join_priority_fills_link_columns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -79,6 +111,54 @@ def test_master_preview_join_priority_fills_link_columns(
     seq_vals = [r[idx_seq] for r in rows if r[idx_seq]]
     assert pt_vals, "PT番号が空（join プレビューが効いていない）"
     assert seq_vals, "製番が空（link allowlist 経由の取得が効いていない）"
+
+
+def test_master_preview_join_keeps_unc_display_paths_after_reorder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    UNC ステージ相当（io≠display）でも reorder 後に display ペアを保ち、
+    横断 join が埋まり、結果行の file_path が UNC 側のままであること。
+    """
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    anchor, join_f = paths[0], paths[1]
+    # 実体はローカル、表示は UNC 風（basename は実ファイルと一致させて pattern 判定を維持）
+    io_paths = [join_f, anchor]
+    display_paths = [
+        str(Path(r"\\share\data") / Path(join_f).name),
+        str(Path(r"\\share\data") / Path(anchor).name),
+    ]
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "mi_idx": 2,
+        "join_search_skip_seed": True,
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    ictx: list[dict] = []
+    headers, rows, _ev, _je = compute_batch_table_rows(
+        data,
+        io_paths,
+        ictx,
+        max_primary_rows=4,
+        max_table_rows=4,
+        probe_caller="test_join_unc_pair",
+        source_display_paths=display_paths,
+    )
+    idx_pt = headers.index("PT番号")
+    idx_seq = headers.index("製番")
+    assert any(r[idx_pt] for r in rows), "UNC ペア同期後も PT番号が空"
+    assert any(r[idx_seq] for r in rows), "UNC ペア同期後も 製番が空"
+    file_paths_seen = {
+        str(c.get("file_path") or "")
+        for c in ictx
+        if isinstance(c, dict) and c.get("file_path")
+    }
+    assert file_paths_seen, "iteration_contexts が空"
+    assert all(
+        p.replace("/", "\\").startswith("\\\\share\\") for p in file_paths_seen
+    ), "display UNC が file_path に残っていない: %s" % file_paths_seen
 
 
 def test_master_preview_per_file_cap_allows_second_file_type(
