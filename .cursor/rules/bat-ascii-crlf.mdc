@@ -1,0 +1,13 @@
+---
+description: Windows .bat は ASCII+CRLF。日本語禁止。full.bat 正本は tools/release。
+globs: "**/*.{bat,cmd}"
+alwaysApply: false
+---
+
+# Windows batch encoding
+
+- **Do not put Japanese (or any non-ASCII) in `.bat` / `.cmd`.** Japanese Windows `cmd` expects CP932; Cursor writes UTF-8 and corrupts prompts.
+- User-facing Japanese belongs in `docs/` or `release/README.txt` (UTF-8), not in batch `echo`.
+- Line endings must be **CRLF**. Prefer regenerating via `tools/release/_write_full_bat.py` instead of editor `Write` for `full.bat`.
+- Canonical full pipeline: **`tools/release/full.bat`** (git-tracked). `release/full.bat` is a thin wrapper only.
+- After editing, run: `python tools/release/assert_bat_ascii_crlf.py`

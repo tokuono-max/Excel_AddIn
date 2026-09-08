@@ -1,0 +1,22 @@
+---
+description: データ集約レポート列移行は過去行の PC性能/APL Ver を空欄のままにする
+globs: "**/svc_data_agg_write.py,**/data_agg_cancel.py,**/test_data_agg_event_log*.py,**/ui_help.json"
+alwaysApply: false
+---
+
+# データ集約レポート列（PC性能 / APL Ver）
+
+## 確定仕様
+
+- 列順先頭: `PC性能` → `APL Ver` → `記録日時` → …
+- **既存シート移行**: 左端に列挿入して列位置を揃える
+- **過去行**の `PC性能` / `APL Ver` は **空欄**（当時値は不明。現在値を埋めない）
+- **新規追記行**のみ値を記録（`_event_log_row_cells`）
+
+## 禁止
+
+- 移行時に既存行へ `resolve_pc_performance_label` / `resolve_apl_set_version` で埋めること
+- 「既存行へも値を記録」とヘルプに書くこと（正: 過去行は空欄、新規から記録）
+
+定数 `EVENT_LOG_MIGRATE_LEAVE_PAST_PC_APL_BLANK` と
+`tests/test_data_agg_event_log_migrate.py` の空欄断言・ヘルプ突合を維持すること。

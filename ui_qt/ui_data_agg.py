@@ -3,15 +3,15 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-09-03
-Version: 0.4.52
+Updated: 2026-09-07
+Version: 0.4.53
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.53 (2026-09-07) 閉じ時未保存確認（×／閉じる共通）。起動シート消失でメインも閉じる。一括中閉じは cancel で出力抑止。
   - 0.4.52 (2026-09-03) 本番一括は読取上限で止めず警告ダイアログも出さない。上限の確認はマスタデバッグで行う。
   - 0.4.51 (2026-08-10) 一括完了: 読取上限打ち切り時に継続／中止を選択。継続なら HC_DATA_AGG_EXTRACT_TRUNC_POLICY=warn で再実行。
-  - 0.4.50 (2026-07-02) 起動: prepare は ensure_front スキップ＋show 前 opacity 0→reveal。pulse 初回 700ms・再試行は Win32 のみ（COM 4 連打抑制）。上下黒塗り緩和。
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import uuid
@@ -505,9 +506,15 @@ class _DataAggMainWindow(QDialog):
         self._scenario_dirty: bool = False
         self._suppress_scenario_dirty: bool = False
         self._scenario_save_empty_filename: bool = False
+        self._closing_confirmed: bool = False
+        self._close_force_workbook_gone: bool = False
+        self._workbook_watch_timer: QTimer | None = None
+        self._workbook_watch_seen_ok: bool = False
         self._batch_poll_timer: QTimer | None = None
         self._batch_poll_deadline: float = 0.0
+        self._batch_poll_active_gone_deadline: float = 0.0
         self._batch_poll_run_id: str = ""
+        self._batch_ui_locked: bool = False
         self._excel_menu_bar_lock_applied: bool = False
         self._excel_menu_lock_app: Any = None
         self._excel_lock_interactive_prev: bool | None = None
@@ -636,6 +643,7 @@ class _DataAggMainWindow(QDialog):
         btn_clear_all.setAutoDefault(False)
         btn_clear_all.setDefault(False)
         btn_clear_all.clicked.connect(self._on_scenario_clear_all)
+        self._btn_scenario_clear_all = btn_clear_all
         btn_clear_sc = QPushButton(_u("BTN_SCENARIO_CLEAR_SOURCES", "シナリオクリア"))
         set_widget_tooltip(
             btn_clear_sc,
@@ -647,6 +655,7 @@ class _DataAggMainWindow(QDialog):
         btn_clear_sc.setAutoDefault(False)
         btn_clear_sc.setDefault(False)
         btn_clear_sc.clicked.connect(self._on_scenario_clear_sources_only)
+        self._btn_scenario_clear_sources = btn_clear_sc
         row_scenario_header.addWidget(btn_clear_all, 0)
         row_scenario_header.addWidget(btn_clear_sc, 0)
         items_layout.addLayout(row_scenario_header)
@@ -933,6 +942,7 @@ class _DataAggMainWindow(QDialog):
         self._scan_req_on_complete: Callable[[int], None] | None = None
         self._scan_thread: QThread | None = None
         self._scan_worker: _FolderScanWorker | None = None
+        self._scan_busy_dialog: QDialog | None = None
         self._scan_pending_auto: bool = False
         self._excel_unlock_pulse_chain_scheduled: bool = False
         self._excel_create_probe_t0: float = 0.0
@@ -1102,16 +1112,21 @@ class _DataAggMainWindow(QDialog):
 
         走査中／未完了: 主要操作を抑止。
         走査失敗後: 読込／保存／出力は可、一括／デバッグのみ不可。
+        一括実行中: 一括／デバッグ／読込・保存・出力・クリア・検索を抑止（閉じるは可）。
         """
         btn = getattr(self, "_btn_batch", None)
         dbg = getattr(self, "_btn_debug", None)
         exp = getattr(self, "_btn_scenario_export", None)
         btn_load = getattr(self, "_btn_scenario_load", None)
         btn_save = getattr(self, "_btn_scenario_save", None)
+        btn_clear_all = getattr(self, "_btn_scenario_clear_all", None)
+        btn_clear_sc = getattr(self, "_btn_scenario_clear_sources", None)
+        btn_scan = getattr(self, "_btn_scan_run", None)
         scan_blocking = bool(getattr(self, "_scan_busy", False)) or (
             not bool(getattr(self, "_scan_list_ready", True))
         )
-        batch_blocked = scan_blocking or (
+        batch_busy = bool(getattr(self, "_batch_ui_locked", False))
+        batch_blocked = scan_blocking or batch_busy or (
             not bool(getattr(self, "_scan_batch_ok", True))
         )
         tip_scan = str(
@@ -1119,6 +1134,11 @@ class _DataAggMainWindow(QDialog):
         ).strip()
         if not tip_scan:
             tip_scan = "基準フォルダの走査が完了するまで操作できません。"
+        tip_batch_busy = str(
+            (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE") or ""
+        ).strip()
+        if not tip_batch_busy:
+            tip_batch_busy = "一括実行が完了するまで操作できません。"
         tip_scan_fail = str(
             (self._ui or {}).get("TOOLTIP_BATCH_REQUIRES_SCAN_OK") or ""
         ).strip()
@@ -1129,7 +1149,7 @@ class _DataAggMainWindow(QDialog):
         ok_src = self._scenario_has_any_registered_source()
         ok_path = bool((self._scenario_path or "").strip())
         ok_batch = ok_src and not batch_blocked
-        ok_export = ok_src and ok_path and not scan_blocking
+        ok_export = ok_src and ok_path and not scan_blocking and not batch_busy
         tip_ok = str((self._ui or {}).get("TOOLTIP_BATCH") or "").strip()
         tip_dbg_ok = str((self._ui or {}).get("TOOLTIP_DEBUG") or "").strip()
         tip_exp_ok = str((self._ui or {}).get("TOOLTIP_SCENARIO_EXPORT") or "").strip()
@@ -1143,12 +1163,21 @@ class _DataAggMainWindow(QDialog):
         tip_exp_need = str(
             (self._ui or {}).get("TOOLTIP_SCENARIO_EXPORT_REQUIRES_LOAD") or ""
         ).strip()
+        idle_for_scenario = not scan_blocking and not batch_busy
 
-        def _batch_tip() -> str:
+        def _block_tip() -> str:
+            if batch_busy:
+                return tip_batch_busy
             if scan_blocking:
                 return tip_scan
             if not getattr(self, "_scan_batch_ok", True):
                 return tip_scan_fail
+            return ""
+
+        def _batch_tip() -> str:
+            blocked = _block_tip()
+            if blocked:
+                return blocked
             return tip_ok if ok_src else (tip_need or tip_ok)
 
         if btn is not None:
@@ -1156,18 +1185,17 @@ class _DataAggMainWindow(QDialog):
             set_widget_tooltip(btn, _batch_tip())
         if dbg is not None:
             dbg.setEnabled(ok_batch)
-            if scan_blocking:
-                set_widget_tooltip(dbg, tip_scan)
-            elif not getattr(self, "_scan_batch_ok", True):
-                set_widget_tooltip(dbg, tip_scan_fail)
+            blocked = _block_tip()
+            if blocked:
+                set_widget_tooltip(dbg, blocked)
             else:
                 set_widget_tooltip(
                     dbg, tip_dbg_ok if ok_src else (tip_need or tip_dbg_ok)
                 )
         if exp is not None:
             exp.setEnabled(ok_export)
-            if scan_blocking:
-                set_widget_tooltip(exp, tip_scan)
+            if batch_busy or scan_blocking:
+                set_widget_tooltip(exp, tip_batch_busy if batch_busy else tip_scan)
             elif ok_export:
                 set_widget_tooltip(exp, tip_exp_ok or tip_ok)
             elif not ok_src:
@@ -1175,22 +1203,27 @@ class _DataAggMainWindow(QDialog):
             else:
                 set_widget_tooltip(exp, tip_exp_need or tip_exp_ok or tip_need)
         if btn_load is not None:
-            btn_load.setEnabled(not scan_blocking)
-            set_widget_tooltip(
-                btn_load,
-                tip_scan
-                if scan_blocking
-                else _ui_disp_str(
-                    self._ui or {},
-                    "TOOLTIP_BTN_SCENARIO_LOAD",
-                    "シナリオ JSON を読み込み、項目ごとの取得設定を復元します。",
-                ),
-            )
+            btn_load.setEnabled(idle_for_scenario)
+            if not idle_for_scenario:
+                set_widget_tooltip(
+                    btn_load, tip_batch_busy if batch_busy else tip_scan
+                )
+            else:
+                set_widget_tooltip(
+                    btn_load,
+                    _ui_disp_str(
+                        self._ui or {},
+                        "TOOLTIP_BTN_SCENARIO_LOAD",
+                        "シナリオ JSON を読み込み、項目ごとの取得設定を復元します。",
+                    ),
+                )
         if btn_save is not None:
-            ok_save = bool(getattr(self, "_scenario_dirty", False)) and not scan_blocking
+            ok_save = bool(getattr(self, "_scenario_dirty", False)) and idle_for_scenario
             btn_save.setEnabled(ok_save)
-            if scan_blocking:
-                set_widget_tooltip(btn_save, tip_scan)
+            if not idle_for_scenario:
+                set_widget_tooltip(
+                    btn_save, tip_batch_busy if batch_busy else tip_scan
+                )
             else:
                 set_widget_tooltip(
                     btn_save,
@@ -1199,6 +1232,41 @@ class _DataAggMainWindow(QDialog):
                         "TOOLTIP_BTN_SCENARIO_SAVE",
                         "現在の取得設定をシナリオファイルに保存します（変更があるとき有効）。",
                     ),
+                )
+        for clear_btn, tip_key, tip_default in (
+            (
+                btn_clear_all,
+                "TOOLTIP_SCENARIO_CLEAR_ALL",
+                "マスタ項目一覧とシナリオ定義を空にし、未読込状態に戻します。",
+            ),
+            (
+                btn_clear_sc,
+                "TOOLTIP_SCENARIO_CLEAR_SOURCES",
+                "項目名は残し、各項目に登録した取得シナリオのみ削除します。",
+            ),
+        ):
+            if clear_btn is None:
+                continue
+            clear_btn.setEnabled(idle_for_scenario)
+            if not idle_for_scenario:
+                set_widget_tooltip(
+                    clear_btn, tip_batch_busy if batch_busy else tip_scan
+                )
+            else:
+                set_widget_tooltip(
+                    clear_btn,
+                    _ui_disp_str(self._ui or {}, tip_key, tip_default),
+                )
+        if btn_scan is not None and not bool(getattr(self, "_scan_busy", False)):
+            # 走査中は _set_scan_ui_busy が優先。一括中のみここで抑止。
+            btn_scan.setEnabled(not batch_busy)
+            if batch_busy:
+                set_widget_tooltip(btn_scan, tip_batch_busy)
+            else:
+                self._main_set_tip(
+                    btn_scan,
+                    "TOOLTIP_BTN_SEARCH_RUN",
+                    "条件に従いファイル検索を行い、下の一覧を更新します。",
                 )
 
     def _apply_excel_menu_bar_lock(self, lock: bool) -> bool:
@@ -2266,6 +2334,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_scenario_clear_all(self) -> None:
         """マスタ項目一覧とシナリオ内容を空にし、未読込相当へ。基準フォルダ・検出一覧もクリア。シナリオ保存は無効のまま。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         from svc import svc_data_agg_scenario as scenario_mod
 
         self._item_table.blockSignals(True)
@@ -2291,6 +2369,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_scenario_clear_sources_only(self) -> None:
         """項目行は残し、各マスタの取得シナリオ（sources）のみ空にする。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         from svc import svc_data_agg_scenario as scenario_mod
 
         if self._item_table.rowCount() <= 0:
@@ -2334,10 +2422,76 @@ class _DataAggMainWindow(QDialog):
         except Exception:
             self._lbl_detected_file_count.setText("ファイル数：%d" % n)
 
+    def _show_scan_busy_dialog(self) -> None:
+        """基準フォルダ走査中の軽い待機ダイアログ（完了／失敗で閉じる）。"""
+        dlg = getattr(self, "_scan_busy_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.isVisible():
+                    return
+            except Exception:
+                self._scan_busy_dialog = None
+                dlg = None
+        title = _ui_disp_str(
+            self._ui or {},
+            "TITLE_SCAN_BUSY_DIALOG",
+            "基準フォルダ走査",
+        )
+        msg = _ui_disp_str(
+            self._ui or {},
+            "MSG_SCAN_BUSY_DIALOG",
+            "基準フォルダを走査中…",
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        try:
+            dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        except Exception:
+            pass
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lbl = QLabel(msg)
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+        dlg.setMinimumWidth(280)
+        dlg.setFixedHeight(dlg.sizeHint().height() + 8)
+
+        def _ignore_close(event: Any) -> None:
+            event.ignore()
+
+        dlg.closeEvent = _ignore_close  # type: ignore[method-assign]
+        self._scan_busy_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _close_scan_busy_dialog(self) -> None:
+        dlg = getattr(self, "_scan_busy_dialog", None)
+        self._scan_busy_dialog = None
+        if dlg is None:
+            return
+        try:
+            dlg.closeEvent = lambda event: event.accept()  # type: ignore[method-assign]
+        except Exception:
+            pass
+        try:
+            dlg.hide()
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+
     def _set_scan_ui_busy(self, busy: bool) -> None:
         self._scan_busy = bool(busy)
         if busy:
             self._scan_list_ready = False
+            self._show_scan_busy_dialog()
+        else:
+            self._close_scan_busy_dialog()
         btn = getattr(self, "_btn_scan_run", None)
         if btn is not None:
             btn.setEnabled(not busy)
@@ -3362,6 +3516,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_debug(self) -> None:
         """デバッグウィンドウ（§3.1.3）を開く。項目一覧・検出パスを反映（未登録時はデモ）。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         _u = lambda k, d: _ui_disp_str(self._ui or {}, k, d)
         t_dbg = _u("TITLE_DEBUG", "デバッグ").strip() or "デバッグ"
         try:
@@ -3389,6 +3553,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_scenario_export(self) -> None:
         """読込済みシナリオを、ソース1行単位で Excel シートへ書き出す（既定シート名＝ファイル stem）。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         from core.core_xlc import clear_sheet_used_range, get_excel_context_from_hwnd
         from svc import svc_data_agg_scenario as scenario_mod
         from svc import svc_data_agg_write as write_mod
@@ -3698,6 +3872,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_scan(self, auto_mode: bool = False) -> None:
         """検索実行でフォルダを走査し、検出ファイル一覧を更新する（非同期）。"""
+        if (not auto_mode) and bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         self._request_folder_scan(auto_mode=auto_mode)
 
     def _get_scan_state(self) -> dict[str, Any]:
@@ -3725,6 +3909,16 @@ class _DataAggMainWindow(QDialog):
 
     def _on_scenario_load(self) -> None:
         """シナリオ読込ダイアログで .json を選択し、項目一覧・対象ファイル一覧を更新する。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         try:
             path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -3904,8 +4098,9 @@ class _DataAggMainWindow(QDialog):
             out = out[: cap - 1] + "…"
         return out
 
-    def _on_scenario_save(self) -> None:
-        """シナリオ保存ダイアログで保存先を指定し、現在のシナリオを保存する。"""
+    def _try_save_scenario_interactive(self, *, show_done: bool = True) -> bool:
+        """シナリオ保存ダイアログで保存する。成功時 True（キャンセル／失敗は False）。"""
+        title_sv = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存")
         try:
             data = self._build_scenario_from_ui()
             if self._scenario_save_empty_filename:
@@ -3922,14 +4117,11 @@ class _DataAggMainWindow(QDialog):
                 ),
             )
             if not path:
-                return
+                return False
             from svc import svc_data_agg_scenario as scenario_mod
 
             save_errs = scenario_mod.validate_scenario(data)
             if save_errs:
-                title_sv = _ui_disp_str(
-                    self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存"
-                )
                 pre_sv = _ui_disp_str(
                     self._ui or {},
                     "MSG_SCENARIO_SAVE_VALIDATE_PREFIX",
@@ -3940,7 +4132,7 @@ class _DataAggMainWindow(QDialog):
                     title_sv,
                     pre_sv + "\n" + "\n".join(save_errs[:8]),
                 )
-                return
+                return False
 
             scenario_mod.save_scenario(path, data)
             self._scenario = data
@@ -3949,21 +4141,22 @@ class _DataAggMainWindow(QDialog):
             set_last_folder(str(Path(path).parent))
             self._clear_scenario_dirty()
             self._refresh_scenario_display_label()
-            title_sv = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存")
-            show_done_notice(
-                self,
-                title_sv,
-                _ui_disp_str(
-                    self._ui or {},
-                    "MSG_SCENARIO_SAVE_DONE_FMT",
-                    "保存しました: %s",
+            if show_done:
+                show_done_notice(
+                    self,
+                    title_sv,
+                    _ui_disp_str(
+                        self._ui or {},
+                        "MSG_SCENARIO_SAVE_DONE_FMT",
+                        "保存しました: %s",
+                    )
+                    % path,
                 )
-                % path,
-            )
+            return True
         except Exception as exc:
             show_warning_notice(
                 self,
-                _ui_disp_str(self._ui or {}, "BTN_SCENARIO_SAVE", "シナリオ保存"),
+                title_sv,
                 _ui_disp_str(
                     self._ui or {},
                     "MSG_SCENARIO_SAVE_FAILED_FMT",
@@ -3971,6 +4164,11 @@ class _DataAggMainWindow(QDialog):
                 )
                 % exc,
             )
+            return False
+
+    def _on_scenario_save(self) -> None:
+        """シナリオ保存ダイアログで保存先を指定し、現在のシナリオを保存する。"""
+        self._try_save_scenario_interactive(show_done=True)
 
     def _build_scenario_from_ui(
         self, *, include_scan_file_paths: bool = False
@@ -4035,19 +4233,60 @@ class _DataAggMainWindow(QDialog):
         self._batch_poll_run_id = str(run_id or "").strip()
         delete_batch_done_notify(sid)
         self._batch_poll_deadline = time.time() + 7200.0
+        self._batch_poll_active_gone_deadline = 0.0
         if self._batch_poll_timer is None:
             self._batch_poll_timer = QTimer(self)
             self._batch_poll_timer.timeout.connect(self._on_batch_done_poll_tick)
         self._batch_poll_timer.start(400)
 
+    def _batch_active_pickle_present(self) -> bool:
+        sid = self._active_batch_sheet_id()
+        if not sid:
+            return False
+        try:
+            ipc_root = core_env.ipc_dir_raw()
+            if not ipc_root:
+                return False
+            from ui_qt.ipc_file import read_pickle
+
+            d = read_pickle(_batch_active_path(sid, Path(ipc_root)))
+            return isinstance(d, dict) and bool(str(d.get("run_id") or "").strip())
+        except Exception:
+            return False
+
+    def _lock_batch_ui(self) -> None:
+        """一括開始後、衝突する操作ボタンを無効化する。"""
+        self._batch_ui_locked = True
+        self._update_batch_button_enabled()
+
+    def _release_batch_ui_lock(self) -> None:
+        """一括完了／中止／失敗後に操作ボタンを復帰する。"""
+        self._batch_ui_locked = False
+        self._update_batch_button_enabled()
+
     def _on_batch_done_poll_tick(self) -> None:
-        if time.time() > self._batch_poll_deadline:
+        now = time.time()
+        if now > self._batch_poll_deadline:
             if self._batch_poll_timer is not None:
                 self._batch_poll_timer.stop()
+            self._release_batch_ui_lock()
             return
         sid = str(getattr(self, "_batch_poll_sheet_id", "") or "").strip() or str(self._sheet_id or "")
         d = try_read_batch_done_notify(sid)
         if not d:
+            # 完了通知が無い経路でも active pickle 消失で UI ロックは解除する。
+            # ただしタイマーはすぐ止めない（notify 書込と active 削除の順序ずれ猶予）。
+            if not self._batch_active_pickle_present():
+                if bool(getattr(self, "_batch_ui_locked", False)):
+                    self._release_batch_ui_lock()
+                grace = float(getattr(self, "_batch_poll_active_gone_deadline", 0.0) or 0.0)
+                if grace <= 0.0:
+                    self._batch_poll_active_gone_deadline = now + 15.0
+                elif now >= grace:
+                    if self._batch_poll_timer is not None:
+                        self._batch_poll_timer.stop()
+            else:
+                self._batch_poll_active_gone_deadline = 0.0
             return
         expect_run_id = str(getattr(self, "_batch_poll_run_id", "") or "").strip()
         got_run_id = str(d.get("run_id") or "").strip()
@@ -4056,8 +4295,10 @@ class _DataAggMainWindow(QDialog):
             delete_batch_done_notify(sid)
             return
         delete_batch_done_notify(sid)
+        self._batch_poll_active_gone_deadline = 0.0
         if self._batch_poll_timer is not None:
             self._batch_poll_timer.stop()
+        self._release_batch_ui_lock()
         title = str(d.get("title") or "データ集約")
         msg = _normalize_message_newlines(str(d.get("message") or ""))
         if d.get("ok", True):
@@ -4129,6 +4370,16 @@ class _DataAggMainWindow(QDialog):
 
     def _run_execution(self, action: str, *, extract_trunc_policy: str | None = None) -> None:
         """一括実行を IPC で svc に依頼する（メイン本番は一括のみ）。"""
+        if bool(getattr(self, "_batch_ui_locked", False)) or self._is_batch_run_active():
+            show_warning_notice(
+                self,
+                "データ集約",
+                str(
+                    (self._ui or {}).get("TOOLTIP_ACTIONS_REQUIRE_BATCH_IDLE")
+                    or "一括実行が完了するまで操作できません。"
+                ).strip(),
+            )
+            return
         if bool(getattr(self, "_scan_busy", False)) or (
             not bool(getattr(self, "_scan_list_ready", True))
         ):
@@ -4305,11 +4556,12 @@ class _DataAggMainWindow(QDialog):
                 env["HC_DATA_AGG_EXTRACT_TRUNC_POLICY"] = (
                     "warn" if policy in ("warn", "continue", "log") else "abort"
                 )
-            if notify_parent_dialog:
-                self._start_batch_done_poll_for_sheet(
-                    run_sheet_id,
-                    run_id=batch_run_id,
-                )
+            # 完了通知の有無に関わらずポーリングし、UI ロック解除に使う
+            self._start_batch_done_poll_for_sheet(
+                run_sheet_id,
+                run_id=batch_run_id,
+            )
+            self._lock_batch_ui()
             spawn_cwd = str(install_root) if install_root is not None else str(proj_root)
             subprocess.Popen(cmd, cwd=spawn_cwd, env=env)
             if show_batch_start:
@@ -4319,6 +4571,7 @@ class _DataAggMainWindow(QDialog):
                     "%s を開始しました。" % "一括実行",
                 )
         except Exception as exc:
+            self._release_batch_ui_lock()
             show_warning_notice(self, "データ集約", "実行の開始に失敗しました: %s" % exc)
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -4357,10 +4610,302 @@ class _DataAggMainWindow(QDialog):
         if getattr(self, "_scan_pending_auto", False):
             self._scan_pending_auto = False
             self._request_folder_scan(auto_mode=True)
+        try:
+            self._start_workbook_watch()
+        except Exception:
+            pass
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_item_table_columns)
+
+    def _start_workbook_watch(self) -> None:
+        """起動元シート GUID の生存監視を開始（ブック閉じで本画面も閉じる）。"""
+        sid = str(self._sheet_id or "").strip()
+        hwnd = int(self._parent_hwnd or 0)
+        if not sid or sid == "_" or hwnd <= 0:
+            return
+        if self._workbook_watch_timer is not None:
+            return
+        timer = QTimer(self)
+        timer.setInterval(1500)
+        timer.timeout.connect(self._on_workbook_watch_tick)
+        self._workbook_watch_timer = timer
+        self._workbook_watch_seen_ok = False
+        timer.start()
+        QTimer.singleShot(400, self._on_workbook_watch_tick)
+
+    def _stop_workbook_watch(self) -> None:
+        t = getattr(self, "_workbook_watch_timer", None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        self._workbook_watch_timer = None
+
+    def _launch_sheet_still_available(self) -> bool | None:
+        """起動シートが Excel 上に残っているか。判定不能時は None。"""
+        sid = str(self._sheet_id or "").strip()
+        hwnd = int(self._parent_hwnd or 0)
+        if not sid or sid == "_" or hwnd <= 0:
+            return None
+        try:
+            from core.core_w32 import is_window
+
+            if not is_window(hwnd):
+                return False
+        except Exception:
+            pass
+        try:
+            from core.core_xlc import get_excel_context_from_hwnd
+
+            # 周期監視のため成功ログは抑制（quiet）。失敗は INFO のまま。
+            ctx = get_excel_context_from_hwnd(hwnd, sid, quiet=True)
+            return ctx is not None
+        except Exception:
+            return None
+
+    def _on_workbook_watch_tick(self) -> None:
+        if getattr(self, "_closing_confirmed", False):
+            self._stop_workbook_watch()
+            return
+        try:
+            if not self.isVisible():
+                return
+        except Exception:
+            return
+        alive = self._launch_sheet_still_available()
+        if alive is True:
+            self._workbook_watch_seen_ok = True
+            return
+        if alive is None:
+            return
+        # False: シート消失 or Excel HWND 無効
+        if not self._workbook_watch_seen_ok:
+            # 起動直後の COM 揺らぎを避ける。HWND 自体が死んでいれば閉じる。
+            try:
+                from core.core_w32 import is_window
+
+                if is_window(int(self._parent_hwnd or 0)):
+                    return
+            except Exception:
+                return
+        self._stop_workbook_watch()
+        # 未保存確認でキャンセルされた場合に子だけ消えないよう、子閉じは confirm 成功後に行う。
+        # 起動シート消失時は画面を残せないため、未保存確認にキャンセルは出さない。
+        self._close_force_workbook_gone = True
+        try:
+            self.close()
+        finally:
+            self._close_force_workbook_gone = False
+
+    def _close_owned_subdialogs(self) -> None:
+        """シナリオ編集・デバッグ等の子ダイアログを先に閉じる。"""
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if not isinstance(app, QApplication):
+                return
+            # モーダル連鎖を順に閉じる
+            for _ in range(8):
+                modal = app.activeModalWidget()
+                if modal is None or modal is self:
+                    break
+                try:
+                    modal.reject()
+                except Exception:
+                    try:
+                        modal.close()
+                    except Exception:
+                        break
+            for w in list(app.topLevelWidgets()):
+                if w is self or not isinstance(w, QDialog):
+                    continue
+                try:
+                    if not w.isVisible():
+                        continue
+                except Exception:
+                    continue
+                parent = None
+                try:
+                    parent = w.parent()
+                except Exception:
+                    parent = None
+                if parent is self or type(w).__name__ in (
+                    "_ScenarioEditDialog",
+                    "DataAggDebugDialog",
+                ):
+                    try:
+                        w.reject()
+                    except Exception:
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    def _confirm_close_with_scenario_prompt(self) -> bool:
+        """未保存シナリオがあれば確認。閉じ続行で True、キャンセルで False。
+
+        起動シート消失による強制閉じ（_close_force_workbook_gone）では
+        キャンセルを出さず、保存する／保存しないのみとする。
+        """
+        if getattr(self, "_closing_confirmed", False):
+            return True
+        force_gone = bool(getattr(self, "_close_force_workbook_gone", False))
+        if not bool(getattr(self, "_scenario_dirty", False)):
+            self._closing_confirmed = True
+            self._stop_workbook_watch()
+            self._close_owned_subdialogs()
+            return True
+
+        title = self._main_ui_disp(
+            "DIALOG_TITLE_SCENARIO_UNSAVED",
+            "シナリオ未保存",
+        )
+        if force_gone:
+            text = self._main_ui_disp(
+                "MSG_SCENARIO_UNSAVED_ON_WORKBOOK_CLOSE",
+                "起動元のブック（シート）が閉じられました。\n"
+                "シナリオが保存されていません。保存しますか？",
+            )
+        else:
+            text = self._main_ui_disp(
+                "MSG_SCENARIO_UNSAVED_ON_CLOSE",
+                "シナリオが保存されていません。\n保存しますか？",
+            )
+        btn_save_lbl = self._main_ui_disp("BTN_SCENARIO_UNSAVED_SAVE", "保存する")
+        btn_discard_lbl = self._main_ui_disp(
+            "BTN_SCENARIO_UNSAVED_DISCARD", "保存しない"
+        )
+        btn_cancel_lbl = self._main_ui_disp("BTN_SCENARIO_UNSAVED_CANCEL", "キャンセル")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        btn_save = box.addButton(btn_save_lbl, QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = box.addButton(
+            btn_discard_lbl, QMessageBox.ButtonRole.DestructiveRole
+        )
+        btn_cancel = None
+        if not force_gone:
+            btn_cancel = box.addButton(
+                btn_cancel_lbl, QMessageBox.ButtonRole.RejectRole
+            )
+        box.setDefaultButton(btn_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if (not force_gone) and (clicked is btn_cancel or clicked is None):
+            return False
+        if clicked is btn_save:
+            if not self._try_save_scenario_interactive(show_done=False):
+                # ブック消失時に保存失敗／保存ダイアログキャンセルでも画面は閉じる
+                if force_gone:
+                    self._closing_confirmed = True
+                    self._stop_workbook_watch()
+                    self._close_owned_subdialogs()
+                    return True
+                return False
+        elif force_gone and clicked is not btn_discard and clicked is not btn_save:
+            # 想定外（閉じる等）でも強制閉じでは残さない
+            pass
+        # discard or saved
+        self._closing_confirmed = True
+        self._stop_workbook_watch()
+        self._close_owned_subdialogs()
+        return True
+
+    def _active_batch_sheet_id(self) -> str:
+        sid = str(getattr(self, "_batch_poll_sheet_id", "") or "").strip()
+        if sid:
+            return sid
+        return str(self._sheet_id or "").strip()
+
+    def _is_batch_run_active(self) -> bool:
+        """一括実行が進行中か（UI ロック、完了ポーリング中、または active pickle あり）。"""
+        if bool(getattr(self, "_batch_ui_locked", False)):
+            return True
+        try:
+            t = getattr(self, "_batch_poll_timer", None)
+            if t is not None and t.isActive():
+                return True
+        except Exception:
+            pass
+        return self._batch_active_pickle_present()
+
+    def _cancel_active_batch_on_main_close(self) -> None:
+        """画面閉じ時: 進行中一括があれば進捗中止と同じ cancel フラグ＋強制終了経路へ。
+
+        compute／batch_write は UI と別プロセスのため、フラグを立てないと書込みが走り得る。
+        """
+        if not self._is_batch_run_active():
+            return
+        sid = self._active_batch_sheet_id()
+        if not sid:
+            return
+        ipc_root = core_env.ipc_dir_raw()
+        if not ipc_root:
+            return
+        root = Path(ipc_root)
+        try:
+            from svc.data_agg_cancel import (
+                cancel_request_path_data_agg_batch,
+                run_data_agg_batch_force_terminate_no_com,
+            )
+        except Exception:
+            return
+        cancel_path = cancel_request_path_data_agg_batch(sid, root)
+        try:
+            write_pickle(cancel_path, {"cancel": True, "v": 1, "reason": "main_close"})
+        except Exception:
+            try:
+                logger.warning(
+                    "[DATA_AGG] main_close cancel pickle failed sheet_id=%s", sid
+                )
+            except Exception:
+                pass
+            return
+        try:
+            if self._batch_poll_timer is not None:
+                self._batch_poll_timer.stop()
+        except Exception:
+            pass
+        self._batch_ui_locked = False
+        try:
+            logger.info(
+                "[DATA_AGG] main_close requested batch cancel sheet_id=%s path=%s",
+                sid,
+                cancel_path,
+            )
+        except Exception:
+            pass
+
+        def _bg() -> None:
+            try:
+                run_data_agg_batch_force_terminate_no_com(
+                    cancel_path=cancel_path,
+                    progress_path=None,
+                    notify_parent=False,
+                    write_progress_cancel=False,
+                )
+            except Exception as ex:
+                try:
+                    logger.warning(
+                        "[DATA_AGG] main_close batch force terminate failed: %s",
+                        ex,
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_bg,
+            name="data_agg_main_close_batch_cancel",
+            daemon=True,
+        ).start()
 
     def _teardown_before_hide_main(self) -> None:
         """× の closeEvent と 閉じるの reject の両方から呼ぶ。
@@ -4372,6 +4917,11 @@ class _DataAggMainWindow(QDialog):
             _log_data_agg_main_lifecycle(self, "teardown_enter")
         except Exception:
             pass
+        try:
+            self._cancel_active_batch_on_main_close()
+        except Exception:
+            pass
+        self._stop_workbook_watch()
         self._apply_excel_menu_bar_lock(False)
         self._excel_menu_bar_lock_applied = False
         self._excel_unlock_pulse_chain_scheduled = False
@@ -4380,6 +4930,7 @@ class _DataAggMainWindow(QDialog):
         self._main_opacity_reveal_pending = False
         self._main_opacity_reveal_scheduled = False
         self._stop_scan_thread()
+        self._close_scan_busy_dialog()
         try:
             if self._batch_poll_timer is not None:
                 self._batch_poll_timer.stop()
@@ -4410,6 +4961,12 @@ class _DataAggMainWindow(QDialog):
             _log_data_agg_main_lifecycle(self, "reject_enter")
         except Exception:
             pass
+        if not self._confirm_close_with_scenario_prompt():
+            try:
+                _log_data_agg_main_lifecycle(self, "reject_cancelled")
+            except Exception:
+                pass
+            return
         self._teardown_before_hide_main()
         super().reject()
         try:
@@ -4418,7 +4975,7 @@ class _DataAggMainWindow(QDialog):
             pass
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """リボン抑止の解除・タイマ停止・モデルレス一覧からの除去。"""
+        """× 閉じ。QDialog 既定は reject() を呼ぶため、確認のみ行い本体片付けは reject に任せる。"""
         acc0 = True
         try:
             acc0 = bool(event.isAccepted())
@@ -4428,7 +4985,16 @@ class _DataAggMainWindow(QDialog):
             _log_data_agg_main_lifecycle(self, "close_event_enter", "accepted=%s" % acc0)
         except Exception:
             pass
-        self._teardown_before_hide_main()
+        if not self._confirm_close_with_scenario_prompt():
+            try:
+                event.ignore()
+            except Exception:
+                pass
+            try:
+                _log_data_agg_main_lifecycle(self, "close_event_cancelled")
+            except Exception:
+                pass
+            return
         super().closeEvent(event)
         acc1 = True
         try:

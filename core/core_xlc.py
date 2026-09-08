@@ -3,8 +3,8 @@
 Python: 3.12
 Module: core/core_xlc.py
 Created: 2026-01-xx
-Updated: 2026-06-06
-Version: 2.5.12
+Updated: 2026-09-08
+Version: 2.5.13
 Purpose:
   Excel COM 操作の薄いヘルパ（UI非依存 / core から ui import 禁止）。
   - シートカスタムプロパティ（GUID 等）の読み書き
@@ -16,9 +16,9 @@ Design:
   - 失敗時に例外を投げない（Excelロック解除漏れの方が致命）
 
 History (latest 3):
+  - 2.5.13 (2026-09-08): get_excel_context_from_hwnd 成功ログを DEBUG 化。quiet で周期監視の成功ログ抑制。
   - 2.5.12 (2026-06-14): get_excel_context_from_hwnd: sheet_id 指定時は全ブック走査（アクティブブック誤結合を防止）。
   - 2.5.11 (2026-06-06) restore_screen_updating ヘルパを追加（restore_on_exit=False 利用後の復帰用）。
-  - 2.5.10 (2026-06-06) suspend_sheet_updates: restore_on_exit=False で ScreenUpdating 復帰を呼び出し側に委譲。
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from core import core_cst as cst
 
 
 # 変数: バージョン情報
-__version__ = "2.5.11"
+__version__ = "2.5.13"
 
 EXCEL_SHEET_NAME_MAX_LEN: int = 31
 
@@ -264,8 +264,17 @@ def excel_try_set_main_commandbars_enabled(xw_app: Any, enabled: bool) -> None:
         )
 
 
-def get_excel_context_from_hwnd(hwnd: int, sheet_id: str = "") -> Optional[tuple]:
+def get_excel_context_from_hwnd(
+    hwnd: int,
+    sheet_id: str = "",
+    *,
+    quiet: bool = False,
+) -> Optional[tuple]:
     """HWND から xlwings の app, book, sheet を取得する。
+
+    Args:
+        quiet: True のとき成功ログを出さない（ブック監視など周期呼び出し向け）。
+            失敗は従来どおり INFO。成功は通常 DEBUG（運用 INFO ログへの周期スパム防止）。
 
     Returns:
         (app, book, sheet, hwnd) のタプル。失敗時は None。
@@ -290,12 +299,13 @@ def get_excel_context_from_hwnd(hwnd: int, sheet_id: str = "") -> Optional[tuple
                 )
                 return None
             book, sheet = hit
-            logger.info(
-                "[XLC_CTX] get_excel_context_from_hwnd ok hwnd=%s sheet_id=%r book=%s via=guid_scan",
-                ph,
-                sheet_id_s,
-                getattr(book, "name", "?"),
-            )
+            if not quiet:
+                logger.debug(
+                    "[XLC_CTX] get_excel_context_from_hwnd ok hwnd=%s sheet_id=%r book=%s via=guid_scan",
+                    ph,
+                    sheet_id_s,
+                    getattr(book, "name", "?"),
+                )
             return (app, book, sheet, ph)
 
         book = app.books.active
@@ -313,12 +323,13 @@ def get_excel_context_from_hwnd(hwnd: int, sheet_id: str = "") -> Optional[tuple
                 sheet_id_s,
             )
             return None
-        logger.info(
-            "[XLC_CTX] get_excel_context_from_hwnd ok hwnd=%s sheet_id=%r book=%s",
-            ph,
-            sheet_id_s,
-            getattr(book, "name", "?"),
-        )
+        if not quiet:
+            logger.debug(
+                "[XLC_CTX] get_excel_context_from_hwnd ok hwnd=%s sheet_id=%r book=%s",
+                ph,
+                sheet_id_s,
+                getattr(book, "name", "?"),
+            )
         return (app, book, sheet, ph)
     except Exception as ex:
         try:

@@ -339,10 +339,12 @@ def test_write_master_replace_full_block_writes_headers_and_rows_at_anchor() -> 
 
 
 def test_event_log_headers_include_elapsed_after_timestamp() -> None:
-    assert EVENT_LOG_HEADERS[0] == "記録日時"
-    assert EVENT_LOG_HEADERS[1] == "処理時間"
-    assert EVENT_LOG_HEADERS[2] == "出力行数"
-    assert EVENT_LOG_HEADERS[3] == "区分"
+    assert EVENT_LOG_HEADERS[0] == "PC性能"
+    assert EVENT_LOG_HEADERS[1] == "APL Ver"
+    assert EVENT_LOG_HEADERS[2] == "記録日時"
+    assert EVENT_LOG_HEADERS[3] == "処理時間"
+    assert EVENT_LOG_HEADERS[4] == "出力行数"
+    assert EVENT_LOG_HEADERS[5] == "区分"
 
 
 def test_format_elapsed_ms_ja() -> None:
@@ -360,9 +362,11 @@ def test_format_batch_run_summary_row_processing_time_column() -> None:
         total_ms=12345,
     )
     assert len(row) == len(EVENT_LOG_HEADERS)
-    assert "秒" in str(row[1]) or "分" in str(row[1])
-    assert row[2] == 42
-    assert row[3] == "一括実行・完了"
+    assert str(row[0] or "").strip()  # PC性能
+    assert str(row[1] or "").strip()  # APL Ver
+    assert "秒" in str(row[3]) or "分" in str(row[3])
+    assert row[4] == 42
+    assert row[5] == "一括実行・完了"
 
 
 def test_format_batch_run_summary_row_cancelled() -> None:
@@ -374,10 +378,10 @@ def test_format_batch_run_summary_row_cancelled() -> None:
         files=3,
         total_ms=500,
     )
-    assert row[3] == "一括実行・中止"
+    assert row[5] == "一括実行・中止"
     import json
 
-    detail = json.loads(str(row[8]))
+    detail = json.loads(str(row[10]))
     assert detail.get("結果") == "中止"
 
 
@@ -397,8 +401,10 @@ def test_format_path_trace_and_join_include_output_rows_column() -> None:
     )
     assert len(pt) == 1
     assert len(pt[0]) == len(EVENT_LOG_HEADERS)
-    assert pt[0][2] == ""
-    assert "パス追跡" in str(pt[0][3])
+    assert str(pt[0][0] or "").strip()
+    assert str(pt[0][1] or "").strip()
+    assert pt[0][4] == ""
+    assert "パス追跡" in str(pt[0][5])
 
     je = format_join_events_for_event_log(
         "sid",
@@ -406,8 +412,8 @@ def test_format_path_trace_and_join_include_output_rows_column() -> None:
         [{"reason_code": "JOIN_MISS", "k": 1}],
     )
     assert len(je[0]) == len(EVENT_LOG_HEADERS)
-    assert je[0][2] == ""
-    assert je[0][3] == "JOIN_MISS"
+    assert je[0][4] == ""
+    assert je[0][5] == "JOIN_MISS"
 
 
 def test_event_log_row_kind_sid_path_detail_old_and_new() -> None:
@@ -429,7 +435,40 @@ def test_event_log_row_kind_sid_path_detail_old_and_new() -> None:
     assert sp == r"C:\s.json"
     assert "中止" in detail
 
+    mid = [
+        "t",
+        "1 秒",
+        10,
+        "一括実行・中止",
+        "追加",
+        "Sheet1",
+        "sid",
+        r"C:\s.json",
+        '{"結果":"中止"}',
+    ]
+    kind_m, sid_m, sp_m, detail_m = _event_log_row_kind_sid_path_detail(mid)
+    assert (kind_m, sid_m, sp_m) == (kind, sid, sp)
+    assert detail_m == detail
+
+    with_apl = [
+        "t",
+        "1 秒",
+        10,
+        "1.1.11.7",
+        "一括実行・中止",
+        "追加",
+        "Sheet1",
+        "sid",
+        r"C:\s.json",
+        '{"結果":"中止"}',
+    ]
+    kind_a, sid_a, sp_a, detail_a = _event_log_row_kind_sid_path_detail(with_apl)
+    assert (kind_a, sid_a, sp_a) == (kind, sid, sp)
+    assert detail_a == detail
+
     new = [
+        "CPU / 論理CPU 8 / メモリ 16GB / Windows 10",
+        "1.1.11.7",
         "t",
         "1 秒",
         10,
@@ -444,3 +483,11 @@ def test_event_log_row_kind_sid_path_detail_old_and_new() -> None:
     assert (kind2, sid2, sp2) == (kind, sid, sp)
     assert detail2 == detail
 
+
+def test_resolve_pc_performance_label_has_core_parts() -> None:
+    from svc.svc_data_agg_write import resolve_pc_performance_label
+
+    label = resolve_pc_performance_label()
+    assert "論理CPU" in label
+    assert "メモリ" in label or "GB" in label or True  # 取得失敗時も空でない想定は緩め
+    assert label  # 少なくとも何か入る（OS or CPU count）

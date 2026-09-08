@@ -569,7 +569,23 @@ def _event_log_row_kind_sid_path_detail(
 ) -> tuple[str, str, str, str]:
     """レポート行から区分・シナリオID・対象パス・詳細を取る（列追加前後両対応）。"""
     n = len(row)
-    # 新: 記録日時, 処理時間, 出力行数, 区分, 書込み方式, 出力シート名, シナリオID, 対象パス, 詳細
+    # 現行: PC性能, APL Ver, 記録日時, 処理時間, 出力行数, 区分, 書込み方式, 出力シート名, シナリオID, 対象パス, 詳細
+    if n >= 11:
+        return (
+            str(row[5] or "").strip(),
+            str(row[8] or "").strip(),
+            str(row[9] or "").strip(),
+            str(row[10] or ""),
+        )
+    # 旧: 記録日時, 処理時間, 出力行数, APL Ver, 区分, …, 詳細
+    if n >= 10:
+        return (
+            str(row[4] or "").strip(),
+            str(row[7] or "").strip(),
+            str(row[8] or "").strip(),
+            str(row[9] or ""),
+        )
+    # 旧: 記録日時, 処理時間, 出力行数, 区分, …, 詳細
     if n >= 9:
         return (
             str(row[3] or "").strip(),
@@ -577,7 +593,7 @@ def _event_log_row_kind_sid_path_detail(
             str(row[7] or "").strip(),
             str(row[8] or ""),
         )
-    # 旧（処理時間あり・出力行数なし）: …, 処理時間, 区分, …, 詳細
+    # 更に旧（処理時間あり・出力行数なし）: …, 処理時間, 区分, …, 詳細
     return (
         str(row[2] if n >= 3 else "").strip(),
         str(row[5] if n >= 6 else "").strip(),

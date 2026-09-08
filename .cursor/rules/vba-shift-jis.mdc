@@ -1,0 +1,12 @@
+---
+description: VBA モジュール（.bas/.cls/.frm）は Shift-JIS（CP932）で読み書きする
+globs: "**/*.bas,**/*.cls,**/VBA/**/*.bas"
+alwaysApply: false
+---
+
+# VBA 文字コード（Shift-JIS）
+
+- `VBA/` 配下の **`.bas` / `.cls` 等**は、Excel が期待する **Shift-JIS（CP932）** で保存されている前提とする。
+- **編集・保存するとき**は、エディタのエンコーディングを CP932 に合わせるか、Python 等で `encoding="cp932"`（Windows では `cp932` または `shift_jis`）と **CRLF** を明示して読み書きする。
+- **UTF-8 のまま保存しない**（日本語コメントが破損し、置換文字 U+FFFD が混入する原因になる）。
+- ツールで一括パッチする場合は、`tools/` 下のスクリプトのように **decode → 変更 → encode(cp932)** の流れを使う。

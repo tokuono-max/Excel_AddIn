@@ -3641,12 +3641,13 @@ def _batch_progress_pct_from_hook(
     n_files_total: int | None = None,
 ) -> int:
     """
-    compute_batch_table_rows の progress_hook（フェーズ 4〜7）から 0〜92 程度の割合を推定する。
+    （互換用）フェーズ帯ベースの pct 推定。
 
-    帯配分（本番一括の体感向け）:
+    本番一括の hook は data_agg_batch_progress_eta.BatchProgressEta を使う。
+    帯配分（旧）:
       4 ファイル読込  5〜55
       5 行まとめ 55〜60
-      6 照合     60〜88（ファイル／結合スライスで細かく）
+      6 照合     60〜88
       7 一覧組立 88〜92
     """
     s = str(suffix or "")
@@ -6991,11 +6992,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             msg = "%s\n処理時間: %s" % (msg, _w_time.format_elapsed_ms_ja(_ms_wall))
         except Exception:
             pass
-        try:
-            if ipc_root_opt is not None and batch_run_id:
-                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
-        except Exception:
-            pass
+        # 完了通知を先に書く。active を先に消すと親ポーリングが通知前に止まり得る。
         _batch_done_notify(
             parent_hwnd,
             sheet_id,
@@ -7005,6 +7002,11 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             use_parent_dialog=notify_parent,
             run_id=batch_run_id,
         )
+        try:
+            if ipc_root_opt is not None and batch_run_id:
+                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
+        except Exception:
+            pass
 
     try:
         from svc import svc_data_agg_scenario as scenario_mod  # noqa: E402
@@ -7306,6 +7308,15 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         pass
     prog_seq = [0]
     prog_last_pct = [2]
+    prog_file_nm = [0, 1]  # 右下 N/M（N=u+f, M=U+F）
+    from svc.data_agg_batch_progress_eta import (  # noqa: E402
+        BatchProgressEta,
+        BatchProgressWorkUnits,
+        apply_batch_hook_progress_metrics,
+    )
+
+    batch_eta = BatchProgressEta()
+    batch_work = BatchProgressWorkUnits()
     cfg_msgs = (_get_config().get("MESSAGES") or {})
 
     from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
@@ -7325,8 +7336,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             pct=100,
             phase="完了",
             phase_i=4,
-            done=1,
-            total=1,
+            done=max(prog_file_nm[0], prog_file_nm[1]),
+            total=max(1, prog_file_nm[1]),
         )
         wait_after_progress_done(min_sec=1.0)
 
@@ -7336,8 +7347,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             pct=max(prog_last_pct[0], 5),
             phase="中止",
             phase_i=4,
-            done=prog_last_pct[0],
-            total=100,
+            done=prog_file_nm[0],
+            total=max(1, prog_file_nm[1]),
         )
 
     def _abort_batch_cancel(
@@ -7394,29 +7405,31 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         fps = file_paths_holder[0]
         io_ps = io_paths_holder[0] or [str(p) for p in fps]
         nf_l = max(len(fps), 1)
-        ni_l = max(len(items), 1)
         fi_kw, nf_kw, done_kw = _batch_hook_parse_rest(rest)
         done_kw = _batch_hook_monotonic_done(
             sub, file_index=fi_kw, done_n=done_kw, hi=nm_hi
         )
-        pct_fi = done_kw if done_kw is not None else fi_kw
         if cancel_check is not None:
             cancel_check(force=True)
-        raw = _batch_progress_pct_from_hook(
-            sub,
-            suffix,
-            nf_l,
-            ni_l,
-            file_index=pct_fi,
-            n_files_total=nf_kw,
+        n_files = nf_kw if nf_kw is not None else nf_l
+        raw, done_f, total_f = apply_batch_hook_progress_metrics(
+            batch_eta,
+            sub=int(sub),
+            n_files=int(n_files),
+            file_index=fi_kw,
+            done_n=done_kw,
+            prev_pct=prog_last_pct[0],
+            work=batch_work,
         )
-        prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
+        prog_last_pct[0] = max(prog_last_pct[0], min(90, raw))
+        prog_file_nm[0] = int(done_f)
+        prog_file_nm[1] = max(1, int(total_f))
         pi = min(4, max(1, int(sub) - 3))
         phase_txt, detail_txt = _batch_hook_progress_lines(
             sub,
             suffix,
             file_index=fi_kw,
-            n_files=nf_kw if nf_kw is not None else nf_l,
+            n_files=n_files,
             done_n=done_kw,
         )
         cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
@@ -7433,8 +7446,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             "pct": prog_last_pct[0],
             "phase": phase_txt,
             "phase_i": pi,
-            "done": prog_last_pct[0],
-            "total": 100,
+            "done": prog_file_nm[0],
+            "total": prog_file_nm[1],
         }
         if detail_txt:
             prog_kw["detail"] = detail_txt
@@ -7456,8 +7469,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             mark=scan_mark,
         )[:120],
         phase_i=0,
-        done=0,
-        total=100,
+        done=prog_file_nm[0],
+        total=prog_file_nm[1],
     )
     _submit_progress_ui(
         parent_hwnd,
@@ -7498,6 +7511,11 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             return
         file_paths_holder[0] = list(file_paths)
         io_paths_holder[0] = [str(p) for p in file_paths]
+        batch_work.set_files_total(len(file_paths), reset_done=True)
+        # 本経路は compute 外でステージしないため U=0（N/M は f/F）。
+        batch_work.set_mount_total(0, reset_done=True)
+        prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
+        batch_eta.reset()
     mk = data.get("match_keys") or []
     mk_n = len(mk) if isinstance(mk, list) else 0
     item_labels: list[str] = []
@@ -7730,12 +7748,22 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
         replace_full_block,
     )
     prog_last_pct[0] = max(prog_last_pct[0], 93)
+    batch_work.note_files_progress(
+        max(batch_work.files_total, batch_work.files_done),
+        max(1, batch_work.files_total),
+    )
+    if batch_work.mount_total > 0:
+        batch_work.note_mount_progress(
+            batch_work.mount_total, batch_work.mount_total
+        )
+    prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
+    prog_file_nm[0] = max(prog_file_nm[0], prog_file_nm[1])
     _prog_write(
         pct=93,
         phase=str(cfg_msgs.get("PHASE_EXCEL_SPREAD") or "Excelへ展開"),
         phase_i=4,
-        done=93,
-        total=100,
+        done=prog_file_nm[0],
+        total=max(1, prog_file_nm[1]),
     )
     t_write = time.perf_counter()
     try:
@@ -7950,11 +7978,7 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
                 cleanup_batch_spill(spill_path)
             except Exception:
                 pass
-        try:
-            if ipc_root_opt is not None and batch_run_id:
-                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
-        except Exception:
-            pass
+        # 完了通知を先に書く。active を先に消すと親ポーリングが通知前に止まり得る。
         _batch_done_notify(
             parent_hwnd,
             sheet_id,
@@ -7966,6 +7990,11 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             error=error,
             abort_phase=abort_phase,
         )
+        try:
+            if ipc_root_opt is not None and batch_run_id:
+                _clear_active_batch_run_if_current(sheet_id, ipc_root_opt, batch_run_id)
+        except Exception:
+            pass
 
     if not spill_dir_s:
         _dlog("abort reason=no_spill_dir")

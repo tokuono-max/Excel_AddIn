@@ -17,17 +17,25 @@ venv/
 # Build
 build/
 dist/
-release/
+# Root release/ sibling bats (nuitka/pack/diff) stay local; track full.bat wrapper + README.
+# Leading slash = repo root only (do not ignore tools/release/).
+# Canonical body: tools/release/full.bat
+/release/*
+!/release/full.bat
+!/release/README.txt
 
 # Logs
 logs/
 *.log
 
-# Cursor
-.cursor/
+# Cursor (keep shared agent rules)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 
-# VSCode
-.vscode/
+# VSCode (keep encoding hints for bat/vb)
+.vscode/*
+!.vscode/settings.json
 
 # History
 .history/

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -129,6 +130,8 @@ def merge_cell_for_write_mode(old: Any, new: Any, mode: str) -> Any:
 EVENT_LOG_SHEET = "データ集約レポート"
 EVENT_LOG_SHEET_LEGACY = "DataAgg_EventLog"
 EVENT_LOG_HEADERS = [
+    "PC性能",
+    "APL Ver",
     "記録日時",
     "処理時間",
     "出力行数",
@@ -139,6 +142,171 @@ EVENT_LOG_HEADERS = [
     "対象パス",
     "詳細",
 ]
+
+# 仕様固定（再発防止）: 旧シート移行時、既存行の PC性能/APL Ver は空欄。
+# 値は新規追記（_event_log_row_cells）のみ。現在値で過去行を埋めない。
+EVENT_LOG_MIGRATE_LEAVE_PAST_PC_APL_BLANK = True
+
+_PC_PERF_CACHE: str | None = None
+
+
+def resolve_apl_set_version() -> str:
+    """
+    データ集約レポート「APL Ver」用のセットバージョン。
+    ヘルプ表示と同様に bin + config（例: 1.1.11.7）。取れなければ VERSION.txt。
+    """
+    try:
+        from core.packaged_update import (
+            read_installed_bin_version,
+            read_installed_config_version,
+        )
+        from core.version_txt import candidate_version_txt_paths
+
+        for p in candidate_version_txt_paths():
+            root = p.parent
+            if not root.is_dir():
+                continue
+            bin_v = read_installed_bin_version(root)
+            if not bin_v:
+                continue
+            cfg_v = read_installed_config_version(root)
+            if cfg_v:
+                return f"{bin_v}.{cfg_v}"
+            return str(bin_v)
+    except Exception:
+        pass
+    try:
+        from core.version_txt import read_product_version_line
+
+        return str(read_product_version_line() or "").strip()
+    except Exception:
+        return ""
+
+
+def _pc_cpu_name() -> str:
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                s = str(name or "").strip()
+                if s:
+                    return re.sub(r"\s+", " ", s)
+        except Exception:
+            pass
+    try:
+        import platform as _plat
+
+        s = str(_plat.processor() or "").strip()
+        if s:
+            return re.sub(r"\s+", " ", s)
+    except Exception:
+        pass
+    return ""
+
+
+def _pc_memory_total_gb() -> str:
+    """物理メモリ総量（GB）。整数寄り（0.5GB 以上は四捨五入）。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            st = MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                gb = float(st.ullTotalPhys) / (1024.0 ** 3)
+                if gb >= 1.0:
+                    return str(int(round(gb)))
+                return "%.1f" % gb
+        except Exception:
+            pass
+    return ""
+
+
+def _pc_os_name() -> str:
+    try:
+        import platform as _plat
+
+        sys_n = str(_plat.system() or "").strip()
+        rel = str(_plat.release() or "").strip()
+        if sys_n and rel:
+            return "%s %s" % (sys_n, rel)
+        return sys_n or rel or str(_plat.platform() or "").strip()
+    except Exception:
+        return ""
+
+
+def resolve_pc_performance_label() -> str:
+    """
+    データ集約レポート「PC性能」用。
+    CPU名 / 論理CPU数 / メモリ総量(GB) / OS名。プロセス内でキャッシュ。
+    """
+    global _PC_PERF_CACHE
+    if _PC_PERF_CACHE is not None:
+        return _PC_PERF_CACHE
+    parts: list[str] = []
+    cpu = _pc_cpu_name()
+    if cpu:
+        parts.append(cpu)
+    try:
+        n_cpu = int(os.cpu_count() or 0)
+    except Exception:
+        n_cpu = 0
+    if n_cpu > 0:
+        parts.append("論理CPU %d" % n_cpu)
+    mem = _pc_memory_total_gb()
+    if mem:
+        parts.append("メモリ %sGB" % mem)
+    os_n = _pc_os_name()
+    if os_n:
+        parts.append(os_n)
+    _PC_PERF_CACHE = " / ".join(parts) if parts else ""
+    return _PC_PERF_CACHE
+
+
+def _event_log_row_cells(
+    *,
+    ts: str,
+    elapsed: str = "",
+    output_rows: Any = "",
+    kind: str,
+    write_summary: str = "",
+    sheet_name: str = "",
+    scenario_id: str = "",
+    path: str = "",
+    detail: str = "",
+) -> list[Any]:
+    """EVENT_LOG_HEADERS 順の 1 行。"""
+    return [
+        resolve_pc_performance_label(),
+        resolve_apl_set_version(),
+        ts,
+        elapsed,
+        output_rows,
+        kind,
+        write_summary,
+        sheet_name,
+        scenario_id,
+        path,
+        detail,
+    ]
 
 
 def format_elapsed_ms_ja(ms: int) -> str:
@@ -219,7 +387,13 @@ def format_path_trace_for_event_log(
         ensure_ascii=False,
     )
     return [
-        [ts, "", "", _event_log_reason_ja(str(reason_code)), "", "", sid, fp, detail]
+        _event_log_row_cells(
+            ts=ts,
+            kind=_event_log_reason_ja(str(reason_code)),
+            scenario_id=sid,
+            path=fp,
+            detail=detail,
+        )
     ]
 
 
@@ -235,17 +409,13 @@ def format_join_events_for_event_log(
     sid = str(scenario_id or "")
     fp = str(file_path)
     return [
-        [
-            ts,
-            "",
-            "",
-            _event_log_reason_ja(str(ev.get("reason_code") or "")),
-            "",
-            "",
-            sid,
-            fp,
-            json.dumps(ev, ensure_ascii=False),
-        ]
+        _event_log_row_cells(
+            ts=ts,
+            kind=_event_log_reason_ja(str(ev.get("reason_code") or "")),
+            scenario_id=sid,
+            path=fp,
+            detail=json.dumps(ev, ensure_ascii=False),
+        )
         for ev in events
     ]
 
@@ -298,17 +468,216 @@ def format_batch_run_summary_row(
     if error:
         detail["エラー"] = error
     elapsed_cell = format_elapsed_ms_ja(int(total_ms)) if total_ms is not None else ""
-    return [
-        ts,
-        elapsed_cell,
-        int(output_rows),
-        _event_log_reason_ja(code_en),
-        str(excel_write_summary or ""),
-        str(output_sheet_name or ""),
-        str(scenario_id or ""),
-        str(scenario_path or ""),
-        json.dumps(detail, ensure_ascii=False),
-    ]
+    return _event_log_row_cells(
+        ts=ts,
+        elapsed=elapsed_cell,
+        output_rows=int(output_rows),
+        kind=_event_log_reason_ja(code_en),
+        write_summary=str(excel_write_summary or ""),
+        sheet_name=str(output_sheet_name or ""),
+        scenario_id=str(scenario_id or ""),
+        path=str(scenario_path or ""),
+        detail=json.dumps(detail, ensure_ascii=False),
+    )
+
+
+def _event_log_cell_str(v: Any) -> str:
+    return str(v or "").strip()
+
+
+def _event_log_looks_like_timestamp(v: Any) -> bool:
+    s = _event_log_cell_str(v)
+    return bool(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", s))
+
+
+def _event_log_looks_like_pc_perf(v: Any) -> bool:
+    """PC性能セルらしいか。空は未記入として許容。"""
+    s = _event_log_cell_str(v)
+    if not s:
+        return True
+    if "論理CPU" in s or "メモリ" in s:
+        return True
+    if "Windows" in s or "Intel" in s or "AMD" in s or "Core" in s:
+        return True
+    return False
+
+
+def classify_event_log_layout(
+    headers: list[str],
+    *,
+    first_data_a1: Any = None,
+) -> str:
+    """
+    既存レポートのレイアウト種別。
+
+    - current: 既に PC性能 / APL Ver 先頭
+    - insert2_shift: 旧「記録日時」始まり → 左に2列挿入
+    - insert2_realign: ヘッダだけ新形式でデータ未シフト → 左に2列挿入して整列
+    - rewrite_header: 列数不足などのヘッダ再書込のみ
+    """
+    hs = [_event_log_cell_str(h) for h in (headers or [])]
+    while hs and hs[-1] == "":
+        hs.pop()
+    if not hs:
+        return "rewrite_header"
+    h0 = hs[0] if hs else ""
+    h1 = hs[1] if len(hs) > 1 else ""
+    if h0 == "PC性能" and h1 == "APL Ver":
+        if first_data_a1 is not None and _event_log_looks_like_timestamp(first_data_a1):
+            if not _event_log_looks_like_pc_perf(first_data_a1):
+                return "insert2_realign"
+        return "current"
+    if h0 == "記録日時":
+        return "insert2_shift"
+    if len(hs) < len(EVENT_LOG_HEADERS):
+        return "rewrite_header"
+    return "current"
+
+
+def _event_log_used_last_row_col(ws: Any) -> tuple[int, int]:
+    try:
+        ur = getattr(ws, "used_range", None)
+        if ur is None:
+            return 0, 0
+        lc = getattr(ur, "last_cell", None)
+        if lc is None:
+            return 0, 0
+        return int(lc.row), int(lc.column)
+    except Exception:
+        return 0, 0
+
+
+def _event_log_read_header_row(ws: Any, n_col: int) -> list[str]:
+    if n_col < 1:
+        return []
+    try:
+        raw = ws.range((1, 1), (1, int(n_col))).value
+    except Exception:
+        return []
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        return [_event_log_cell_str(raw)]
+    # xlwings: 1 行は list、単一セルはスカラー
+    if raw and not isinstance(raw[0], (list, tuple)):
+        return [_event_log_cell_str(x) for x in raw]
+    row0 = raw[0] if raw else []
+    if not isinstance(row0, (list, tuple)):
+        return [_event_log_cell_str(row0)]
+    return [_event_log_cell_str(x) for x in row0]
+
+
+def _event_log_read_a2(ws: Any) -> Any:
+    try:
+        return ws.range((2, 1)).value
+    except Exception:
+        return None
+
+
+def _event_log_insert_columns_left(ws: Any, n: int) -> None:
+    for _ in range(max(0, int(n))):
+        try:
+            ws.api.Columns(1).Insert()
+            continue
+        except Exception:
+            pass
+        try:
+            ws.range((1, 1)).api.EntireColumn.Insert()
+            continue
+        except Exception:
+            pass
+        try:
+            # xlwings 風フォールバック
+            ws.range("A:A").insert(shift="right")
+        except Exception as exc:
+            raise RuntimeError("event log column insert failed: %s" % exc) from exc
+
+
+def _event_log_delete_column(ws: Any, col_1based: int) -> None:
+    c = int(col_1based)
+    if c < 1:
+        return
+    try:
+        ws.api.Columns(c).Delete()
+        return
+    except Exception:
+        pass
+    try:
+        ws.range((1, c)).api.EntireColumn.Delete()
+    except Exception as exc:
+        raise RuntimeError("event log column delete failed: %s" % exc) from exc
+
+
+def _event_log_clear_columns_from(ws: Any, start_col: int, last_row: int, last_col: int) -> None:
+    if start_col > last_col or last_row < 1:
+        return
+    try:
+        ws.range((1, start_col), (last_row, last_col)).value = None
+    except Exception:
+        try:
+            for c in range(start_col, last_col + 1):
+                _event_log_delete_column(ws, start_col)
+        except Exception:
+            pass
+
+
+def migrate_event_log_sheet_layout(ws: Any, *, core_xlc: Any) -> str:
+    """
+    既存「データ集約レポート」を現行列順へ寄せる。
+    左端に PC性能 / APL Ver を列挿入する。過去行の当該列は空欄（当時値は不明）。
+    新規追記行のみ値が入る。戻り値は実施したアクション名（ログ・テスト用）。
+    """
+    last_r, last_c = _event_log_used_last_row_col(ws)
+    if last_r < 1 or last_c < 1:
+        core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+        return "init_header"
+
+    headers = _event_log_read_header_row(ws, last_c)
+    a2 = _event_log_read_a2(ws) if last_r >= 2 else None
+    kind = classify_event_log_layout(headers, first_data_a1=a2)
+
+    if kind == "current":
+        # ヘッダ文言だけ現行に揃える（列構成は維持）
+        if headers[: len(EVENT_LOG_HEADERS)] != EVENT_LOG_HEADERS:
+            core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+            return "refresh_header"
+        return "current"
+
+    if kind == "rewrite_header":
+        core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+        return "rewrite_header"
+
+    # insert2_shift / insert2_realign
+    apl_idx = None
+    if kind == "insert2_shift":
+        for i, h in enumerate(headers):
+            if _event_log_cell_str(h) == "APL Ver":
+                apl_idx = i
+                break
+
+    _event_log_insert_columns_left(ws, 2)
+    # 過去行の PC性能 / APL Ver は空欄のまま（列位置だけ揃える）
+    if not EVENT_LOG_MIGRATE_LEAVE_PAST_PC_APL_BLANK:
+        raise RuntimeError(
+            "EVENT_LOG_MIGRATE_LEAVE_PAST_PC_APL_BLANK must stay True "
+            "(do not backfill PC/APL on historical rows)"
+        )
+
+    if apl_idx is not None:
+        # 0-based apl_idx → 挿入後 1-based = apl_idx + 2 + 1
+        try:
+            _event_log_delete_column(ws, int(apl_idx) + 3)
+        except Exception:
+            logger.warning("[DATA_AGG_WRITE] 旧 APL Ver 列の削除に失敗", exc_info=True)
+
+    core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+
+    last_r2, last_c2 = _event_log_used_last_row_col(ws)
+    if last_c2 > len(EVENT_LOG_HEADERS):
+        _event_log_clear_columns_from(
+            ws, len(EVENT_LOG_HEADERS) + 1, max(last_r2, 1), last_c2
+        )
+    return kind
 
 
 def append_event_log_rows(book: Any, rows: list[list[Any]]) -> None:
@@ -336,15 +705,22 @@ def append_event_log_rows(book: Any, rows: list[list[Any]]) -> None:
                         continue
             core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
         else:
-            # 旧レイアウト（列数不足）のログシートへ追記する前にヘッダ行を新形式に揃える
             try:
-                ur0 = getattr(ws, "used_range", None)
-                lc0 = getattr(ur0, "last_cell", None) if ur0 is not None else None
-                nc0 = int(lc0.column) if lc0 is not None else 0
-                if 0 < nc0 < len(EVENT_LOG_HEADERS):
-                    core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+                action = migrate_event_log_sheet_layout(ws, core_xlc=core_xlc)
+                if action not in ("current", "refresh_header"):
+                    logger.info(
+                        "[DATA_AGG_WRITE] イベントログ列移行 action=%s",
+                        action,
+                    )
             except Exception:
-                pass
+                logger.warning(
+                    "[DATA_AGG_WRITE] イベントログ列移行に失敗（ヘッダ再書込へフォールバック）",
+                    exc_info=True,
+                )
+                try:
+                    core_xlc.write_chunk(ws, 1, 1, [EVENT_LOG_HEADERS], text_mode=True)
+                except Exception:
+                    pass
         ur = getattr(ws, "used_range", None)
         if ur is None:
             start_row = 2

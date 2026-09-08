@@ -93,12 +93,17 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
     from svc import svc_data_agg_scenario as scenario_mod  # noqa: WPS433
     from svc import svc_data_agg_scan as scan_mod  # noqa: WPS433
     from svc import svc_data_agg_write as write_mod  # noqa: WPS433
+    from svc.data_agg_batch_progress_eta import (  # noqa: WPS433
+        BatchProgressEta,
+        BatchProgressWorkUnits,
+        apply_batch_hook_progress_metrics,
+        count_network_paths,
+    )
     from svc.svc_data_agg import (  # noqa: WPS433
         _batch_hook_monotonic_done,
         _batch_hook_parse_rest,
         _batch_hook_progress_lines,
         _batch_hook_resolve_current_file,
-        _batch_progress_pct_from_hook,
         _clear_active_batch_run_if_current,
         _excel_options_log_summary,
         _get_config,
@@ -337,6 +342,9 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         pass
     prog_seq = [0]
     prog_last_pct = [2]
+    prog_file_nm = [0, 1]  # 右下 N/M（N=u+f, M=U+F）
+    batch_eta = BatchProgressEta()
+    batch_work = BatchProgressWorkUnits()
     cfg_msgs = (_get_config().get("MESSAGES") or {})
 
     from svc.data_agg_progress_io import make_throttled_progress_writer  # noqa: E402
@@ -362,8 +370,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             pct=max(prog_last_pct[0], 5),
             phase="中止",
             phase_i=4,
-            done=prog_last_pct[0],
-            total=100,
+            done=prog_file_nm[0],
+            total=max(1, prog_file_nm[1]),
         )
 
     def _submit_abort_write(
@@ -439,27 +447,29 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         fps = file_paths_holder[0]
         io_ps = io_paths_holder[0] or [str(p) for p in fps]
         nf_l = max(len(fps), 1)
-        ni_l = max(len(items), 1)
         fi_kw, nf_kw, done_kw = _batch_hook_parse_rest(rest)
         done_kw = _batch_hook_monotonic_done(
             sub, file_index=fi_kw, done_n=done_kw, hi=nm_hi
         )
-        pct_fi = done_kw if done_kw is not None else fi_kw
-        raw = _batch_progress_pct_from_hook(
-            sub,
-            suffix,
-            nf_l,
-            ni_l,
-            file_index=pct_fi,
-            n_files_total=nf_kw,
+        n_files = nf_kw if nf_kw is not None else nf_l
+        raw, done_f, total_f = apply_batch_hook_progress_metrics(
+            batch_eta,
+            sub=int(sub),
+            n_files=int(n_files),
+            file_index=fi_kw,
+            done_n=done_kw,
+            prev_pct=prog_last_pct[0],
+            work=batch_work,
         )
-        prog_last_pct[0] = max(prog_last_pct[0], min(92, raw))
+        prog_last_pct[0] = max(prog_last_pct[0], min(90, raw))
+        prog_file_nm[0] = int(done_f)
+        prog_file_nm[1] = max(1, int(total_f))
         pi = min(4, max(1, int(sub) - 3))
         phase_txt, detail_txt = _batch_hook_progress_lines(
             sub,
             suffix,
             file_index=fi_kw,
-            n_files=nf_kw if nf_kw is not None else nf_l,
+            n_files=n_files,
             done_n=done_kw,
         )
         cf = _batch_hook_resolve_current_file(str(suffix or ""), fi_kw, fps)
@@ -476,8 +486,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             "pct": prog_last_pct[0],
             "phase": phase_txt,
             "phase_i": pi,
-            "done": prog_last_pct[0],
-            "total": 100,
+            "done": prog_file_nm[0],
+            "total": prog_file_nm[1],
         }
         if detail_txt:
             prog_kw["detail"] = detail_txt
@@ -499,8 +509,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             mark=scan_mark,
         )[:120],
         phase_i=0,
-        done=0,
-        total=100,
+        done=prog_file_nm[0],
+        total=prog_file_nm[1],
     )
     _submit_progress_ui(
         parent_hwnd,
@@ -560,6 +570,10 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             _submit_abort_write(phase="scan")
             return
         file_paths_holder[0] = list(file_paths)
+        batch_work.set_files_total(len(file_paths), reset_done=True)
+        batch_work.set_mount_total(0, reset_done=True)
+        prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
+        batch_eta.reset()
 
     if not file_paths:
         _tms = int((time.perf_counter() - t_batch_wall) * 1000)
@@ -621,17 +635,29 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 except Exception:
                     pass
             file_paths_holder[0] = list(file_paths)
+            batch_work.set_files_total(len(file_paths), reset_done=True)
+            batch_work.set_mount_total(0, reset_done=True)
+            prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
+            batch_eta.reset()
 
         stage_enabled = core_env.data_agg_network_stage_enabled()
         use_stage_pipeline = (
             stage_enabled and core_env.data_agg_network_stage_pipeline_enabled()
         )
+        if stage_enabled:
+            batch_work.set_mount_total(
+                count_network_paths(file_paths), reset_done=True
+            )
+            prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
 
         def _stage_copy_progress(done_i: int, total_n: int, fname: str) -> None:
             if total_n <= 0:
                 return
+            # バー％のみマウント帯（2〜12）。右下は u だけ更新し N=u+f / M=U+F。
             pct = min(12, 2 + int(10 * done_i / max(1, total_n)))
             prog_last_pct[0] = max(prog_last_pct[0], pct)
+            batch_work.note_mount_progress(done_i, total_n)
+            prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
             _prog_write(
                 pct=pct,
                 phase=progress_phase_with_mark(
@@ -640,8 +666,8 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 )[:120],
                 phase_i=0,
                 detail="マウント %s/%s — %s" % (done_i, total_n, fname),
-                done=pct,
-                total=100,
+                done=prog_file_nm[0],
+                total=prog_file_nm[1],
             )
 
         if use_stage_pipeline:
@@ -850,12 +876,22 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         dt_compute_ms,
     )
     prog_last_pct[0] = max(prog_last_pct[0], 93)
+    batch_work.note_files_progress(
+        max(batch_work.files_total, batch_work.files_done),
+        max(1, batch_work.files_total),
+    )
+    if batch_work.mount_total > 0:
+        batch_work.note_mount_progress(
+            batch_work.mount_total, batch_work.mount_total
+        )
+    prog_file_nm[0], prog_file_nm[1] = batch_work.nm()
+    prog_file_nm[0] = max(prog_file_nm[0], prog_file_nm[1])
     _prog_write(
         pct=93,
         phase=str(cfg_msgs.get("PHASE_EXCEL_SPREAD") or "Excelへ展開"),
         phase_i=4,
-        done=93,
-        total=100,
+        done=prog_file_nm[0],
+        total=max(1, prog_file_nm[1]),
     )
     try:
         clear_batch_worker_pid(sheet_id, ipc_root)
