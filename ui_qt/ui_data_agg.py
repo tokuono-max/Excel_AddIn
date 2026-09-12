@@ -101,6 +101,7 @@ from ui_qt.ipc_file import (
     try_read_batch_done_notify,
 )
 from svc.data_agg_source_ui import ensure_source_ui_block, source_ui_block
+from svc.data_agg_value_post import PROCESS_CHECK_ALIASES_BY_SLOT
 from svc.svc_data_agg_scenario import (
     count_incomplete_key_defs,
     fmt_write_mode_from_ui_block,
@@ -4281,7 +4282,9 @@ class _DataAggMainWindow(QDialog):
                     self._release_batch_ui_lock()
                 grace = float(getattr(self, "_batch_poll_active_gone_deadline", 0.0) or 0.0)
                 if grace <= 0.0:
-                    self._batch_poll_active_gone_deadline = now + 15.0
+                    # 書込みフェーズが長いケース向け。active は本来 write 完了まで残るが、
+                    # 万一早期消失しても短すぎる猶予で完了通知を取りこぼさない。
+                    self._batch_poll_active_gone_deadline = now + 300.0
                 elif now >= grace:
                     if self._batch_poll_timer is not None:
                         self._batch_poll_timer.stop()
@@ -7208,24 +7211,9 @@ class _ScenarioEditDialog(QDialog):
 
     @staticmethod
     def _saved_process_check_at_index(slot: int, saved_vals: list[Any]) -> bool:
-        """加工チェック保存値を UI スロットに復元。ラベル改定前の JSON とも位置ベースで互換。"""
-        sset = {str(x) for x in (saved_vals or []) if x is not None}
-        aliases: dict[int, tuple[str, ...]] = {
-            0: ("トリム",),
-            1: (
-                "全角→半角（英数字・記号）",
-                "全角→半角",
-            ),
-            2: (
-                "年月日変換",
-                "日付変換",
-                "日付変換（yyyy/mm/dd形式に変換）",
-                "日付変換 (yyyy/mm/dd) 時刻なし",
-                "日付 (yyyy/mm/dd)",
-                "日付変換 (yyyy/mm/dd)",
-            ),
-        }
-        for cand in aliases.get(slot, ()):
+        """加工チェック保存値を UI スロットに復元。実行時 apply_check_labels と同一別名集合。"""
+        sset = {str(x).strip() for x in (saved_vals or []) if x is not None and str(x).strip()}
+        for cand in PROCESS_CHECK_ALIASES_BY_SLOT.get(slot, ()):
             if cand in sset:
                 return True
         return False

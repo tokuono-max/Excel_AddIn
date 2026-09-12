@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>コードモジュール見直し — 改善一覧</title>
+<style>
+  body { font-family: "Segoe UI", "Yu Gothic UI", Meiryo, sans-serif; margin: 24px; color: #111; line-height: 1.45; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  .meta { color: #555; font-size: 12px; margin-bottom: 16px; }
+  .callout { background: #fff8e6; border: 1px solid #e6c200; padding: 10px 12px; margin: 12px 0 20px; }
+  table { border-collapse: collapse; width: 100%; font-size: 11px; }
+  th, td { border: 1px solid #bbb; padding: 6px 7px; vertical-align: top; text-align: left; }
+  th { background: #f3f3f3; }
+  tr:nth-child(even) td { background: #fafafa; }
+  ol { padding-left: 1.3em; }
+  .toolbar { margin: 0 0 16px; }
+  .toolbar button { padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  @media print {
+    body { margin: 10mm; }
+    .toolbar { display: none; }
+    h2 { break-after: avoid; }
+    tr { break-inside: avoid; }
+    @page { size: A4 landscape; margin: 10mm; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar"><button type="button" onclick="window.print()">印刷 / PDF保存</button></div>
+  <h1>コードモジュール見直し — 改善一覧</h1>
+  <div class="meta">作成日: 2026-09-11 / 対象: Excel_AddIn（CSV Tool）全体 / 頻度・トレードオフは試算</div>
+  <div class="callout"><strong>最優先の結論:</strong> 正確性は結合キー正規化の不一致・抽出失敗の黙殺・シート名フォールバックが先。容量は logs/dist/_tmp 掃除で約4.5GB回収可能。構造は巨大モノリス分割が中期の本丸。</div>
+  <h2>改善優先度一覧（スコア降順）</h2>
+  <table>
+    <thead><tr>
+      <th>#</th><th>優先度</th><th>改善アイテム</th><th>対象機能名</th><th>改善内容</th>
+      <th>改善度合い</th><th>未改善時に起こり得る事象</th><th>頻度</th><th>トレードオフ</th><th>難易度</th>
+    </tr></thead>
+    <tbody>
+<tr><td>1</td><td>すぐに 10</td><td>正確性</td><td>データ集約・結合キー／行マージ</td><td>結合キー比較と行マージの正規化不一致</td><td>型ゆれ/&#x27;001等で行欠け・誤統合</td><td>同一キーなのに未結合／別キー扱い。出力行の欠落・重複・誤紐づけ</td><td>高（キー型ゆれのあるシナリオで毎回）</td><td>厳密正規化は既存シナリオの結果が変わる可能性。互換モードや段階移行が必要</td><td>中</td></tr>
+<tr><td>2</td><td>すぐに 10</td><td>正確性</td><td>データ集約・抽出（Excel読取）</td><td>抽出失敗の except→None/pass が空セルに見える</td><td>原因不明の空欄・結合不一致</td><td>失敗が空欄に化け、結合失敗や誤った完成表を気付かず確定</td><td>中（破損・書式異常・巨大シート時）</td><td>失敗をエラー停止にすると一括が途中終了。継続＋明示エラー印の両立が必要</td><td>中</td></tr>
+<tr><td>3</td><td>すぐに 9</td><td>正確性</td><td>データ集約・シート指定読取</td><td>シート名不一致時の active フォールバック</td><td>別シートを黙って読む</td><td>指定外シートのデータを集約し、正しそうに見える誤結果を出力</td><td>中（シート名変更・typo時は確実）</td><td>エラー化すると旧シナリオ（シート名曖昧運用）が止まる。警告付きフォールバック移行も可</td><td>低</td></tr>
+<tr><td>4</td><td>すぐに 9</td><td>ファイル容量</td><td>開発環境（Nuitkaビルドログ）</td><td>logs/nuitka 約1.5GB の蓄積</td><td>約1.5GB即時回収</td><td>ディスク逼迫・バックアップ遅延・ビルド失敗</td><td>高（ビルドするたび増加）</td><td>削除すると過去ビルドの原因調査が難しくなる。直近N世代保持が現実的</td><td>低</td></tr>
+<tr><td>5</td><td>すぐに 9</td><td>ファイル容量</td><td>開発環境（配布ビルド成果物）</td><td>dist/ 旧リリース＋重複ビルド約3.1GB</td><td>2GB超削減見込み</td><td>ディスク逼迫・誤配布・旧版混同</td><td>高（リリース積み上げのたび）</td><td>旧版ローカル比較ができなくなる。必要版はアーカイブ置き場へ退避</td><td>低</td></tr>
+<tr><td>6</td><td>すぐに 8</td><td>ファイル容量 / スリム化</td><td>リポジトリ衛生（一時ファイル・重複テスト）</td><td>ルート未追跡ゴミ (_tmp_* / .coverage / 重複テスト)</td><td>誤コミット防止＋pytestノイズ排除</td><td>ゴミの誤コミット・テスト収集失敗・レビューノイズ</td><td>中（作業後に残存しやすい）</td><td>調査用スクリプトも消える。再現手順が必要なら docs/tools へ正規化</td><td>低</td></tr>
+<tr><td>7</td><td>高8</td><td>正確性</td><td>データ集約・結合前加工（チェックラベル）</td><td>加工チェックの部分文字列マッチ</td><td>ラベル変更で誤適用</td><td>意図しないトリム／日付変換が走り、キー不一致や値破壊</td><td>中（ラベル追加・文言変更時）</td><td>厳密一致は表記ゆれに弱くなる。ID化すると設定移行コストが発生</td><td>低</td></tr>
+<tr><td>8</td><td>高8</td><td>正確性 / スリム化</td><td>基盤層（core / svc 境界）</td><td>core → svc 循環依存</td><td>初期化順・Nuitka・単体テストの脆さ</td><td>起動失敗・バンドル抜け・テストが壊れて回帰見逃し</td><td>低〜中（リファクタ・配布ビルド時）</td><td>層分割は広い import 差し替えが必要。短期は回帰リスクが上がる</td><td>中</td></tr>
+<tr><td>9</td><td>高8</td><td>速度 / スリム化</td><td>データ集約コア／デバッグUI全体</td><td>巨大モノリス分割 (集約コア＋デバッグUI)</td><td>変更リスク局所化</td><td>修正の副作用が広がり、回帰バグ・レビュー不能が常態化</td><td>高（機能追加のたび）</td><td>分割作業自体が大規模・長期。途中はマージ衝突と二重メンテが増える</td><td>高</td></tr>
+<tr><td>10</td><td>高7</td><td>速度</td><td>データ集約・Excel抽出（大シート）</td><td>シート全行 materialize のメモリ/I/O</td><td>大シートで数百MB〜数GB・数秒〜数十秒</td><td>メモリ逼迫・ハング・一括処理のタイムアウト</td><td>高（大容量Excel利用時は毎回）</td><td>範囲限定・ストリーム化は実装複雑。小シートでは全読込の方が単純で速い場合あり</td><td>高</td></tr>
+<tr><td>11</td><td>高7</td><td>速度</td><td>データ集約・非表示行除外</td><td>skip_hidden_rows 時の非 read_only 再オープン</td><td>読込約2倍</td><td>一括処理が大幅遅延・体感タイムアウト</td><td>高（非表示除外ON時は毎回）</td><td>read_only維持は非表示判定が不完全になり得る。正確性優先なら再オープンが必要</td><td>中</td></tr>
+<tr><td>12</td><td>高7</td><td>正確性 / スリム化</td><td>データ集約／UI／更新（横断）</td><td>広域 except Exception の縮減</td><td>障害可視化・再発防止</td><td>本番障害の原因特定不能・誤った空結果の継続</td><td>高（例外経路は日常的）</td><td>例外を厳格化するとCOM/Excelの一時失敗で処理が止まりやすくなる</td><td>中</td></tr>
+<tr><td>13</td><td>高7</td><td>スリム化 / ファイル容量</td><td>旧実装アーカイブ (svc/Old)</td><td>svc/Old/ 死コード (git追跡)</td><td>認知負荷削減</td><td>誤って旧APIを参照・検索ノイズ・レビュー誤誘導</td><td>低（触ったとき）</td><td>git履歴・タグに残るが、ローカル参照が不便になる</td><td>低</td></tr>
+<tr><td>14</td><td>高7</td><td>スリム化 / 速度</td><td>処理サーバ起動 (svc_server)</td><td>svc_server の DEBUG Popen モンキーパッチ常設</td><td>本番ログノイズ除去</td><td>ログ肥大・診断ノイズ・微小オーバーヘッド常時発生</td><td>高（子プロセス起動のたび）</td><td>常時OFFだとスポーン調査が手間。環境変数でONにする形が無難</td><td>低</td></tr>
+<tr><td>15</td><td>中5</td><td>スリム化</td><td>データ集約・polars任意読込</td><td>_get_polars 三重定義</td><td>保守ずれ防止</td><td>片方だけ修正され挙動分岐・再現困難なバグ</td><td>低（修正時のみ）</td><td>共通化で循環importや遅延読込の設計が必要になる場合あり</td><td>低</td></tr>
+<tr><td>16</td><td>中5</td><td>スリム化</td><td>日付変換 (YMD / HM)</td><td>svc_dt_ymd / svc_dt_hm のほぼ複製</td><td>数百行削減</td><td>片方だけ直して日付変換結果が機能間で不一致</td><td>低〜中（日付機能改修時）</td><td>共通化で片方固有の仕様差を見失うリスク。差分を明示した共通化が必要</td><td>中</td></tr>
+<tr><td>17</td><td>中5</td><td>速度 / スリム化</td><td>データ集約・シナリオ編集UI</td><td>UIシナリオ編集の過剰 deepcopy</td><td>項目多いとUI鈍化</td><td>編集操作のカクつき・入力遅延・誤操作誘発</td><td>中（大規模シナリオ編集時）</td><td>浅いコピーは副作用で編集内容が汚染される危険。参照管理の設計が要る</td><td>中</td></tr>
+<tr><td>18</td><td>中5</td><td>ファイル容量 / スリム化</td><td>配布パッケージ／依存管理</td><td>依存の肥大 (lockと配布の乖離)</td><td>数十〜数百MB級の可能性</td><td>配布ZIP肥大・導入時間増・不要DLL混入</td><td>中（配布ビルドごと）</td><td>polars等を外すと大ファイル高速経路が弱まる。任意依存のままが妥当な場合あり</td><td>中</td></tr>
+<tr><td>19</td><td>中4</td><td>ファイル容量</td><td>ドキュメント管理</td><td>ドキュメント版二重・docx/PDF重複</td><td>数MB〜10MB</td><td>版の取り違え・説明齟齬・容量浪費</td><td>低（ドキュメント参照時）</td><td>docx削除は社内提出物ワークフローと衝突し得る。生成物置き場分離が安全</td><td>低</td></tr>
+<tr><td>20</td><td>中4</td><td>速度 / スリム化</td><td>データ集約・結合書込ホットパス</td><td>結合ダンプ／診断コードの本番常駐</td><td>ホットパス可読性向上</td><td>保守困難・微小性能ロス・診断フラグ誤ON時の大量出力</td><td>低（通常OFF）／高（誤ON時）</td><td>外出しすると現場診断の即応性が下がる。フラグ付き別モジュールが妥協点</td><td>中</td></tr>
+<tr><td>21</td><td>中4</td><td>速度</td><td>データ集約UI・前面化／ロック再試行</td><td>ui_data_agg の processEvents / 多重 QTimer</td><td>再入・ちらつき低減</td><td>ダイアログちらつき・再入バグ・稀なフリーズ感</td><td>中（前面化・Excel競合時）</td><td>状態マシン化は実装・検証コスト高。現状の簡易再試行は実装が短い</td><td>中</td></tr>
+<tr><td>22</td><td>低3</td><td>スリム化 / ファイル容量</td><td>自動テスト／CI</td><td>テスト肥大・重複シナリオの整理</td><td>CI時間短縮</td><td>CI遅延・重複テストのメンテ漏れで偽緑</td><td>中（CI実行のたび）</td><td>統合しすぎるとカバレッジ穴。回帰の重要ケースは残す必要がある</td><td>中</td></tr>
+    </tbody>
+  </table>
+  <h2>推奨着手順</h2>
+  <h3>すぐ（容量＋正確性の止血）</h3>
+  <ol>
+    <li>logs/nuitka・dist旧版・_tmp_* / .coverage / 重複テスト削除＋gitignore</li>
+    <li>シート不存在をエラー化・抽出失敗をログ＋区別可能値に</li>
+    <li>結合キー正規化方針を仕様文書と突合</li>
+  </ol>
+  <h3>高〜中（構造と性能）</h3>
+  <ol start="4">
+    <li>svc/Old削除・DEBUGパッチ除去・_get_polars一本化</li>
+    <li>materialize範囲制限・hidden二重オープン削減・except縮減</li>
+    <li>svc_data_agg / ui_data_agg_debug の分割</li>
+  </ol>
+  <h2>頻度の読み方</h2>
+  <table>
+    <thead><tr><th>表記</th><th>意味</th></tr></thead>
+    <tbody>
+      <tr><td>高</td><td>該当機能利用時にほぼ毎回、または日常運用で頻発</td></tr>
+      <tr><td>中</td><td>特定条件（大ファイル・設定ON・改修時など）で発生</td></tr>
+      <tr><td>低</td><td>稀、または触ったとき／誤設定時のみ</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

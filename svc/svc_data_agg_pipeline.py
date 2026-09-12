@@ -3,18 +3,18 @@
 Python: 3.12+
 Module: svc/svc_data_agg_pipeline.py
 Created: 2026-03-23
-Version: 0.2.0
+Version: 0.2.1
 Purpose:
   データ集約の中間表現の結合（Polars 優先、未導入時は辞書リストでフォールバック）。
   要求定義 §7（詳細仕様書）のパイプラインをコード上の境界として提供する。
   svc_data_agg / svc_data_agg_extract から呼び出す。
 History (latest 3):
+  - 0.2.1 (2026-09-11) #15: polars 遅延読込を data_agg_polars に集約。
   - 0.2.0 (2026-03-26) join_on_match_keys: how=left を辞書フォールバックで解釈。item_value_cols で右欠損時の値列を null 化。
   - 0.1.0 (2026-03-23) join_on_match_keys / イベントログ行生成の骨子。
 """
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -25,29 +25,13 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_logger  # noqa: E402
+from svc.data_agg_polars import get_polars, polars_available  # noqa: E402
 
 logger = get_logger(__name__)
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
-_POLARS_MODULE: Any | None = None
-_POLARS_CHECKED = False
-
-
-def _get_polars() -> Any | None:
-    global _POLARS_MODULE, _POLARS_CHECKED
-    if _POLARS_CHECKED:
-        return _POLARS_MODULE
-    try:
-        _POLARS_MODULE = importlib.import_module("polars")
-    except Exception:
-        _POLARS_MODULE = None
-    _POLARS_CHECKED = True
-    return _POLARS_MODULE
-
-
-def polars_available() -> bool:
-    """Polars が import 可能なら True。"""
-    return _get_polars() is not None
+# 後方互換エイリアス（旧呼び出し）
+_get_polars = get_polars
 
 
 def join_on_match_keys(

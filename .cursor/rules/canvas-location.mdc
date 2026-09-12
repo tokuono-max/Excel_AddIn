@@ -1,0 +1,12 @@
+# Canvas 保存場所
+description: Cursor Canvas の実体はリポジトリの canvases/。IDE 検出パスはジャンクション。
+alwaysApply: true
+---
+
+# Canvas の置き場
+
+- **正本（編集・Git）:** `canvases/*.canvas.tsx`（リポジトリルート直下）
+- **IDE 検出パス:** `%USERPROFILE%\.cursor\projects\c-Project-Python-Excel-AddIn\canvases\`  
+  → 上記へのジャンクション。新規 Canvas を書くときは **リポジトリの `canvases/` に書けばよい**（同じ場所に見える）。
+- サブフォルダには置かない（Cursor は直下の `.canvas.tsx` のみ検出）。
+- `node_modules/` や `*.canvas.status.json` はコミットしない（`.gitignore` 済み）。

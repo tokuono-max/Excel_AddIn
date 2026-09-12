@@ -11,6 +11,7 @@ from svc.dt_convert_helpers import (
     _read_chunk_row_count,
     count_rows_to_write,
     format_datetime_column,
+    parse_datetime_with_normalized_fallback,
     rows_with_any_change,
     trim_areas_to_used_range,
     _group_contiguous_row_indices,
@@ -66,6 +67,34 @@ def test_format_datetime_column_all_success() -> None:
     assert success == 1
     assert non_empty == 1
     assert out.iloc[0] == "2024/01/02"
+
+
+def test_format_datetime_column_accepts_object_dtype_timestamps() -> None:
+    """object 化した日時 Series でも .dt 例外にせず整形できること。"""
+    from core.core_value_shape import shape_date_value
+
+    ser_col = pd.Series(["2024/01/02", "x", "2024/03/04"])
+    # 意図的に object（.where 退化を模擬）
+    ser_dt = pd.Series(
+        [pd.Timestamp("2024-01-02"), pd.NaT, pd.Timestamp("2024-03-04")],
+        dtype=object,
+    )
+    out, success, non_empty = format_datetime_column(
+        ser_col, ser_dt, "%Y/%m/%d", shape_date_value
+    )
+    assert success == 2
+    assert non_empty == 3
+    assert out.iloc[0] == "2024/01/02"
+    assert out.iloc[2] == "2024/03/04"
+
+
+def test_parse_datetime_keeps_datetime64_dtype() -> None:
+    ser = pd.Series(["2024/01/02", "not-a-date", "2024年3月4日"])
+    out = parse_datetime_with_normalized_fallback(ser)
+    assert pd.api.types.is_datetime64_any_dtype(out)
+    assert str(out.iloc[0].date()) == "2024-01-02"
+    assert pd.isna(out.iloc[1])
+    assert str(out.iloc[2].date()) == "2024-03-04"
 
 
 def test_likely_all_rows_changed_sampling() -> None:

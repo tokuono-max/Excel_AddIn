@@ -33,6 +33,10 @@ logs/
 !.cursor/rules/
 !.cursor/rules/**
 
+# Cursor Canvas（実体は canvases/。生成物のみ除外）
+canvases/node_modules/
+canvases/*.canvas.status.json
+
 # VSCode (keep encoding hints for bat/vb)
 .vscode/*
 !.vscode/settings.json
@@ -51,6 +55,14 @@ nuitka-crash-report.xml
 # Temp
 *.tmp
 *.bak
+_tmp*
+.coverage
+_pyright_*.txt
+catalog_path.txt
+
+# Local scratch Excel / Office lock at repo root
+/*_test.xlsx
+/~$*.xlam
 
 # Excel temp
 ~$*.xlsm

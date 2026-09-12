@@ -15,7 +15,6 @@ Purpose:
 """
 from __future__ import annotations
 
-import importlib
 import json
 import threading
 from contextlib import contextmanager
@@ -55,21 +54,6 @@ NAME_EXTRACT_PHASE2_DISPLAY_MAX = 50
 
 # ユーザー向けデバッグ表示ではフルパス・正規化パスを出さない（方針 B）
 _NE_PATH_USER_HIDDEN = "（パスは表示しません）"
-
-_POLARS_MODULE: Any | None = None
-_POLARS_CHECKED = False
-
-
-def _get_polars() -> Any | None:
-    global _POLARS_MODULE, _POLARS_CHECKED
-    if _POLARS_CHECKED:
-        return _POLARS_MODULE
-    try:
-        _POLARS_MODULE = importlib.import_module("polars")
-    except Exception:
-        _POLARS_MODULE = None
-    _POLARS_CHECKED = True
-    return _POLARS_MODULE
 
 
 def _ne_debug_labels(overlay: dict[str, Any] | None) -> dict[str, str]:

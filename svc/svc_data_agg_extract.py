@@ -3,21 +3,20 @@
 Python: 3.12+
 Module: svc/svc_data_agg_extract.py
 Created: 2026-03-18
-Updated: 2026-08-26
-Version: 0.1.21
+Updated: 2026-09-11
+Version: 0.1.23
 Purpose:
   データ集約用の抽出エンジン。座標（絶対セル）・メタデータ（パス・フォルダ名・ファイル名）・
   ファイル名からの文字列抽出（範囲・デリミタ・正規表現）を提供する。OpenPyXL / csv で Excel/CSV を直接読む。
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
+  - 0.1.23 (2026-09-11) #10/#11: materialize 範囲限定。skip_hidden で read_only を潰さない（寸法用 full は別モジュールでファイル1回集約）。
+  - 0.1.22 (2026-09-11) 指定シート欠落はエラー化。セル読取例外は「（抽出失敗）」マーカー＋警告ログ。
   - 0.1.21 (2026-08-26) skip_hidden_rows: 非表示・フィルタ行を主キー走査から除外（.xls/.xlsx/.xlsm）。
-  - 0.1.20 (2026-08-26) skip_carry_seed: スキップ行の連携値を前置種にする主キー側オプション。
-  - 0.1.19 (2026-08-24) 空スキップ後の非連番 rule_iter でも連携/結合を列一括読取して拾う。
 """
 from __future__ import annotations
 
 import csv
-import importlib
 import os
 import re
 import sys
@@ -34,6 +33,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_logger  # noqa: E402
+from svc.data_agg_polars import get_polars as _get_polars  # noqa: E402
 from svc.data_agg_extract_limit import (  # noqa: E402
     record_extract_truncation_if_needed,
     skip_extract_truncation_peek,
@@ -53,6 +53,8 @@ from svc.data_agg_primary_end import (  # noqa: E402
 )
 from svc.data_agg_source_ui import source_ui_block  # noqa: E402
 from svc.data_agg_sheet_resolve import (  # noqa: E402
+    DataAggSheetMissingError,
+    EXTRACT_READ_ERROR_MARK,
     list_workbook_sheet_names,
     parse_comma_separated_patterns,
     patch_item_sheet_exact,
@@ -74,7 +76,7 @@ from svc.data_agg_value_post import (  # noqa: E402
 )
 
 logger = get_logger(__name__)
-__version__ = "0.1.21"
+__version__ = "0.1.23"
 
 
 class DataAggCsvReadError(Exception):
@@ -339,7 +341,9 @@ def _hidden_rows_from_workbook(wb: Any, sheet_name: Optional[str]) -> set[int]:
     try:
         names = list(getattr(wb, "sheetnames", None) or [])
         sn = str(sheet_name or "").strip()
-        if sn and sn in names:
+        if sn:
+            if sn not in names:
+                raise DataAggSheetMissingError(sn, names)
             ws = wb[sn]
         else:
             ws = wb.active
@@ -353,6 +357,8 @@ def _hidden_rows_from_workbook(wb: Any, sheet_name: Optional[str]) -> set[int]:
                 continue
             if bool(getattr(dim, "hidden", False)) and r1 >= 1:
                 hidden.add(r1 - 1)
+    except DataAggSheetMissingError:
+        raise
     except Exception as e:
         logger.debug("[DATA_AGG_HIDDEN] wb dims 失敗: %s", e)
     return hidden
@@ -360,8 +366,10 @@ def _hidden_rows_from_workbook(wb: Any, sheet_name: Optional[str]) -> set[int]:
 
 def ensure_xlsx_workbook_for_hidden_rows(path: Path | str) -> Any | None:
     """
-    skip_hidden_rows 用に read_only=False でブックを開き、スコープ内キャッシュへ登録。
-    既にキャッシュされていればそれを返す（二重 open 回避）。
+    skip_hidden_rows 用に、スコープ内の非 read_only ブックがあれば返す。
+
+    read_only キャッシュは閉じない・置き換えない（#11）。read_only しか無い場合は None を返し、
+    呼び出し側が短寿命 full オープンで寸法だけ読む（全シート分を1回で hidden キャッシュへ格納）。
     """
     frame = _xlsx_workbook_cache_top()
     if frame is None:
@@ -374,38 +382,7 @@ def ensure_xlsx_workbook_for_hidden_rows(path: Path | str) -> Any | None:
     wb = wbs.get(key)
     if wb is not None and not bool(getattr(wb, "read_only", False)):
         return wb
-    if wb is not None:
-        try:
-            wb.close()
-        except Exception:
-            pass
-        wbs.pop(key, None)
-    try:
-        from svc.data_agg_cancel import poll_active_cancel  # noqa: WPS433
-
-        poll_active_cancel(force=True)
-    except Exception:
-        pass
-    try:
-        import openpyxl  # noqa: E402
-    except ImportError:
-        return None
-    try:
-        need_open_timing = _per_file_workbook_timing_enabled() or _io_profile_enabled()
-        t_ld = time.perf_counter()
-        wb = openpyxl.load_workbook(
-            p,
-            read_only=False,
-            data_only=False,
-            keep_links=False,
-        )
-        if need_open_timing:
-            _add_workbook_open_seconds(key, time.perf_counter() - t_ld)
-    except Exception as e:
-        logger.debug("[DATA_AGG_HIDDEN] Excel open 失敗 %s: %s", p, e)
-        return None
-    wbs[key] = wb
-    return wb
+    return None
 
 
 def _load_workbook_readonly(path: Path) -> Any:
@@ -455,25 +432,6 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
         return None
     wbs[key] = wb
     return wb
-
-_POLARS_MODULE: Any | None = None
-_POLARS_CHECKED = False
-
-
-def _get_polars() -> Any | None:
-    global _POLARS_MODULE, _POLARS_CHECKED
-    if _POLARS_CHECKED:
-        return _POLARS_MODULE
-    try:
-        _POLARS_MODULE = importlib.import_module("polars")
-    except Exception:
-        _POLARS_MODULE = None
-    _POLARS_CHECKED = True
-    return _POLARS_MODULE
-
-
-def _has_polars() -> bool:
-    return _get_polars() is not None
 
 
 def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -> bool:
@@ -1568,14 +1526,26 @@ def _get_excel_cell(
         try:
             from svc.data_agg_xls_io import read_xls_cell
         except Exception:
-            logger.debug("[DATA_AGG_EXTRACT] .xls 読取モジュール不可: %s", path)
-            return None
-        return read_xls_cell(path, sheet_name, cell_ref)
+            logger.warning("[DATA_AGG_EXTRACT] .xls 読取モジュール不可: %s", path)
+            return EXTRACT_READ_ERROR_MARK
+        try:
+            return read_xls_cell(path, sheet_name, cell_ref)
+        except DataAggSheetMissingError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[DATA_AGG_EXTRACT] .xls 読込エラー %s sheet=%s cell=%s: %s",
+                path,
+                sheet_name,
+                cell_ref,
+                e,
+            )
+            return EXTRACT_READ_ERROR_MARK
     try:
         import openpyxl  # noqa: E402
     except ImportError:
         logger.warning("[DATA_AGG_EXTRACT] openpyxl が利用できません")
-        return None
+        return EXTRACT_READ_ERROR_MARK
     wb_cached = _xlsx_workbook_from_cache(path)
     if wb_cached is not None:
         try:
@@ -1585,43 +1555,97 @@ def _get_excel_cell(
                 cell_ref,
                 path=path,
             )
-        except Exception:
-            return None
+        except DataAggSheetMissingError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[DATA_AGG_EXTRACT] Excel キャッシュ読込エラー %s sheet=%s cell=%s: %s",
+                path,
+                sheet_name,
+                cell_ref,
+                e,
+            )
+            return EXTRACT_READ_ERROR_MARK
     try:
         wb = _load_workbook_readonly(path)
-        if sheet_name:
-            if sheet_name not in wb.sheetnames:
-                ws = wb.active
-            else:
-                ws = wb[sheet_name]
-        else:
-            ws = wb.active
-        if ws is None:
-            return None
-        val = extract_read_openpyxl_cell(ws[cell_ref])
-        wb.close()
-        return val
+        try:
+            ws, _ = _resolve_readonly_worksheet(wb, sheet_name)
+            if ws is None:
+                logger.warning(
+                    "[DATA_AGG_EXTRACT] シート解決失敗 %s sheet=%s", path, sheet_name
+                )
+                return EXTRACT_READ_ERROR_MARK
+            return extract_read_openpyxl_cell(ws[cell_ref])
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+    except DataAggSheetMissingError:
+        raise
     except Exception as e:
-        logger.debug("[DATA_AGG_EXTRACT] Excel 読込エラー %s: %s", path, e)
-    return None
+        logger.warning("[DATA_AGG_EXTRACT] Excel 読込エラー %s: %s", path, e)
+        return EXTRACT_READ_ERROR_MARK
 
 
 def _resolve_readonly_worksheet(wb: Any, sheet_name: Optional[str]) -> tuple[Any, str]:
-    """read_only Workbook から対象シートと実効シート名を返す。"""
-    names = getattr(wb, "sheetnames", None) or []
-    if sheet_name and sheet_name in names:
-        return wb[sheet_name], sheet_name
+    """
+    read_only Workbook から対象シートと実効シート名を返す。
+
+    sheet_name が空のときのみ active（先頭相当）を使う。
+    名前指定があるのに存在しない場合は DataAggSheetMissingError（黙って別シートを読まない）。
+    """
+    names = list(getattr(wb, "sheetnames", None) or [])
+    sn = str(sheet_name or "").strip()
+    if sn:
+        if sn in names:
+            return wb[sn], sn
+        raise DataAggSheetMissingError(sn, names)
     ws = wb.active
     title = getattr(ws, "title", "") if ws is not None else ""
     return ws, str(title)
 
 
+def _sheet_used_row_col_bounds(ws: Any) -> tuple[int, int] | None:
+    """
+    materialize 用の使用範囲 (max_row, max_col) を 1 始まりで返す。
+    不明・不正なら None（従来どおり全走査）。
+    """
+    try:
+        mr = int(getattr(ws, "max_row", 0) or 0)
+        mc = int(getattr(ws, "max_column", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if mr < 1 or mc < 1:
+        return None
+    # 異常に大きい宣言は信頼せず全走査（誤 dimension 対策）
+    if mr > 1_000_000 or mc > 16_384:
+        return None
+    return mr, mc
+
+
 def _materialize_readonly_sheet_matrix(ws: Any) -> list[list[Any]]:
-    """read_only シートを一度だけ走査し抽出用スカラーの行リストにする（以降 ws[ref] は使わない）。"""
+    """
+    read_only シートを一度だけ走査し抽出用スカラーの行リストにする（以降 ws[ref] は使わない）。
+
+    使用範囲が分かる場合はそこに限定してメモリ／I/O を抑える（#10）。
+    """
     if ws is None:
         return []
     rows: list[list[Any]] = []
-    for tup in ws.iter_rows(values_only=False):
+    bounds = _sheet_used_row_col_bounds(ws)
+    if bounds is None:
+        for tup in ws.iter_rows(values_only=False):
+            rows.append(extract_read_openpyxl_row(tup))
+        return rows
+    max_row, max_col = bounds
+    for tup in ws.iter_rows(
+        min_row=1,
+        max_row=max_row,
+        min_col=1,
+        max_col=max_col,
+        values_only=False,
+    ):
         rows.append(extract_read_openpyxl_row(tup))
     return rows
 
@@ -1667,7 +1691,13 @@ def _get_readonly_sheet_matrix(
                 iop.record_materialize(path, time.perf_counter() - t_mat)
             except Exception:
                 pass
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "[DATA_AGG_EXTRACT] シート materialize 失敗 path=%s sheet=%s: %s",
+            path,
+            resolved_name,
+            e,
+        )
         return None
     mats_store[store_key] = mat
     return mat
@@ -1837,15 +1867,31 @@ def _xlsx_cell_value_open_workbook_rc(
         try:
             ws, _ = _resolve_readonly_worksheet(wb, sheet_name)
             if ws is None:
-                return None
+                logger.warning(
+                    "[DATA_AGG_EXTRACT] シート解決失敗 sheet=%s", sheet_name
+                )
+                return EXTRACT_READ_ERROR_MARK
             cell_ref = _col_row_to_cell_ref(col, row)
             return extract_read_openpyxl_cell(ws[cell_ref])
-        except Exception:
-            return None
+        except DataAggSheetMissingError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[DATA_AGG_EXTRACT] セル読取エラー sheet=%s rc=(%s,%s): %s",
+                sheet_name,
+                col,
+                row,
+                e,
+            )
+            return EXTRACT_READ_ERROR_MARK
 
-    ws, resolved_name = _resolve_readonly_worksheet(wb, sheet_name)
+    try:
+        ws, resolved_name = _resolve_readonly_worksheet(wb, sheet_name)
+    except DataAggSheetMissingError:
+        raise
     if ws is None:
-        return None
+        logger.warning("[DATA_AGG_EXTRACT] シート解決失敗 sheet=%s", sheet_name)
+        return EXTRACT_READ_ERROR_MARK
 
     path_key = str(path.resolve()) if path is not None else f"id:{id(wb)}"
     mat: Optional[list[list[Any]]] = None
@@ -1882,14 +1928,26 @@ def _xlsx_cell_value_open_workbook_rc(
             try:
                 cell_ref = _col_row_to_cell_ref(col, row)
                 return extract_read_openpyxl_cell(ws[cell_ref])
-            except Exception:
-                return None
+            except Exception as e:
+                logger.warning(
+                    "[DATA_AGG_EXTRACT] セル読取エラー sheet=%s rc=(%s,%s): %s",
+                    sheet_name,
+                    col,
+                    row,
+                    e,
+                )
+                return EXTRACT_READ_ERROR_MARK
 
     if mat is None:
         try:
             mat = _materialize_readonly_sheet_matrix(ws)
-        except Exception:
-            return None
+        except Exception as e:
+            logger.warning(
+                "[DATA_AGG_EXTRACT] シート materialize 失敗 sheet=%s: %s",
+                resolved_name,
+                e,
+            )
+            return EXTRACT_READ_ERROR_MARK
         if mats_store is not None and store_key is not None:
             mats_store[store_key] = mat
 
@@ -1955,6 +2013,8 @@ def _xlsx_read_repeated_series_open_workbook(
         try:
             c_ref = _col_row_to_cell_ref(base_col, base_row)
             v0 = _xlsx_cell_value_open_workbook(wb, sheet_name, c_ref, path=path)
+        except DataAggSheetMissingError:
+            raise
         except Exception:
             return None
         if _stop_repeat_on_empty(v0, repeat_until_empty=repeat_until_empty):
@@ -1965,6 +2025,8 @@ def _xlsx_read_repeated_series_open_workbook(
         return None
     try:
         ws, _ = _resolve_readonly_worksheet(wb, sheet_name)
+    except DataAggSheetMissingError:
+        raise
     except Exception:
         return None
     if ws is None:

@@ -11,6 +11,29 @@ SheetRuleKind = Literal["left", "exact", "contains", "not_contains"]
 
 SHEET_MISS_LABEL = "（該当なし）"
 
+# セル読取で例外時に空欄と区別するための表示値（結合比較にも残る）
+EXTRACT_READ_ERROR_MARK = "（抽出失敗）"
+
+
+class DataAggSheetMissingError(LookupError):
+    """シナリオ等で指定したシート名がブックに存在しない。"""
+
+    def __init__(self, sheet_name: str, available: Sequence[str] | None = None) -> None:
+        self.sheet_name = str(sheet_name or "").strip()
+        self.available = [str(x) for x in (available or [])]
+        avail_s = ", ".join(self.available[:12])
+        if len(self.available) > 12:
+            avail_s += ", …"
+        msg = "シート「%s」が見つかりません" % (self.sheet_name or "(空)")
+        if avail_s:
+            msg += "（ブック内: %s）" % avail_s
+        super().__init__(msg)
+
+
+def is_extract_read_error(val: Any) -> bool:
+    """抽出失敗マーカーかどうか。"""
+    return val == EXTRACT_READ_ERROR_MARK
+
 
 def parse_comma_separated_patterns(raw: str | None) -> list[str]:
     """

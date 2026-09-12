@@ -15,11 +15,9 @@ History (latest 3):
 from __future__ import annotations
 
 import os
-import re
 import sys
 import threading
 import time
-import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -45,8 +43,16 @@ from core.progress_pickle_write import (  # noqa: E402
 )
 from svc.dt_convert_helpers import (  # noqa: E402
     count_rows_to_write,
+    elapsed_ms as _elapsed_ms,
     format_datetime_column,
+    get_window_rect as _get_window_rect,
+    normalize_2d as _normalize_2d,
+    parse_datetime_with_normalized_fallback as _parse_datetime_with_normalized_fallback,
     read_sheet_matrix as _read_sheet_matrix_impl,
+    restore_excel_screen_updating as _restore_excel_screen_updating,
+    status_bar_restore as _status_bar_restore,
+    status_bar_save as _status_bar_save,
+    status_bar_set as _status_bar_set,
     trim_areas_to_used_range,
     write_changed_slices,
 )
@@ -55,11 +61,6 @@ logger = get_logger(__name__)
 _dt_ymd_diag = get_diag_logger("hc_csv_tool.diag.dt_ymd")
 _perf = get_perf_logger("svc.svc_dt_ymd.perf")
 __version__ = "1.1.4"
-
-
-def _elapsed_ms(since: float) -> int:
-    return max(0, int((time.perf_counter() - since) * 1000))
-
 
 def _dt_ymd_trace(phase: str, t0: float, **kv: object) -> None:
     try:
@@ -74,7 +75,6 @@ def _dt_ymd_trace(phase: str, t0: float, **kv: object) -> None:
             _dt_ymd_diag.info("[DT_YMD_TRACE] phase=%s cumulative_ms=%d", phase, _elapsed_ms(t0))
     except Exception:
         pass
-
 
 def _perf_dt_ymd(phase: str, t0: float, **kv: object) -> None:
     try:
@@ -100,41 +100,6 @@ try:
 except Exception:
     core_xlc_mod = None  # type: ignore
 
-
-def _status_bar_save(book: Any) -> str:
-    """
-    現在の Excel ステータスバー文言を退避する。
-    処理後に _status_bar_restore で復元するために使用する。
-    """
-    try:
-        return str(book.app.api.StatusBar or "")
-    except Exception:
-        return ""
-
-
-def _status_bar_set(book: Any, msg: str) -> None:
-    """
-    Excel のステータスバーに指定メッセージを表示する。
-    処理中・完了・エラー時のユーザーへのフィードバック用。
-    """
-    try:
-        book.app.api.DisplayStatusBar = True
-        book.app.api.StatusBar = str(msg)
-    except Exception:
-        pass
-
-
-def _status_bar_restore(book: Any, saved: str) -> None:
-    """
-    ステータスバーを _status_bar_save で退避した文言に戻す。
-    処理終了時（正常・異常問わず）に必ず呼ぶ。
-    """
-    try:
-        book.app.api.StatusBar = saved
-    except Exception:
-        pass
-
-
 def _cfg() -> dict[str, Any]:
     """
     日付変換用の画面・メッセージ設定を config/ui_dt_ymd.json から読み込む。
@@ -143,7 +108,6 @@ def _cfg() -> dict[str, Any]:
     if cst is None:
         return {}
     return cst.get_ui_config_from_file_required("dt_ymd")
-
 
 def _msg(cfg: dict[str, Any], key: str, **fmt: Any) -> str:
     """
@@ -155,7 +119,6 @@ def _msg(cfg: dict[str, Any], key: str, **fmt: Any) -> str:
     except Exception:
         return str(m)
 
-
 def _progress_path(sheet_id: str) -> Path:
     """
     進捗状態を書き出す Pickle ファイルのパスを返す。
@@ -165,14 +128,11 @@ def _progress_path(sheet_id: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d / f"progress_dt_ymd_{sheet_id}.pkl"
 
-
 def _progress_write(path: Path, obj: dict[str, Any]) -> bool:
     """進捗情報を Pickle で path に書き出す（verified / monotonic seq）。"""
     return dispatch_progress_write(path, obj, log_tag="DT_YMD")
 
-
 DT_PROGRESS_DONE_DELAY_MS = 400
-
 
 def _progress_write_done(path: Path) -> bool:
     return write_progress_done_with_fallback(
@@ -185,33 +145,6 @@ def _progress_write_done(path: Path) -> bool:
         log_tag="DT_YMD",
         user_message="進捗完了の反映に失敗しました。日付変換は完了しています。",
     )
-
-
-def _restore_excel_screen_updating(ptr_a: Any) -> None:
-    try:
-        ptr_a.api.ScreenUpdating = True
-    except Exception:
-        pass
-
-
-def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
-    """
-    Win32 API でウィンドウのクライアント外枠（left, top, right, bottom）を取得する。
-    進捗ダイアログを Excel ウィンドウ付近に表示する際の基準に使う。
-    """
-    if not int(hwnd or 0) or os.name != "nt":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        r = wintypes.RECT()
-        if ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(r)):
-            return (int(r.left), int(r.top), int(r.right), int(r.bottom))
-    except Exception:
-        pass
-    return None
-
 
 def _submit_progress_ui(
     parent_hwnd: int,
@@ -262,7 +195,6 @@ def _submit_progress_ui(
     except Exception as exc:
         logger.warning("[DT_YMD] progress UI request failed: %s", exc)
 
-
 def _submit_done_ui(parent_hwnd: int, sheet_id: str, message: str, title: str = "日付変換") -> None:
     """
     完了通知をモーダルで表示するため ui_server に依頼する。
@@ -300,7 +232,6 @@ def _submit_done_ui(parent_hwnd: int, sheet_id: str, message: str, title: str = 
         logger.info("[DT_YMD] done UI request: %s", req_path)
     except Exception as exc:
         logger.warning("[DT_YMD] done UI request failed: %s", exc)
-
 
 def _submit_warning_ui(parent_hwnd: int, sheet_id: str, message: str, title: str = "日付変換") -> None:
     """
@@ -340,75 +271,6 @@ def _submit_warning_ui(parent_hwnd: int, sheet_id: str, message: str, title: str
     except Exception as exc:
         logger.warning("[DT_YMD] warning UI request failed: %s", exc)
 
-
-def _normalize_2d(raw: Any, yn: int, xn: int) -> list[list[Any]]:
-    """
-    xlwings の Range.value で得た値を、yn×xn の 2 次元リストに正規化する。
-    単一セル・1 行・複数行のいずれでも、欠けている要素は None で埋める。
-    """
-    if yn <= 0 or xn <= 0:
-        return []
-    if yn == 1 and xn == 1:
-        return [[raw]]
-    if yn == 1:
-        row = raw if isinstance(raw, list) else [raw]
-        return [row[:xn] + [None] * max(0, xn - len(row))]
-    out: list[list[Any]] = []
-    if not isinstance(raw, list):
-        return [[None] * xn for _ in range(yn)]
-    for r in range(yn):
-        row = raw[r] if r < len(raw) else None
-        if row is None:
-            out.append([None] * xn)
-        elif isinstance(row, list):
-            out.append((row + [None] * xn)[:xn])
-        else:
-            out.append([row] + [None] * (xn - 1) if xn > 1 else [row])
-    return out
-
-
-def _normalize_date_text(v: Any) -> Any:
-    """
-    日付文字列の軽い正規化を行い、to_datetime で解釈しやすい形に寄せる。
-    変換不能値は後段で元値を保持するため、ここでは文字整形のみを担う。
-    """
-    if v is None:
-        return v
-    try:
-        if pd.isna(v):
-            return v
-    except Exception:
-        pass
-
-    s = str(v)
-    if not s:
-        return s
-
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\u3000", " ").strip()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[（(][^）)]*[）)]", "", s)
-    s = re.sub(r"\s*年\s*", "/", s)
-    s = re.sub(r"\s*月\s*", "/", s)
-    s = re.sub(r"\s*日\s*", "", s)
-    s = s.replace(".", "/").replace("-", "/")
-    s = re.sub(r"/{2,}", "/", s)
-    return s.strip()
-
-
-def _parse_datetime_with_normalized_fallback(ser_col: pd.Series) -> pd.Series:
-    """
-    既存の to_datetime 判定を優先し、失敗分のみ正規化文字列で再判定する。
-    """
-    ser_dt = pd.to_datetime(ser_col, errors="coerce")
-    mask_failed = ser_dt.isna()
-    if bool(mask_failed.any()):
-        ser_norm = ser_col.map(_normalize_date_text)
-        ser_dt_norm = pd.to_datetime(ser_norm, errors="coerce")
-        ser_dt = ser_dt.where(~mask_failed, ser_dt_norm)
-    return ser_dt
-
-
 def _read_sheet_matrix(
     ptr_s: Any,
     y1: int,
@@ -434,7 +296,6 @@ def _read_sheet_matrix(
         normalize_2d=_normalize_2d,
     )
 
-
 def _sheet_id_resolve(ptr_s: Any, sheet_id: str) -> str:
     """
     進捗用のシート識別子を返す。
@@ -451,7 +312,6 @@ def _sheet_id_resolve(ptr_s: Any, sheet_id: str) -> str:
         except Exception:
             pass
     return f"dt_ymd_{abs(id(ptr_s))}"
-
 
 def convert_date_ymd(target_hwnd: Optional[int] = None, sheet_id: str = "") -> None:
     """

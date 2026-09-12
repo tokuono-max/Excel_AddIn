@@ -906,4 +906,6 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
         prog_path=str(prog_path),
         cancel_path=str(cancel_path),
     )
-    _finish_compute_only("", ok=True, spill_path=None)
+    # active pickle は消さない。batch_write の _finish_write が完了通知の後に消す。
+    # ここで消すと親 UI の完了ポーリングが短猶予（旧15秒）で止まり、
+    # 大表の Excel 書込み（十数秒〜）完了通知を取りこぼす。

@@ -51,6 +51,8 @@ def test_poll_keeps_timer_during_grace_when_active_gone_without_notify(
     assert host._released is True
     assert host._batch_poll_timer.stopped is False
     assert host._batch_poll_active_gone_deadline > time.time()
+    # 大表書込み取りこぼし防止: 猶予は数分規模
+    assert host._batch_poll_active_gone_deadline >= time.time() + 60.0
 
 
 def test_poll_shows_done_during_grace_after_active_gone(
@@ -107,3 +109,19 @@ def test_finish_helpers_notify_before_clear_active() -> None:
         notify_i = chunk.index("_batch_done_notify(")
         clear_i = chunk.index("_clear_active_batch_run_if_current(")
         assert notify_i < clear_i, marker
+
+
+def test_batch_compute_success_does_not_clear_active_after_write_dispatch() -> None:
+    """
+    compute 成功後に active を消すと、親ポーリングが書込み完了前に止まり得る。
+    成功パスは dispatch のみで、clear は batch_write 側に任せる。
+    """
+    src = (
+        Path(__file__).resolve().parents[1] / "svc" / "data_agg_batch_compute.py"
+    ).read_text(encoding="utf-8")
+    # 成功パス末尾: 最後の _dispatch_batch_write の後に _finish_compute_only / clear が来ない
+    idx = src.rfind("_dispatch_batch_write(")
+    assert idx > 0
+    tail = src[idx : idx + 800]
+    assert "_finish_compute_only(" not in tail
+    assert "_clear_active_batch_run_if_current(" not in tail

@@ -11,6 +11,32 @@ from core.core_value_shape import apply_value_shape, shape_date_value
 _YMD_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
 _YMD_HM_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{1,2}:\d{2}$")
 
+# 加工チェック: 現行表示ラベル＋旧シナリオ別名（完全一致。部分一致はしない）
+# UI 復元 (_saved_process_check_at_index) と同じ集合を共有する。
+PROCESS_CHECK_TRIM_LABELS = frozenset({"トリム"})
+PROCESS_CHECK_WIDE_LABELS = frozenset(
+    {
+        "全角→半角",
+        "全角→半角（英数字・記号）",
+        "半角変換",  # 旧部分一致経路で効いていた単独語
+    }
+)
+PROCESS_CHECK_DATE_LABELS = frozenset(
+    {
+        "年月日変換",
+        "日付変換",
+        "日付変換（yyyy/mm/dd形式に変換）",
+        "日付変換 (yyyy/mm/dd) 時刻なし",
+        "日付 (yyyy/mm/dd)",
+        "日付変換 (yyyy/mm/dd)",
+    }
+)
+PROCESS_CHECK_ALIASES_BY_SLOT: dict[int, frozenset[str]] = {
+    0: PROCESS_CHECK_TRIM_LABELS,
+    1: PROCESS_CHECK_WIDE_LABELS,
+    2: PROCESS_CHECK_DATE_LABELS,
+}
+
 
 def _coerce_cell_scalar_to_full_text(val: Any) -> str:
     """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。
@@ -30,18 +56,22 @@ def apply_check_labels(val: Any, labels: list[Any] | None, *, raw: Any | None = 
     """
     UI に保存されたチェックラベルを順に適用。
     各項目は整形 DSL と同一実装（trim / wide / date）に寄せる。
-    ラベルは config の CHECK_LABELS と一致する想定だが、部分一致で判定する。
+
+    判定は strip 後の完全一致（現行ラベル＋旧別名の許可リスト）。
+    部分文字列マッチはしない（#7: 将来ラベル追加時の誤適用防止）。
     raw: 日付変換用のセル生値（datetime / Excel シリアル等）。未指定時は val を使う。
     """
     raw_in = raw if raw is not None else val
     s = "" if val is None else str(val)
     for lab in labels or []:
-        t = str(lab)
-        if "トリム" in t:
+        t = str(lab).strip()
+        if not t:
+            continue
+        if t in PROCESS_CHECK_TRIM_LABELS:
             s = apply_value_shape(s, "trim")
-        if ("全角" in t and "半角" in t) or "半角変換" in t:
+        if t in PROCESS_CHECK_WIDE_LABELS:
             s = apply_value_shape(s, "wide")
-        if "日付" in t or "年月日" in t:
+        if t in PROCESS_CHECK_DATE_LABELS:
             s = shape_date_value(raw_in)
     return s
 

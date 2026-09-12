@@ -40,18 +40,112 @@ def _frame_hidden_cache() -> dict[str, Any] | None:
     return frame.setdefault(_CACHE_KEY, {})
 
 
+def _hidden_set_from_worksheet(ws: Any) -> set[int]:
+    """1 シートの row_dimensions.hidden を 0 始まり集合にする。"""
+    hidden: set[int] = set()
+    if ws is None:
+        return hidden
+    dims = getattr(ws, "row_dimensions", None)
+    if dims is None:
+        return hidden
+    for idx, dim in dims.items():
+        try:
+            r1 = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if bool(getattr(dim, "hidden", False)) and r1 >= 1:
+            hidden.add(r1 - 1)
+    return hidden
+
+
+def _store_all_sheets_hidden(wb: Any, by_sheet: dict[str, Any]) -> None:
+    """
+    1 回開いた（またはキャッシュ済みの）非 read_only ブックから、
+    全シート分の非表示行を by_sheet に格納する（追加の load_workbook を避ける）。
+    """
+    if wb is None or by_sheet is None:
+        return
+    names = [str(x) for x in (getattr(wb, "sheetnames", None) or []) if str(x).strip()]
+    for name in names:
+        try:
+            ws = wb[name]
+        except Exception:
+            by_sheet[_sheet_cache_key(name)] = frozenset()
+            continue
+        by_sheet[_sheet_cache_key(name)] = frozenset(_hidden_set_from_worksheet(ws))
+    active = getattr(wb, "active", None)
+    active_title = str(getattr(active, "title", "") or "").strip() if active is not None else ""
+    if active_title and _sheet_cache_key(active_title) in by_sheet:
+        by_sheet["__LEFTMOST__"] = by_sheet[_sheet_cache_key(active_title)]
+    elif active is not None:
+        left = frozenset(_hidden_set_from_worksheet(active))
+        by_sheet["__LEFTMOST__"] = left
+        if active_title:
+            by_sheet.setdefault(_sheet_cache_key(active_title), left)
+
+
+def _hidden_for_request(
+    wb: Any,
+    sheet_name: Optional[str],
+    *,
+    by_sheet: dict[str, Any] | None,
+) -> set[int]:
+    """wb から要求シートの hidden を返す。by_sheet があれば全シート分を一度に埋める。"""
+    sk = _sheet_cache_key(sheet_name)
+    if by_sheet is not None:
+        if sk not in by_sheet:
+            _store_all_sheets_hidden(wb, by_sheet)
+        if sk not in by_sheet:
+            sn = str(sheet_name or "").strip()
+            if sn:
+                logger.warning(
+                    "[DATA_AGG_HIDDEN] シート「%s」なし — 非表示判定をスキップ",
+                    sn,
+                )
+            by_sheet[sk] = frozenset()
+        return set(by_sheet[sk])
+
+    sn = str(sheet_name or "").strip()
+    names = [str(x) for x in (getattr(wb, "sheetnames", None) or [])]
+    try:
+        if sn:
+            if sn not in names:
+                logger.warning(
+                    "[DATA_AGG_HIDDEN] シート「%s」なし — 非表示判定をスキップ",
+                    sn,
+                )
+                return set()
+            ws = wb[sn]
+        else:
+            ws = getattr(wb, "active", None)
+    except Exception as e:
+        logger.debug("[DATA_AGG_HIDDEN] wb sheet 解決失敗: %s", e)
+        return set()
+    return _hidden_set_from_worksheet(ws)
+
+
 def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
-    """openpyxl 通常ロードで row_dimensions.hidden を収集（0 始まり行）。"""
+    """
+    openpyxl 通常ロードで非表示行を収集（0 始まり行）。
+
+    xlsx_workbook_scope 内では 1 回の open で全シート分を hidden キャッシュへ格納し、
+    複数シートの skip_hidden でも full オープンがシート数分に増えないようにする。
+    read_only 抽出キャッシュは触らない。
+    """
     import time
 
     from core import core_env
 
     t0 = time.perf_counter()
+    by_sheet_root = _frame_hidden_cache()
+    pk = _path_cache_key(path)
+    by_sheet = by_sheet_root.setdefault(pk, {}) if by_sheet_root is not None else None
+
     try:
         import openpyxl
     except ImportError:
         return set()
-    hidden: set[int] = set()
+    wb = None
     try:
         wb = openpyxl.load_workbook(
             path, read_only=False, data_only=False, keep_links=False
@@ -60,28 +154,14 @@ def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
         logger.debug("[DATA_AGG_HIDDEN] xlsx open 失敗 %s: %s", path, e)
         return set()
     try:
-        names = list(getattr(wb, "sheetnames", None) or [])
-        sn = str(sheet_name or "").strip()
-        if sn and sn in names:
-            ws = wb[sn]
-        else:
-            ws = wb.active
-        dims = getattr(ws, "row_dimensions", None)
-        if dims is None:
-            return hidden
-        for idx, dim in dims.items():
-            try:
-                r1 = int(idx)
-            except (TypeError, ValueError):
-                continue
-            if bool(getattr(dim, "hidden", False)):
-                if r1 >= 1:
-                    hidden.add(r1 - 1)
+        return _hidden_for_request(wb, sheet_name, by_sheet=by_sheet)
     except Exception as e:
         logger.debug("[DATA_AGG_HIDDEN] xlsx dims 失敗 %s: %s", path, e)
+        return set()
     finally:
         try:
-            wb.close()
+            if wb is not None:
+                wb.close()
         except Exception:
             pass
         if core_env.data_agg_io_profile_enabled():
@@ -91,7 +171,6 @@ def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
                 iop.record_hidden_open(path, time.perf_counter() - t0)
             except Exception:
                 pass
-    return hidden
 
 
 def _load_hidden_rows_xls(path: Path, sheet_name: Optional[str]) -> set[int]:
@@ -139,29 +218,18 @@ def _path_cache_key(path: Path | str) -> str:
     return normalize_source_path_literal(path)
 
 
-def _hidden_rows_from_cached_workbook(
-    path: Path, sheet_name: Optional[str]
-) -> set[int] | None:
-    """xlsx_workbook_scope 内の既存ブックから非表示行を取得。未キャッシュなら None。"""
+def _non_readonly_workbook_from_cache(path: Path) -> Any | None:
+    """スコープ内の非 read_only ブック。read_only のみ／未登録なら None（潰さない）。"""
     try:
         from svc.svc_data_agg_extract import (  # noqa: WPS433
-            _hidden_rows_from_workbook,
-            _xlsx_workbook_cache_top,
-            _xlsx_cache_path_key,
+            ensure_xlsx_workbook_for_hidden_rows,
             is_openxml_excel_suffix,
         )
     except Exception:
         return None
     if not is_openxml_excel_suffix(path.suffix):
         return None
-    frame = _xlsx_workbook_cache_top()
-    if frame is None:
-        return None
-    key = _xlsx_cache_path_key(path)
-    wb = (frame.get("wbs") or {}).get(key)
-    if wb is None or bool(getattr(wb, "read_only", False)):
-        return None
-    return _hidden_rows_from_workbook(wb, sheet_name)
+    return ensure_xlsx_workbook_for_hidden_rows(path)
 
 
 def get_hidden_excel_rows(
@@ -179,33 +247,25 @@ def get_hidden_excel_rows(
     sk = _sheet_cache_key(sheet_name)
     pk = _path_cache_key(p)
     cache = _frame_hidden_cache()
+    by_sheet: dict[str, Any] | None = None
     if cache is not None:
         by_sheet = cache.setdefault(pk, {})
         hit = by_sheet.get(sk)
         if hit is not None:
             return set(hit)
     if suf in (".xlsx", ".xlsm"):
-        from_wb = _hidden_rows_from_cached_workbook(p, sheet_name)
-        if from_wb is not None:
-            hidden = from_wb
-        else:
-            try:
-                from svc.svc_data_agg_extract import (  # noqa: WPS433
-                    _hidden_rows_from_workbook,
-                    ensure_xlsx_workbook_for_hidden_rows,
-                )
-
-                wb = ensure_xlsx_workbook_for_hidden_rows(p)
-                if wb is not None:
-                    hidden = _hidden_rows_from_workbook(wb, sheet_name)
-                else:
-                    hidden = _load_hidden_rows_xlsx(p, sheet_name)
-            except Exception:
+        try:
+            wb = _non_readonly_workbook_from_cache(p)
+            if wb is not None:
+                hidden = _hidden_for_request(wb, sheet_name, by_sheet=by_sheet)
+            else:
                 hidden = _load_hidden_rows_xlsx(p, sheet_name)
+        except Exception:
+            hidden = _load_hidden_rows_xlsx(p, sheet_name)
     else:
         hidden = _load_hidden_rows_xls(p, sheet_name)
-    if cache is not None:
-        cache.setdefault(pk, {})[sk] = frozenset(hidden)
+    if by_sheet is not None:
+        by_sheet.setdefault(sk, frozenset(hidden))
     return hidden
 
 

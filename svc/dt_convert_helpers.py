@@ -123,11 +123,16 @@ def format_datetime_column(
     """
     stripped = ser_col.astype(str).str.strip()
     non_empty = int((ser_col.notna() & (stripped != "")).sum())
-    ser_fmt = ser_dt.dt.strftime(fmt)
+    if not isinstance(ser_dt, pd.Series):
+        ser_dt = pd.Series(ser_dt, index=ser_col.index)
+    # .where 結合や COM 混在で object 化することがある → .dt 前に必ず datetime 化
+    if not pd.api.types.is_datetime64_any_dtype(ser_dt):
+        ser_dt = pd.to_datetime(ser_dt, errors="coerce")
     mask_ok = ser_dt.notna()
     success = int(mask_ok.sum())
-    if not bool(mask_ok.any()):
+    if success == 0 or not pd.api.types.is_datetime64_any_dtype(ser_dt):
         return ser_col.map(shape_fallback), success, non_empty
+    ser_fmt = ser_dt.dt.strftime(fmt)
     if bool(mask_ok.all()):
         return ser_fmt.astype(object), success, non_empty
     out = ser_fmt.astype(object)
@@ -259,3 +264,135 @@ def write_changed_slices(
             except Exception:
                 pass
     return written
+
+
+def elapsed_ms(since: float) -> int:
+    """perf_counter 起点からの経過ミリ秒（負にならない）。"""
+    import time
+
+    return max(0, int((time.perf_counter() - since) * 1000))
+
+
+def status_bar_save(book: Any) -> str:
+    """現在の Excel ステータスバー文言を退避する。"""
+    try:
+        return str(book.app.api.StatusBar or "")
+    except Exception:
+        return ""
+
+
+def status_bar_set(book: Any, msg: str) -> None:
+    """Excel のステータスバーに指定メッセージを表示する。"""
+    try:
+        book.app.api.DisplayStatusBar = True
+        book.app.api.StatusBar = str(msg)
+    except Exception:
+        pass
+
+
+def status_bar_restore(book: Any, saved: str) -> None:
+    """ステータスバーを status_bar_save で退避した文言に戻す。"""
+    try:
+        book.app.api.StatusBar = saved
+    except Exception:
+        pass
+
+
+def restore_excel_screen_updating(ptr_a: Any) -> None:
+    try:
+        ptr_a.api.ScreenUpdating = True
+    except Exception:
+        pass
+
+
+def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Win32 GetWindowRect → (left, top, right, bottom)。非 NT / 失敗時 None。"""
+    import os
+
+    if not int(hwnd or 0) or os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        r = wintypes.RECT()
+        if ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(r)):
+            return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+    except Exception:
+        pass
+    return None
+
+
+def normalize_2d(raw: Any, yn: int, xn: int) -> list[list[Any]]:
+    """xlwings Range.value を yn×xn の 2 次元リストに正規化する。"""
+    if yn <= 0 or xn <= 0:
+        return []
+    if yn == 1 and xn == 1:
+        return [[raw]]
+    if yn == 1:
+        row = raw if isinstance(raw, list) else [raw]
+        return [row[:xn] + [None] * max(0, xn - len(row))]
+    out: list[list[Any]] = []
+    if not isinstance(raw, list):
+        return [[None] * xn for _ in range(yn)]
+    for r in range(yn):
+        row = raw[r] if r < len(raw) else None
+        if row is None:
+            out.append([None] * xn)
+        elif isinstance(row, list):
+            out.append((row + [None] * xn)[:xn])
+        else:
+            out.append([row] + [None] * (xn - 1) if xn > 1 else [row])
+    return out
+
+
+def normalize_date_text(v: Any) -> Any:
+    """日付文字列の軽い正規化（to_datetime 向け）。変換不能判定は呼び出し側。"""
+    import re
+    import unicodedata
+
+    if v is None:
+        return v
+    try:
+        if pd.isna(v):
+            return v
+    except Exception:
+        pass
+
+    s = str(v)
+    if not s:
+        return s
+
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u3000", " ").strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[（(][^）)]*[）)]", "", s)
+    s = re.sub(r"\s*年\s*", "/", s)
+    s = re.sub(r"\s*月\s*", "/", s)
+    s = re.sub(r"\s*日\s*", "", s)
+    s = s.replace(".", "/").replace("-", "/")
+    s = re.sub(r"/{2,}", "/", s)
+    return s.strip()
+
+
+def parse_datetime_with_normalized_fallback(ser_col: pd.Series) -> pd.Series:
+    """to_datetime を優先し、失敗分のみ normalize_date_text で再判定する。"""
+    if not isinstance(ser_col, pd.Series):
+        ser_col = pd.Series(ser_col)
+    ser_dt = pd.to_datetime(ser_col, errors="coerce")
+    if not isinstance(ser_dt, pd.Series):
+        ser_dt = pd.Series(ser_dt, index=ser_col.index)
+    mask_failed = ser_dt.isna()
+    if bool(mask_failed.any()):
+        ser_norm = ser_col.map(normalize_date_text)
+        ser_dt_norm = pd.to_datetime(ser_norm, errors="coerce")
+        if not isinstance(ser_dt_norm, pd.Series):
+            ser_dt_norm = pd.Series(ser_dt_norm, index=ser_col.index)
+        # Series.where は dtype が object に落ち .dt が使えなくなることがある
+        merged = ser_dt.to_numpy(dtype=object, copy=True)
+        failed = mask_failed.to_numpy()
+        merged[failed] = ser_dt_norm.to_numpy(dtype=object)[failed]
+        ser_dt = pd.to_datetime(pd.Series(merged, index=ser_col.index), errors="coerce")
+    if not pd.api.types.is_datetime64_any_dtype(ser_dt):
+        ser_dt = pd.to_datetime(ser_dt, errors="coerce")
+    return ser_dt

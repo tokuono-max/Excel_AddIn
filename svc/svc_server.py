@@ -3,8 +3,8 @@
 Python: 3.12
 Module: svc/svc_server.py
 Created: 2026-02-15
-Updated: 2026-07-03
-Version: 0.1.22
+Updated: 2026-09-11
+Version: 0.1.23
 Purpose:
   別プロセスで常駐する svc サーバ。
   - hc_main からの svc_req_*.pkl を監視し、action に応じて svc/hc_<feature>.py を遅延 import して実行する。
@@ -15,9 +15,9 @@ Shutdown (L1):
   - control/svc_shutdown.flag を検知したら停止する。
 
 History (latest 3):
+  - 0.1.23 (2026-09-11): DEBUG の subprocess.Popen モンキーパッチ常設を除去（本番ノイズ・波及防止）。
   - 0.1.22 (2026-07-03): resolve_fresh_book_after_ui_wait — UI 待ち後は古い Book 参照を使わず HWND 再取得（COM_NG 根本対策）。
   - 0.1.21 (2026-07-03): attach_book — UI/長処理 action は cache 無効化＋HWND 再取得。com_error 後 PyErr_Clear・1 回リトライ。操作後キャッシュ破棄。
-  - 0.1.20 (2026-06-16): com_monitor 掃除時に svc_last_com_hwnd.txt を同期。warmup リスト見直しと整合。
 """
 
 import importlib
@@ -27,7 +27,6 @@ import os
 import sys
 import time
 import traceback
-import subprocess
 import multiprocessing as _mp
 import threading
 
@@ -46,29 +45,9 @@ from typing import Any, Callable
 from core import core_env
 from core.core_log import get_logger
 
-__version__ = "0.1.20"
+__version__ = "0.1.23"
 
 logger = get_logger(__name__)
-
-# ===== DEBUG: spawn detector (safe for asyncio) =====
-_OrigPopen = subprocess.Popen  # keep original class
-
-class LoggedPopen(_OrigPopen):  # keep it a class so asyncio can subclass it
-    def __init__(self, *args, **kwargs):
-        try:
-            logger.debug(
-                "[SPAWN_DETECT] Popen pid=%s exe=%s args=%s kwargs_keys=%s",
-                os.getpid(),
-                sys.executable,
-                args,
-                list(kwargs.keys()),
-            )
-        except Exception:
-            pass
-        super().__init__(*args, **kwargs)
-
-subprocess.Popen = LoggedPopen
-# ================================================
 
 # ===== DEBUG: boot trace (temporary) =====
 logger.debug(
