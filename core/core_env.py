@@ -357,8 +357,8 @@ def data_agg_parallel_ramp_enabled(
     if target_workers <= 1:
         return False
     try:
-        from svc.data_agg_path_network import path_is_network
-    except Exception:
+        from core.core_path_network import path_is_network
+    except ImportError:
         return False
     disp = [str(p) for p in (display_paths or io_paths or []) if str(p).strip()]
     if not disp:

@@ -5,8 +5,27 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from core.core_excel_text import as_excel_forced_text, scalar_to_text
+from core.core_excel_text import (
+    _coerce_cell_scalar_to_full_text,
+    as_excel_forced_text,
+)
 from core.core_value_shape import apply_value_shape, shape_date_value
+
+# 互換 re-export（呼び出し元は従来どおり data_agg_value_post からも取得可）
+__all__ = [
+    "PROCESS_CHECK_ALIASES_BY_SLOT",
+    "PROCESS_CHECK_DATE_LABELS",
+    "PROCESS_CHECK_TRIM_LABELS",
+    "PROCESS_CHECK_WIDE_LABELS",
+    "_coerce_cell_scalar_to_full_text",
+    "apply_check_labels",
+    "postprocess_cell_primary",
+    "postprocess_cell_primary_batch",
+    "postprocess_link_rule_value",
+    "postprocess_link_rule_value_batch",
+    "postprocess_metadata_like_primary",
+    "postprocess_name_extract_primary",
+]
 
 _YMD_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
 _YMD_HM_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{1,2}:\d{2}$")
@@ -36,20 +55,6 @@ PROCESS_CHECK_ALIASES_BY_SLOT: dict[int, frozenset[str]] = {
     1: PROCESS_CHECK_WIDE_LABELS,
     2: PROCESS_CHECK_DATE_LABELS,
 }
-
-
-def _coerce_cell_scalar_to_full_text(val: Any) -> str:
-    """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。
-
-    セル内改行（結合セルの折り返し等）は除去する（例: 「電\\n源」→「電源」）。
-    シナリオ／マスタ／本番の抽出共通経路で効く。
-    """
-    s = scalar_to_text(val)
-    if not s:
-        return s
-    if "\n" in s or "\r" in s:
-        s = s.replace("\r\n", "").replace("\n", "").replace("\r", "")
-    return s
 
 
 def apply_check_labels(val: Any, labels: list[Any] | None, *, raw: Any | None = None) -> str:

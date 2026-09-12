@@ -34,6 +34,20 @@ def scalar_to_text(val: Any) -> str:
     return str(val)
 
 
+def _coerce_cell_scalar_to_full_text(val: Any) -> str:
+    """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。
+
+    セル内改行（結合セルの折り返し等）は除去する（例: 「電\\n源」→「電源」）。
+    結合比較・抽出後処理の共通経路で使う（core leaf。svc に依存しない）。
+    """
+    s = scalar_to_text(val)
+    if not s:
+        return s
+    if "\n" in s or "\r" in s:
+        s = s.replace("\r\n", "").replace("\n", "").replace("\r", "")
+    return s
+
+
 def as_excel_forced_text(val: Any) -> str:
     """
     Excel COM 一括書込みで数値・日付へ再解釈されないよう先頭に ' を付ける。

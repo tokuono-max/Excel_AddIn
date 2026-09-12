@@ -5811,22 +5811,47 @@ class _ScenarioEditDialog(QDialog):
             return names[idx]
         return ""
 
-    def _unique_scenario_name_for_duplicate(self, source_row: int, insert_at: int) -> str:
-        src = self._sources_data[source_row]
+    @staticmethod
+    def _unique_duplicate_scenario_name(
+        item_name: str,
+        sources: list[dict[str, Any]],
+        source_row: int,
+        insert_at: int,
+        *,
+        default_name: str = "",
+    ) -> str:
+        """複製時の識別名候補。名前解決に scenario_name だけ使うため deepcopy しない（#17）。"""
+        src = sources[source_row]
         base = str(src.get("scenario_name") or "").strip()
         if not base:
-            base = self._default_scenario_name(source_row)
+            base = (default_name or "").strip() or (
+                _ScenarioEditDialog._resolve_auto_scenario_display_names_for_sources(
+                    item_name, sources
+                )[source_row]
+                if 0 <= source_row < len(sources)
+                else "%s_シナリオ%d" % (item_name, source_row + 1)
+            )
         trial = 0
         while trial < 10000:
             cand = (base + "_コピー") if trial == 0 else ("%s_%d" % (base, trial + 1))
             trial += 1
-            new_src = copy.deepcopy(src)
-            new_src["scenario_name"] = cand
-            merged = self._sources_data[:insert_at] + [new_src] + self._sources_data[insert_at:]
-            effs = [self._effective_scenario_name_at_in_list(i, merged) for i in range(len(merged))]
+            # 表示名解決は scenario_name のみ参照。巨大ソースの deepcopy は不要。
+            merged = sources[:insert_at] + [{"scenario_name": cand}] + sources[insert_at:]
+            effs = _ScenarioEditDialog._resolve_auto_scenario_display_names_for_sources(
+                item_name, merged
+            )
             if len(effs) == len(set(effs)):
                 return cand
         return base + "_コピー"
+
+    def _unique_scenario_name_for_duplicate(self, source_row: int, insert_at: int) -> str:
+        return _ScenarioEditDialog._unique_duplicate_scenario_name(
+            self._item_name,
+            self._sources_data,
+            source_row,
+            insert_at,
+            default_name=self._default_scenario_name(source_row),
+        )
 
     def _is_selected_registered(self) -> bool:
         idx = self._current_source_index
@@ -5867,13 +5892,20 @@ class _ScenarioEditDialog(QDialog):
 
             mr = self._master_item_row
             if mr >= 0 and self._master_items_list:
-                items_snap = copy.deepcopy(self._master_items_list)
-                if mr < len(items_snap):
+                # validate は読み取りのみ。全 items の deepcopy は重いので、
+                # 一覧は浅いコピー＋編集行だけ差し替え（sources は get_item で独立済み）（#17）。
+                items_snap: list[Any] = [
+                    (dict(it) if isinstance(it, dict) else it)
+                    for it in self._master_items_list
+                ]
+                if mr < len(items_snap) and isinstance(items_snap[mr], dict):
                     reg_payload = self.get_item()
-                    items_snap[mr]["sources"] = list(reg_payload.get("sources") or [])
+                    item_one = dict(items_snap[mr])
+                    item_one["sources"] = list(reg_payload.get("sources") or [])
                     wm = reg_payload.get("write_mode")
                     if wm is not None and str(wm).strip():
-                        items_snap[mr]["write_mode"] = str(wm).strip().lower()
+                        item_one["write_mode"] = str(wm).strip().lower()
+                    items_snap[mr] = item_one
                     _val_errs = _scenario_mod.validate_scenario({"items": items_snap})
                     if _val_errs:
                         t_reg = (
@@ -5913,8 +5945,6 @@ class _ScenarioEditDialog(QDialog):
         self._update_step_button_enabled()
 
     def _on_step_scenario_placeholder(self) -> None:
-        import copy
-
         if not self._is_selected_registered():
             return
 

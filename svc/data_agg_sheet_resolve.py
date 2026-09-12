@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import logging
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 SheetRuleKind = Literal["left", "exact", "contains", "not_contains"]
 
@@ -13,6 +17,27 @@ SHEET_MISS_LABEL = "（該当なし）"
 
 # セル読取で例外時に空欄と区別するための表示値（結合比較にも残る）
 EXTRACT_READ_ERROR_MARK = "（抽出失敗）"
+
+# ブック I/O で想定する失敗（#12: 広域 Exception を縮減。想定外は伝播）
+_SHEET_NAME_IO_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    AttributeError,
+    zipfile.BadZipFile,
+)
+
+
+def _sheet_name_io_errors() -> tuple[type[BaseException], ...]:
+    errs: list[type[BaseException]] = list(_SHEET_NAME_IO_ERRORS)
+    try:
+        from openpyxl.utils.exceptions import InvalidFileException
+
+        errs.append(InvalidFileException)
+    except ImportError:
+        pass
+    return tuple(errs)
 
 
 class DataAggSheetMissingError(LookupError):
@@ -149,7 +174,7 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
 
             _iop = _iop_mod
             _t0 = time.perf_counter()
-        except Exception:
+        except ImportError:
             _iop = None
 
     def _finish_sheet_name_timing() -> None:
@@ -158,6 +183,7 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
         try:
             _iop.record_sheet_name_open(file_path, time.perf_counter() - _t0)
         except Exception:
+            # 計測失敗は本処理に影響させない
             pass
 
     try:
@@ -166,7 +192,7 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
         cached = list_sheet_names_from_workbook_cache(file_path)
         if cached is not None:
             return cached
-    except Exception:
+    except (ImportError, AttributeError, TypeError, OSError, ValueError):
         pass
 
     p = Path(file_path)
@@ -187,16 +213,20 @@ def list_workbook_sheet_names(file_path: str | Path) -> list[str] | None:
     if suffix in (".xlsx", ".xlsm"):
         try:
             import openpyxl  # noqa: E402
-        except Exception:
+        except ImportError:
             _finish_sheet_name_timing()
             return []
+        io_errs = _sheet_name_io_errors()
         try:
             wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
             names = list(wb.sheetnames or [])
             wb.close()
             _finish_sheet_name_timing()
             return [str(x) for x in names if str(x).strip() != ""]
-        except Exception:
+        except io_errs as e:
+            logger.warning(
+                "[DATA_AGG_SHEET] シート名一覧の読取失敗 path=%s err=%s", p, e
+            )
             _finish_sheet_name_timing()
             return []
     return []

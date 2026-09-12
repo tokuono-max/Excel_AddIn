@@ -41,3 +41,29 @@ def test_deepcopy_output_is_independent_per_source() -> None:
     assert out[1]["ui_scenario_source_v1"]["value_shape_script"] == "trim"
     assert out[0]["cell_ref"] == "X1"
     assert out[1]["cell_ref"] == "Y1"
+
+
+def test_unique_duplicate_name_does_not_require_full_deepcopy() -> None:
+    """#17: 複製名候補は scenario_name だけで一意化でき、巨大ネストの deepcopy は不要。"""
+    from ui_qt.ui_data_agg import _ScenarioEditDialog
+
+    fat = {"pad": ["x" * 1000 for _ in range(50)], "link_defs": [{"cell": "A1"}] * 20}
+    sources = [
+        {
+            "type": "cell",
+            "scenario_name": "基準",
+            "ui_scenario_source_v1": fat,
+        },
+        {
+            "type": "cell",
+            "scenario_name": "基準_コピー",
+            "ui_scenario_source_v1": fat,
+        },
+    ]
+    name = _ScenarioEditDialog._unique_duplicate_scenario_name(
+        "項目", sources, 0, 1, default_name="基準"
+    )
+    assert name == "基準_2"
+    # 入力ネストは未改変（候補生成がソース本体を汚さない）
+    assert sources[0]["ui_scenario_source_v1"] is fat
+    assert sources[0]["scenario_name"] == "基準"

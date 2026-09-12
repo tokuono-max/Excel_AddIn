@@ -32,7 +32,7 @@ def _sheet_cache_key(sheet_name: Optional[str]) -> str:
 def _frame_hidden_cache() -> dict[str, Any] | None:
     try:
         from svc.svc_data_agg_extract import _xlsx_workbook_cache_top
-    except Exception:
+    except ImportError:
         return None
     frame = _xlsx_workbook_cache_top()
     if frame is None:
@@ -69,7 +69,7 @@ def _store_all_sheets_hidden(wb: Any, by_sheet: dict[str, Any]) -> None:
     for name in names:
         try:
             ws = wb[name]
-        except Exception:
+        except KeyError:
             by_sheet[_sheet_cache_key(name)] = frozenset()
             continue
         by_sheet[_sheet_cache_key(name)] = frozenset(_hidden_set_from_worksheet(ws))
@@ -118,7 +118,7 @@ def _hidden_for_request(
             ws = wb[sn]
         else:
             ws = getattr(wb, "active", None)
-    except Exception as e:
+    except (KeyError, AttributeError, TypeError) as e:
         logger.debug("[DATA_AGG_HIDDEN] wb sheet 解決失敗: %s", e)
         return set()
     return _hidden_set_from_worksheet(ws)
@@ -150,12 +150,12 @@ def _load_hidden_rows_xlsx(path: Path, sheet_name: Optional[str]) -> set[int]:
         wb = openpyxl.load_workbook(
             path, read_only=False, data_only=False, keep_links=False
         )
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         logger.debug("[DATA_AGG_HIDDEN] xlsx open 失敗 %s: %s", path, e)
         return set()
     try:
         return _hidden_for_request(wb, sheet_name, by_sheet=by_sheet)
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         logger.debug("[DATA_AGG_HIDDEN] xlsx dims 失敗 %s: %s", path, e)
         return set()
     finally:
@@ -180,11 +180,21 @@ def _load_hidden_rows_xls(path: Path, sheet_name: Optional[str]) -> set[int]:
     except ImportError:
         return set()
     hidden: set[int] = set()
+    xls_errs: tuple[type[BaseException], ...] = (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    )
+    _xlrd_err = getattr(xlrd, "XLRDError", None)
+    if isinstance(_xlrd_err, type):
+        xls_errs = xls_errs + (_xlrd_err,)
     try:
         book = xlrd.open_workbook(
             str(path), on_demand=False, formatting_info=True
         )
-    except Exception as e:
+    except xls_errs as e:
         logger.debug("[DATA_AGG_HIDDEN] xls open 失敗 %s: %s", path, e)
         return set()
     try:
@@ -202,7 +212,7 @@ def _load_hidden_rows_xls(path: Path, sheet_name: Optional[str]) -> set[int]:
                 continue
             if bool(getattr(info, "hidden", False)):
                 hidden.add(ri)
-    except Exception as e:
+    except xls_errs as e:
         logger.debug("[DATA_AGG_HIDDEN] xls rowinfo 失敗 %s: %s", path, e)
     finally:
         try:

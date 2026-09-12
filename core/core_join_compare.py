@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from svc.data_agg_value_post import _coerce_cell_scalar_to_full_text
+from core.core_excel_text import _coerce_cell_scalar_to_full_text
 
 
 def join_compare_display_key(val: Any) -> str:

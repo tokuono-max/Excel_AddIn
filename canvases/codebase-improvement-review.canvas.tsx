@@ -143,12 +143,13 @@ const FINDINGS: Finding[] = [
     score: 8,
     items: "正確性 / スリム化",
     feature: "基盤層（core / svc 境界）",
-    title: "core → svc 循環依存",
+    title: "core → svc 循環依存（A/B 済・host系Cは後回し）",
     impact: "初期化順・Nuitka・単体テストの脆さ",
     riskIfUnfixed: "起動失敗・バンドル抜け・テストが壊れて回帰見逃し",
     frequency: "低〜中（リファクタ・配布ビルド時）",
     tradeoff: "層分割は広い import 差し替えが必要。短期は回帰リスクが上がる",
     difficulty: "中",
+    done: true,
   },
   {
     id: 9,
@@ -156,13 +157,14 @@ const FINDINGS: Finding[] = [
     score: 8,
     items: "速度 / スリム化",
     feature: "データ集約コア／デバッグUI全体",
-    title: "巨大モノリス分割 (集約コア＋デバッグUI)",
+    title: "巨大モノリス分割 (join merge 1継ぎ目済・継続可)",
     impact: "変更リスク局所化",
     riskIfUnfixed: "修正の副作用が広がり、回帰バグ・レビュー不能が常態化",
     frequency: "高（機能追加のたび）",
     tradeoff:
       "分割作業自体が大規模・長期。途中はマージ衝突と二重メンテが増える",
     difficulty: "高",
+    done: true,
   },
   {
     id: 10,
@@ -200,13 +202,14 @@ const FINDINGS: Finding[] = [
     score: 7,
     items: "正確性 / スリム化",
     feature: "データ集約／UI／更新（横断）",
-    title: "広域 except Exception の縮減",
+    title: "広域 except Exception の縮減（シート/非表示ホットパス段階済）",
     impact: "障害可視化・再発防止",
     riskIfUnfixed: "本番障害の原因特定不能・誤った空結果の継続",
     frequency: "高（例外経路は日常的）",
     tradeoff:
       "例外を厳格化するとCOM/Excelの一時失敗で処理が止まりやすくなる",
     difficulty: "中",
+    done: true,
   },
   {
     id: 13,
@@ -278,6 +281,7 @@ const FINDINGS: Finding[] = [
     tradeoff:
       "浅いコピーは副作用で編集内容が汚染される危険。参照管理の設計が要る",
     difficulty: "中",
+    done: true,
   },
   {
     id: 18,
@@ -401,8 +405,15 @@ export default function CodebaseImprovementReview() {
         比較は文字列＋先頭 ' 除去。反復またぎは統合しない。結合代入本線は従来どおり。
       </Callout>
 
+      <Callout tone="success" title="構造改善フェーズ完了（2026-09-12）">
+        #8A/#8B / #17 / #12（ホットパス段階）/ #9（join merge 1継ぎ目）を実施。復帰点:
+        backup/pre-structure-improve-20260912（be555b5）。詳細は
+        structure-improve-phase-report Canvas。
+      </Callout>
+
       <Callout tone="warning" title="最優先の結論">
-        正確性止血と掃除・I/O の安全改善は完了。残は #7/#8/#12（合意・段階）や構造分割など。
+        正確性止血と掃除・I/O・今回の構造改善（段階）は完了。残は #8C（host循環）、
+        #9 の追加継ぎ目、#12 の他ホットパス、#18〜 など。
       </Callout>
 
       <H2>改善優先度一覧（スコア降順）</H2>
@@ -465,6 +476,7 @@ export default function CodebaseImprovementReview() {
           <CardBody>
             <Stack gap={6}>
               <Text>A(#2+#3) / B / C(#1) / D(#10+#11) / #7 / #15+#16 → 済</Text>
+              <Text>#8A+#8B / #17 / #12段階 / #9 join-merge1 → 済（2026-09-12）</Text>
               <Text>#10 追加ストリーム化は見送り（多ファイル小容量向けには効果薄）</Text>
             </Stack>
           </CardBody>
@@ -473,9 +485,9 @@ export default function CodebaseImprovementReview() {
           <CardHeader>次の着手（未着手）</CardHeader>
           <CardBody>
             <Stack gap={6}>
-              <Text>次候補: #17（UI deepcopy）単独、または #12 のホットパス段階的</Text>
-              <Text>#8・#9 は単独・長期（キャッシュ寿命を壊さないこと）</Text>
-              <Text>#15+#16 → 済（polars単一化／dt純関数の共通抽出。モジュール統合なし）</Text>
+              <Text>次候補: #18〜 / #8C（host） / #9 追加継ぎ目 / #12 他ホットパス</Text>
+              <Text>#8C・#9 残りは単独・長期（キャッシュ寿命を壊さないこと）</Text>
+              <Text>復帰: git reset --hard backup/pre-structure-improve-20260912</Text>
             </Stack>
           </CardBody>
         </Card>

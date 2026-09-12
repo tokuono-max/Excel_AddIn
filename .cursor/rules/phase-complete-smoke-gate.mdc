@@ -1,0 +1,40 @@
+---
+description: フェーズ完了・チェックポイント時に公開API／巨大欠落を見逃さない
+alwaysApply: true
+---
+
+# 改善フェーズ完了ゲート（再発防止）
+
+## 2026-09-12 の見逃し（事実）
+
+- チェックポイント `be555b5` で `ui_qt/ui_data_agg_debug.py` が約 9000 行欠落。
+- 本番は `from ui_qt.ui_data_agg_debug import create_data_agg_debug_dialog`。
+- 既存テストは `DataAggDebugDialog` を直接 import しており、**工場関数経路を未カバー**。
+- 構造改善の通しスイートから **debug UI テストが外れていた**。
+- ファイルは構文上 import 可能なまま残ったため、「関連テストだけ」では気づけなかった。
+
+## 必須（エージェント）
+
+改善フェーズ完了・復帰用チェックポイント作成・「全体通し確認」の報告前に、次を実行する:
+
+```text
+.venv\Scripts\python.exe -m pytest tests/test_ui_data_agg_debug_public_api.py -q
+```
+
+データ集約の構造／UI 変更を含む通し確認では、上記に加え少なくとも次を含める:
+
+```text
+tests/test_data_agg_debug_phase_dividers.py
+tests/test_data_agg_debug_step_snapshots.py
+```
+
+（時間が許せば `tests/test_data_agg_*debug*.py` をまとめて実行）
+
+## 禁止
+
+- UI 公開入口（遅延 import 名）をテストせず「関連テスト PASS」だけでフェーズ完了と報告すること
+- 巨大モジュールの行数が明らかに減った変更を、差分確認なしでチェックポイントに含めること
+
+## 検知テスト
+
+`tests/test_ui_data_agg_debug_public_api.py` — 工場関数・必須メソッド・行数／メソッド数下限。
