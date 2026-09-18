@@ -1135,7 +1135,7 @@ def _dispatch_update_check_ui_request(
     timeout_sec: float = 120.0,
 ) -> dict[str, Any] | None:
     try:
-        from svc.svc_host import ensure_ui_server
+        from core.host_ui_spawn import ensure_ui_server
         from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle
     except Exception:
         return None
@@ -1267,7 +1267,7 @@ def _show_update_dialog_via_ui_server(
 ) -> dict[str, Any] | None:
     _ = timeout_sec
     try:
-        from svc.svc_host import ensure_ui_server
+        from core.host_ui_spawn import ensure_ui_server
         from ui_qt.ipc_file import get_ipc_root, get_request_dir, write_pickle
     except Exception:
         return None

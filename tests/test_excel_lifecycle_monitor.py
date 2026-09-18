@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -37,7 +38,10 @@ def test_monitor_shutdown_after_excel_gone_confirmed(tmp_path, monkeypatch):
         state["shutdown"] += 1
 
     monkeypatch.setattr(elc, "is_any_excel_process_running", fake_excel)
-    monkeypatch.setattr("svc.svc_host.request_shutdown_all", fake_shutdown)
+    monkeypatch.setattr(
+        "core.update_process_cleanup.request_packaged_shutdown_flags",
+        fake_shutdown,
+    )
 
     assert elc.ensure_excel_lifecycle_monitor(poll_sec=0.2) is True
 
@@ -49,6 +53,12 @@ def test_monitor_shutdown_after_excel_gone_confirmed(tmp_path, monkeypatch):
     while state["shutdown"] == 0 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert state["shutdown"] == 1
+
+
+def test_lifecycle_shutdown_does_not_import_svc() -> None:
+    src = Path("core/excel_lifecycle_monitor.py").read_text(encoding="utf-8")
+    assert "from svc." not in src
+    assert "request_packaged_shutdown_flags" in src
 
 
 def test_ensure_monitor_idempotent(monkeypatch):

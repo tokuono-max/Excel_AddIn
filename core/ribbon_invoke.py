@@ -229,7 +229,7 @@ def _call_svc_server(action: str, book_ptr: Any, sheet_id: str = "", **kwargs: o
         - book はプロセス間で渡せないため、book_name/fullname と excel_hwnd を渡す。
         - 処理本体は svc_server 側で xlwings からブックを引き直して実行する。
     """
-    from svc.svc_host import ensure_svc_server  # 遅延 import（RunPython 短寿命プロセスの起動コスト低減）
+    from core.host_svc_spawn import ensure_svc_server  # 遅延 import。svc を経由しない
 
     plog = get_perf_logger(f"{__name__}.ribbon_invoke")
     t_cs = time.perf_counter()

@@ -1,0 +1,21 @@
+# 本番実行時に必要なピン（Nuitka 同梱は import グラフ優先。ここは venv 再現用）
+# polars は含めない → requirements-optional.txt（高速経路・任意）
+bsdiff4==1.2.6
+et_xmlfile==2.0.0
+filelock==3.16.0
+numpy==2.3.5
+openpyxl==3.1.5
+packaging==25.0
+pandas==2.3.3
+PySide6==6.10.2
+PySide6_Addons==6.10.2
+PySide6_Essentials==6.10.2
+python-dateutil==2.9.0.post0
+pytz==2025.2
+pywin32==311
+setuptools==80.9.0
+shiboken6==6.10.2
+six==1.17.0
+tzdata==2025.2
+xlrd==2.0.1
+xlwings==0.33.16

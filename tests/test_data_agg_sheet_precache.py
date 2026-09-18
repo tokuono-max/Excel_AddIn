@@ -95,3 +95,29 @@ def test_vertical_repeat_via_matrix_in_scope(vertical_repeat_xlsx: Path) -> None
         vals = ex.extract_item_values(p, item)
     got = [str(x)[1:] if str(x).startswith("'") else str(x) for x in vals]
     assert got == ["v1", "v2", "v3", "v4", "v5"]
+
+
+def test_precache_skips_sheets_missing_from_workbook(tmp_path: Path) -> None:
+    """横断シナリオで他ファイル向けシート名が混ざっても precache は落とさない。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    p = tmp_path / "only_data.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Data"
+    wb.active["A1"] = "ok"
+    wb.save(p)
+    wb.close()
+    items = [
+        {
+            "sources": [
+                {"type": "cell", "sheet_name": "Data", "cell_ref": "A1"},
+                {"type": "cell", "sheet_name": "紐付け履歴", "cell_ref": "C5"},
+            ]
+        }
+    ]
+    with ex.xlsx_workbook_scope():
+        ex.precache_xlsx_workbook_sheets_for_items(p, items)  # must not raise
+        vals = ex.extract_item_values(
+            p,
+            {"sources": [{"type": "cell", "sheet_name": "Data", "cell_ref": "A1"}]},
+        )
+    assert vals

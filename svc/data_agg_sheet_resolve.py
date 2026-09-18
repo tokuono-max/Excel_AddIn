@@ -15,8 +15,9 @@ SheetRuleKind = Literal["left", "exact", "contains", "not_contains"]
 
 SHEET_MISS_LABEL = "（該当なし）"
 
-# セル読取で例外時に空欄と区別するための表示値（結合比較にも残る）
-EXTRACT_READ_ERROR_MARK = "（抽出失敗）"
+# セル読取で例外時にセルへ入れる値（空欄と区別。結合比較にも残る）。
+# 指定シート無しは一括入口で空スキップであり、この印は入れない。
+EXTRACT_READ_ERROR_MARK = "#ERR_EXTRACT"
 
 # ブック I/O で想定する失敗（#12: 広域 Exception を縮減。想定外は伝播）
 _SHEET_NAME_IO_ERRORS: tuple[type[BaseException], ...] = (

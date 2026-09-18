@@ -145,7 +145,16 @@ def set_sheet_prop(sheet_pointer: Any, key_name_string: str, value_string: str) 
         return False
 
 
-def find_sheet_by_guid(workbook_pointer: Any, target_guid_string: str) -> Optional[Any]:
+class ExcelLookupUnavailable(Exception):
+    """GUID 走査中の COM 失敗。シートが無いという意味ではない。"""
+
+
+def find_sheet_by_guid(
+    workbook_pointer: Any,
+    target_guid_string: str,
+    *,
+    on_error: str = "none",
+) -> Optional[Any]:
     """ブック内の全シートを走査し GUID を持つシートを返す（無ければ None）。
 
     Notes:
@@ -172,18 +181,23 @@ def find_sheet_by_guid(workbook_pointer: Any, target_guid_string: str) -> Option
                 return sh
 
     except Exception as ex:
-        # ここで落とすと Excelロック解除漏れの方が致命。ログだけ残して None で戻す。
+        # ここで落とすと Excelロック解除漏れの方が致命。既定はログだけ残して None。
+        # on_error=raise はブック監視向け。COM 繁忙を「シート無し」と区別する。
         try:
             dt_ms = int((time.perf_counter() - t0) * 1000)
             logger.warning("[COM_NG] find_sheet_by_guid failed dt_ms=%s ex=%r", dt_ms, ex)
         except Exception:
             pass
+        if on_error == "raise":
+            raise ExcelLookupUnavailable(repr(ex)) from ex
     return None
 
 
 def find_book_and_sheet_by_guid_in_app(
     app: Any,
     target_guid_string: str,
+    *,
+    on_error: str = "none",
 ) -> tuple[Any, Any] | None:
     """App 内の全ブックを走査し、GUID を持つシートとそのブックを返す。
 
@@ -194,9 +208,11 @@ def find_book_and_sheet_by_guid_in_app(
         return None
     try:
         for book in app.books:
-            sheet = find_sheet_by_guid(book, guid)
+            sheet = find_sheet_by_guid(book, guid, on_error=on_error)
             if sheet is not None:
                 return book, sheet
+    except ExcelLookupUnavailable:
+        raise
     except Exception as ex:
         try:
             logger.warning(
@@ -206,6 +222,8 @@ def find_book_and_sheet_by_guid_in_app(
             )
         except Exception:
             pass
+        if on_error == "raise":
+            raise ExcelLookupUnavailable(repr(ex)) from ex
     return None
 
 
@@ -269,6 +287,7 @@ def get_excel_context_from_hwnd(
     sheet_id: str = "",
     *,
     quiet: bool = False,
+    on_unavailable: str = "none",
 ) -> Optional[tuple]:
     """HWND から xlwings の app, book, sheet を取得する。
 
@@ -289,8 +308,21 @@ def get_excel_context_from_hwnd(
 
         app = xw.App(impl=WinApp(xl=ph))
         sheet_id_s = str(sheet_id or "").strip()
+        lookup_errors = "raise" if on_unavailable == "raise" else "none"
         if sheet_id_s:
-            hit = find_book_and_sheet_by_guid_in_app(app, sheet_id_s)
+            try:
+                hit = find_book_and_sheet_by_guid_in_app(
+                    app, sheet_id_s, on_error=lookup_errors
+                )
+            except ExcelLookupUnavailable:
+                if on_unavailable == "raise":
+                    raise
+                logger.info(
+                    "[XLC_CTX] get_excel_context_from_hwnd fail: lookup_unavailable hwnd=%s sheet_id=%r",
+                    ph,
+                    sheet_id_s,
+                )
+                return None
             if hit is None:
                 logger.info(
                     "[XLC_CTX] get_excel_context_from_hwnd fail: sheet_guid_not_found hwnd=%s sheet_id=%r",
@@ -331,6 +363,14 @@ def get_excel_context_from_hwnd(
                 getattr(book, "name", "?"),
             )
         return (app, book, sheet, ph)
+    except ExcelLookupUnavailable:
+        if on_unavailable == "raise":
+            raise
+        logger.info(
+            "[XLC_CTX] get_excel_context_from_hwnd fail: lookup_unavailable hwnd=%s",
+            hwnd,
+        )
+        return None
     except Exception as ex:
         try:
             logger.warning(

@@ -107,8 +107,6 @@ def test_prepare_com_session_is_noop() -> None:
 
 
 def test_record_and_read_com_session_hwnd(tmp_path, monkeypatch) -> None:
-    import svc.svc_host as svc_host
-
-    monkeypatch.setattr(svc_host, "_control_dir", lambda: tmp_path)
+    monkeypatch.setattr("core.core_host_ipc.host_control_dir", lambda: tmp_path)
     ecs.record_com_session_hwnd(777)
     assert ecs.read_last_com_session_hwnd() == 777

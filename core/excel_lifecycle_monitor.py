@@ -3,7 +3,7 @@
 Excel プロセス監視: 全 EXCEL.EXE 終了後に常駐 Python へ shutdown 要求。
 
 - 複数 Excel: 1 つでも EXCEL.EXE が残れば Python は維持
-- 最後の Excel 終了後: request_shutdown_all()
+- 最後の Excel 終了後: core の停止フラグ（svc を import しない）
 - VBA BeforeClose では Python に触らない（ribbon / 起動時 ensure と併用）
 """
 from __future__ import annotations
@@ -58,11 +58,11 @@ def _request_shutdown_when_all_excel_gone() -> None:
     except Exception:
         pass
     try:
-        from svc.svc_host import request_shutdown_all
+        from core.update_process_cleanup import request_packaged_shutdown_flags
 
-        request_shutdown_all()
+        request_packaged_shutdown_flags()
     except Exception as ex:
-        logger.warning("[LIFECYCLE] request_shutdown_all failed: %s", ex)
+        logger.warning("[LIFECYCLE] shutdown flags failed: %s", ex)
 
 
 def _monitor_worker(poll_sec: float) -> None:

@@ -57,7 +57,7 @@ def _patch_hwnd_app(monkeypatch, fake_app: _FakeApp) -> None:
     monkeypatch.setattr(
         xlc,
         "find_sheet_by_guid",
-        lambda book, guid: next(
+        lambda book, guid, **_kw: next(
             (sh for sh in book.sheets if getattr(sh, "_guid", "") == guid),
             None,
         ),
@@ -76,7 +76,7 @@ def test_find_book_and_sheet_by_guid_in_app_skips_active_book(monkeypatch) -> No
     monkeypatch.setattr(
         xlc,
         "find_sheet_by_guid",
-        lambda book, guid: next(
+        lambda book, guid, **_kw: next(
             (sh for sh in book.sheets if sh._guid == guid),
             None,
         ),
@@ -108,7 +108,7 @@ def test_get_excel_context_from_hwnd_fails_when_guid_missing(monkeypatch) -> Non
     active_book = _FakeBook("ActiveBook", [_FakeSheet("X")])
     fake_app = _FakeApp(_FakeBooks([active_book]))
     _patch_hwnd_app(monkeypatch, fake_app)
-    monkeypatch.setattr(xlc, "find_sheet_by_guid", lambda _book, _guid: None)
+    monkeypatch.setattr(xlc, "find_sheet_by_guid", lambda _book, _guid, **_kw: None)
 
     assert xlc.get_excel_context_from_hwnd(100, "missing-guid") is None
 
@@ -147,4 +147,20 @@ def test_workbook_watch_calls_get_excel_context_quiet() -> None:
     src = (Path(__file__).resolve().parents[1] / "ui_qt" / "ui_data_agg.py").read_text(
         encoding="utf-8"
     )
-    assert "get_excel_context_from_hwnd(hwnd, sid, quiet=True)" in src
+    assert "on_unavailable=\"raise\"" in src
+    assert "quiet=True" in src
+
+
+class _BoomBook:
+    @property
+    def sheets(self):
+        raise RuntimeError("call rejected")
+
+
+def test_find_sheet_by_guid_on_error_raise_is_not_missing() -> None:
+    assert xlc.find_sheet_by_guid(_BoomBook(), "abc") is None
+    try:
+        xlc.find_sheet_by_guid(_BoomBook(), "abc", on_error="raise")
+    except xlc.ExcelLookupUnavailable:
+        return
+    raise AssertionError("ExcelLookupUnavailable was not raised")

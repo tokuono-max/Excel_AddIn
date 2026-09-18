@@ -62,6 +62,34 @@ def test_get_excel_cell_existing_sheet_ok(tmp_path: Path) -> None:
     assert _get_excel_cell(p, "Sheet1", "A1") == "on_sheet1"
 
 
+def test_extract_read_error_mark_is_err_extract() -> None:
+    assert EXTRACT_READ_ERROR_MARK == "#ERR_EXTRACT"
+    assert is_extract_read_error("#ERR_EXTRACT")
+    assert not is_extract_read_error("（抽出失敗）")
+    assert not is_extract_read_error(None)
+    assert not is_extract_read_error("")
+
+
+def test_extract_item_bundle_missing_sheet_skips_empty(tmp_path: Path) -> None:
+    """指定シート無しは一括入口で空スキップ。印は入れず、例外でも止めない。"""
+    from svc.svc_data_agg_extract import extract_item_bundle
+
+    p = _xlsx_two_sheets(tmp_path)
+    item = {
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "NoSuch",
+                "cell_ref": "A1",
+                "ui_scenario_source_v1": {"sheet_rule": "完全一致"},
+            }
+        ]
+    }
+    out = extract_item_bundle(p, item)
+    assert out.get("primary_values") == []
+    assert "#ERR_EXTRACT" not in (out.get("primary_values") or [])
+
+
 def test_cell_read_exception_returns_extract_mark() -> None:
     class _BoomWs:
         def __getitem__(self, _ref: str) -> None:

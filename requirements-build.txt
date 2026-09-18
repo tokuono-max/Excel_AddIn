@@ -1,0 +1,3 @@
+# ビルド専用（アプリ実行時 import しない。現行配布ビルドは Nuitka）
+# 旧 PyInstaller 系は削除済み（dead）。必要なら別途再導入すること。
+Nuitka==4.0.8

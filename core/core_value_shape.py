@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 _EXCEL_SERIAL_MIN = 1.0
@@ -367,8 +367,14 @@ def _datetime_from_excel_serial(n: float) -> datetime | None:
         if bool(pd.isna(ts)):
             return None
         dt = ts.to_pydatetime()
-        return dt if isinstance(dt, datetime) else None
+        if isinstance(dt, datetime):
+            return dt
     except Exception:
+        pass
+    # pandas 無し／失敗時も同一起点で変換（加工チェック・日付変換の共通経路）
+    try:
+        return datetime(1899, 12, 30) + timedelta(days=float(n))
+    except (OverflowError, ValueError):
         return None
 
 

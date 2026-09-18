@@ -320,9 +320,9 @@ except Exception:  # pragma: no cover
 
 
 def _control_dir() -> Path:
-    d = ipc_root / "control"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from core.core_host_ipc import host_control_dir  # noqa: WPS433
+
+    return host_control_dir()
 
 
 def clear_shutdown_flags(reason: str = "") -> None:
@@ -394,6 +394,7 @@ def _project_pythonw(project_root: Path) -> str:
 
 
 def _resolve_ui_server_path() -> Path:
+    """開発時の ui_server.py。起動の実体は core.host_ui_spawn.ui_server_script。"""
     # .../svc/svc_host.py -> project root -> ui_qt/ui_server.py
     here = Path(__file__).resolve().parent
     root = here.parent
@@ -401,132 +402,17 @@ def _resolve_ui_server_path() -> Path:
 
 
 def spawn_ui_server() -> None:
-    """Qt UI サーバを起動する（未起動想定）。"""
-    dev_root = Path(__file__).resolve().parent.parent
-    packaged = runtime_layout.use_packaged_server_commands()
-    server_py: Path | None = None
-    ui_exe: Path | None = None
+    """Qt UI サーバを起動する。実装は core。更新画面の呼び出し元は変えない。"""
+    from core.host_ui_spawn import spawn_ui_server as _spawn  # noqa: WPS433
 
-    if packaged:
-        ui_exe = runtime_layout.packaged_app_exe("hc_ui_server.exe")
-        if ui_exe is None:
-            logger.warning(
-                "[QT_UI_SERVER] packaged hc_ui_server.exe not found under HC_INSTALL_ROOT/app/bin",
-            )
-            return
-        project_root = runtime_layout.runtime_project_root(str(Path(__file__).resolve()))
-    else:
-        server_py = _resolve_ui_server_path()
-        if not server_py.exists():
-            raise FileNotFoundError(str(server_py))
-        project_root = server_py.parent.parent
-
-    if not _is_project_venv_interpreter(dev_root):
-        logger.warning(
-            "[HOST] skip spawn: interpreter is not project venv: %s",
-            sys.executable,
-        )
-        return
-    # guard: system python からの誤起動（二重起動）を抑止
-    if not _is_expected_venv_interpreter(dev_root):
-        try:
-            from core import core_log
-
-            core_log.get_logger(__name__).warning(
-                "skip spawn: unexpected interpreter: %s", sys.executable
-            )
-        except Exception:
-            pass
-        return
-
-    ipc_root = str(ipc_file.get_ipc_root())
-    logs_dir = Path(ipc_root) / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    boot_log = logs_dir / f"ui_server_boot_{int(time.time() * 1000)}.log"
-
-    env = os.environ.copy()
-    env["HC_IPC_ROOT"] = ipc_root
-    env["HC_QT_IPC_DIR"] = ipc_root
-    env["HC_PROJECT_ROOT"] = str(project_root)
-    env["PYTHONPATH"] = str(project_root) + os.pathsep + env.get("PYTHONPATH", "")
-
-    env["HC_UI_PARENT_PID"] = str(os.getpid())
-    try:
-        env["HC_EXCEL_PID"] = str(os.getppid())
-    except Exception:
-        pass
-
-    if packaged:
-        ir = runtime_layout.install_root()
-        if ir is not None:
-            env = runtime_layout.env_with_packaged_dll_search_path(env, ir)
-
-    if packaged:
-        if ui_exe is None:
-            return
-        cmd = [str(ui_exe)]
-        spawn_label = ui_exe
-        # EXE と同じフォルダを cwd に（Nuitka+PySide6 の相対パス・DLL 解決を安定化。HC_PROJECT_ROOT は引き続きインストールルート）
-        ui_cwd = str(ui_exe.resolve().parent)
-    else:
-        exe = _project_pythonw(project_root)
-        cmd = [exe, "-u", str(server_py)]
-        spawn_label = server_py
-        ui_cwd = str(project_root)
-
-    with boot_log.open("w", encoding="utf-8") as f:
-        f.write(f"[BOOT] cmd={cmd}\n")
-        f.write(f"[BOOT] cwd={ui_cwd}\n")
-        f.write(f"[BOOT] HC_PROJECT_ROOT={project_root}\n")
-        f.write(f"[BOOT] HC_QT_IPC_DIR={ipc_root}\n")
-
-    popen_kw: dict = {
-        "cwd": ui_cwd,
-        "env": env,
-        "stdout": boot_log.open("a", encoding="utf-8"),
-        "stderr": boot_log.open("a", encoding="utf-8"),
-    }
-    if os.name == "nt":
-        popen_kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-    subprocess.Popen(cmd, **popen_kw)  # noqa: S603,S607
-    logger.info(
-        "[QT_UI_SERVER] spawned: %s IPC=%s (boot_log=%s)", spawn_label, ipc_root, boot_log
-    )
-
+    _spawn()
 
 
 def ensure_ui_server() -> None:
-    """起動済みなら何もしない。未起動なら spawn する（別プロセス常駐）。"""
-    clear_shutdown_flags("ensure_ui_server")
-    if is_ui_server_running():
-        logger.info("[QT_UI_SERVER] already running (mutex exists)")
-        return
+    """起動済みなら何もしない。実装は core。更新画面は core を直接呼ぶ。"""
+    from core.host_ui_spawn import ensure_ui_server as _ensure  # noqa: WPS433
 
-    # ------------------------------------------------------------------
-    # double-spawn guard
-    #  - RunPython が短時間に複数回呼ばれると、mutex が張られる前に
-    #    spawn が重複し、結果として ui_server が複数常駐することがある。
-    #  - そのため IPC ルート配下の flag で「起動中」を共有する。
-    # ------------------------------------------------------------------
-    ipc_root = Path(str(ipc_file.get_ipc_root()))
-    flag = ipc_root / "control" / "ui_server_starting.flag"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        if flag.exists() and (time.time() - flag.stat().st_mtime) < 5.0:
-            logger.info("[QT_UI_SERVER] startup in progress (flag exists); skip spawn")
-        else:
-            flag.write_text(str(int(time.time() * 1000)), encoding="utf-8")
-            spawn_ui_server()
-
-        # wait for mutex (初回起動が遅い環境向けに猶予付き)
-        _wait_until_running(is_ui_server_running, "[QT_UI_SERVER]", poll_sec=0.02)
-    finally:
-        try:
-            if flag.exists():
-                flag.unlink()
-        except Exception:
-            pass
+    _ensure()
 
 
 def _resolve_svc_server_path() -> Path:
@@ -561,96 +447,10 @@ def all_python_hosts_running() -> bool:
 
 
 def spawn_svc_server() -> None:
-    """svc_server を起動する（未起動想定）。"""
+    """svc_server を起動する。実装は core（リボン起動と同一）。"""
+    from core.host_svc_spawn import spawn_svc_server as _spawn  # noqa: WPS433
 
-    # --- v0.4.16 in-process spawn guard ---
-    # Prevent svc_server from spawning itself
-    try:
-        bn = os.path.basename(sys.argv[0]).lower()
-        if bn in ("svc_server.py", "svc_server.exe", "hc_svc_server.exe"):
-            logger.info("[HOST] skip spawn: already inside svc_server process")
-            return
-    except Exception:
-        pass
-    # --------------------------------------
-    dev_root = Path(__file__).resolve().parent.parent
-    packaged = runtime_layout.use_packaged_server_commands()
-    server_py: Path | None = None
-    svc_exe: Path | None = None
-
-    if packaged:
-        svc_exe = runtime_layout.packaged_app_exe("hc_svc_server.exe")
-        if svc_exe is None:
-            logger.warning(
-                "[SVC_SERVER] packaged hc_svc_server.exe not found under HC_INSTALL_ROOT/app/bin",
-            )
-            return
-        project_root = runtime_layout.runtime_project_root(str(Path(__file__).resolve()))
-    else:
-        server_py = _resolve_svc_server_path()
-        if not server_py.exists():
-            raise FileNotFoundError(str(server_py))
-        project_root = server_py.parent.parent
-
-    if not _is_project_venv_interpreter(dev_root):
-        logger.warning(
-            "[HOST] skip spawn: interpreter is not project venv: %s",
-            sys.executable,
-        )
-        return
-    # guard: system python からの誤起動（二重起動）を抑止
-    if not _is_expected_venv_interpreter(dev_root):
-        try:
-            from core import core_log
-
-            core_log.get_logger(__name__).warning(
-                "skip spawn: unexpected interpreter: %s", sys.executable
-            )
-        except Exception:
-            pass
-        return
-
-    ipc_root = str(ipc_file.get_ipc_root())
-    logs_dir = Path(ipc_root) / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    boot_log = logs_dir / ("svc_server_boot_%s.log" % int(time.time() * 1000))
-
-    env = os.environ.copy()
-    env["HC_IPC_ROOT"] = ipc_root
-    env["HC_QT_IPC_DIR"] = ipc_root
-    env["HC_PROJECT_ROOT"] = str(project_root)
-    env["PYTHONPATH"] = str(project_root) + os.pathsep + env.get("PYTHONPATH", "")
-
-    if packaged:
-        ir = runtime_layout.install_root()
-        if ir is not None:
-            env = runtime_layout.env_with_packaged_dll_search_path(env, ir)
-
-    if packaged:
-        cmd = [str(svc_exe)]
-        spawn_label = svc_exe
-    else:
-        exe = _project_pythonw(project_root)
-        cmd = [exe, "-u", str(server_py)]
-        spawn_label = server_py
-
-    with boot_log.open("w", encoding="utf-8") as f:
-        f.write("[BOOT] cmd=%s\n" % cmd)
-        f.write("[BOOT] cwd=%s\n" % project_root)
-        f.write("[BOOT] HC_QT_IPC_DIR=%s\n" % ipc_root)
-
-    popen_kw = {
-        "cwd": str(project_root),
-        "env": env,
-        "stdout": boot_log.open("a", encoding="utf-8"),
-        "stderr": boot_log.open("a", encoding="utf-8"),
-    }
-    if os.name == "nt":
-        popen_kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-    subprocess.Popen(cmd, **popen_kw)  # noqa: S603,S607
-    logger.info(
-        "[SVC_SERVER] spawned: %s IPC=%s (boot_log=%s)", spawn_label, ipc_root, boot_log
-    )
+    _spawn()
 
 
 def _resolve_bridge_path() -> Path:
@@ -930,30 +730,10 @@ def ensure_svc_ui_bridge_parallel() -> None:
 
 
 def ensure_svc_server() -> None:
-    """起動済みなら何もしない。未起動なら spawn する（別プロセス常駐）。"""
-    clear_shutdown_flags("ensure_svc_server")
-    if is_svc_server_running():
-        logger.info("[SVC_SERVER] already running (mutex exists)")
-        return
+    """起動済みなら何もしない。実装は core（リボン起動と同一）。"""
+    from core.host_svc_spawn import ensure_svc_server as _ensure  # noqa: WPS433
 
-    ipc_root = Path(str(ipc_file.get_ipc_root()))
-    flag = ipc_root / "control" / "svc_server_starting.flag"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        if flag.exists() and (time.time() - flag.stat().st_mtime) < 5.0:
-            logger.info("[SVC_SERVER] startup in progress (flag exists); skip spawn")
-        else:
-            flag.write_text(str(int(time.time() * 1000)), encoding="utf-8")
-            spawn_svc_server()
-
-        _wait_until_running(is_svc_server_running, "[SVC_SERVER]", poll_sec=0.05)
-    finally:
-        try:
-            if flag.exists():
-                flag.unlink()
-        except Exception:
-            pass
+    _ensure()
 
 
 def is_shutdown_requested() -> bool:
@@ -976,44 +756,26 @@ def request_ui_server_shutdown() -> None:
 
 
 def _write_svc_shutdown_flag() -> None:
-    d = _control_dir()
-    p = d / "svc_shutdown.flag"
-    try:
-        p.write_text("shutdown", encoding="utf-8")
-    except Exception:
-        try:
-            p.open("a").close()
-        except Exception:
-            pass
+    from core.core_host_ipc import write_svc_shutdown_flag  # noqa: WPS433
+
+    write_svc_shutdown_flag(_control_dir())
 
 
-_SVC_LAST_COM_HWND_FILE = "svc_last_com_hwnd.txt"
 _SVC_COM_RECYCLE_WAIT_SEC = 3.0
 
 
 def read_last_svc_com_hwnd() -> int:
     """svc_server が最後に COM 接続した Excel HWND（IPC 永続化）。"""
-    try:
-        p = _control_dir() / _SVC_LAST_COM_HWND_FILE
-        if not p.exists():
-            return 0
-        return int((p.read_text(encoding="utf-8") or "0").strip() or "0")
-    except Exception:
-        return 0
+    from core.core_host_ipc import read_last_svc_com_hwnd as _read  # noqa: WPS433
+
+    return _read(_control_dir())
 
 
 def write_last_svc_com_hwnd(hwnd: int) -> None:
     """svc_server の COM 接続先 HWND を記録する。"""
-    ph = int(hwnd or 0)
-    p = _control_dir() / _SVC_LAST_COM_HWND_FILE
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if ph <= 0:
-            p.unlink(missing_ok=True)
-        else:
-            p.write_text(str(ph), encoding="utf-8")
-    except Exception:
-        pass
+    from core.core_host_ipc import write_last_svc_com_hwnd as _write  # noqa: WPS433
+
+    _write(_control_dir(), hwnd)
 
 
 def _list_svc_server_pids(project_root: Path | None = None) -> list[int]:

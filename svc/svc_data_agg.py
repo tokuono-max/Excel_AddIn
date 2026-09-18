@@ -41,7 +41,11 @@ from svc.data_agg_path_norm import (  # noqa: E402
     path_is_under_directory,
 )
 from svc.data_agg_sheet_resolve import parse_comma_separated_patterns  # noqa: E402
-from svc.data_agg_source_ui import source_ui_block  # noqa: E402
+from svc.data_agg_source_ui import (  # noqa: E402
+    item_file_filter_specs as _item_file_filter_specs,
+    item_source_file_patterns as _item_source_file_patterns,
+    source_ui_block,
+)
 from svc.data_agg_cancel import DataAggCancelled  # noqa: E402
 from svc.data_agg_extract_limit import (  # noqa: E402
     clear_extract_truncation_records,
@@ -50,8 +54,22 @@ from svc.data_agg_extract_limit import (  # noqa: E402
 )
 from svc.data_agg_value_post import _coerce_cell_scalar_to_full_text  # noqa: E402
 from svc.data_agg_join_merge import (  # noqa: E402
+    JoinSearchIndex,
+    _build_join_search_index,
     _join_cell_compare_norm,
+    _join_defs_index_cache_key,
+    _join_key_tuple_from_row,
+    _join_key_tuple_from_values,
+    _join_search_rows_for_slice_indexed,
     _merge_rows_by_join_keys,
+    _resolve_join_search_index,
+)
+from svc.data_agg_join_dump import (  # noqa: E402
+    join_dump_col_filter_accepts as _join_dump_col_filter_accepts,
+    join_dump_col_filter_accepts_link_target as _join_dump_col_filter_accepts_link_target,
+    join_dump_ctx_prefix as _join_dump_ctx_prefix,
+    join_dump_post_merge_file as _join_dump_post_merge_file,
+    join_dump_pv as _join_dump_pv,
 )
 from svc.svc_data_agg_write import merge_cell_for_write_mode  # noqa: E402
 
@@ -163,7 +181,7 @@ cst: Any = None
 try:
     from core import core_cst as _core_cst
     cst = _core_cst
-except Exception:
+except (ImportError, AttributeError):
     pass
 
 get_ipc_root: Callable[[], Path] | None = None
@@ -178,7 +196,7 @@ try:
     get_ipc_root = _get_ipc_root_fn
     get_request_dir = _get_request_dir_fn
     write_pickle = _write_pickle_fn
-except Exception:
+except (ImportError, AttributeError):
     pass
 
 
@@ -197,13 +215,15 @@ def _batch_active_path(sheet_id: str, ipc_root: Path) -> Path:
 
 
 def _read_active_batch_run_id(sheet_id: str, ipc_root: Path) -> str:
+    import pickle
+
     try:
         from ui_qt.ipc_file import read_pickle  # noqa: WPS433
 
         d = read_pickle(_batch_active_path(sheet_id, ipc_root))
         if isinstance(d, dict):
             return str(d.get("run_id") or "").strip()
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError, EOFError, pickle.UnpicklingError):
         pass
     return ""
 
@@ -481,45 +501,27 @@ def _align_context_paths_for_row(
 
 
 def _scenario_has_join_defs(items: list[dict[str, Any]]) -> bool:
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        for src in it.get("sources") or []:
-            if not isinstance(src, dict):
-                continue
-            if (src.get("type") or "").strip().lower() != "cell":
-                continue
-            pb = source_ui_block(src)
-            if isinstance(pb, dict) and (pb.get("join_defs") or []):
-                return True
-    return False
+    from svc.data_agg_source_ui import scenario_has_join_defs  # noqa: WPS433
+
+    return scenario_has_join_defs(items)
 
 
 def _item_join_defs_list(it: dict[str, Any]) -> list[dict[str, Any]]:
-    for src in (it.get("sources") or []):
-        if isinstance(src, dict) and (src.get("type") or "").strip().lower() == "cell":
-            pb = source_ui_block(src)
-            if isinstance(pb, dict):
-                return [x for x in (pb.get("join_defs") or []) if isinstance(x, dict)]
-    return []
+    from svc.data_agg_source_ui import item_join_defs_list  # noqa: WPS433
+
+    return item_join_defs_list(it)
 
 
 def _item_link_defs_list(it: dict[str, Any]) -> list[dict[str, Any]]:
-    for src in (it.get("sources") or []):
-        if isinstance(src, dict) and (src.get("type") or "").strip().lower() == "cell":
-            pb = source_ui_block(src)
-            if isinstance(pb, dict):
-                return [x for x in (pb.get("link_defs") or []) if isinstance(x, dict)]
-    return []
+    from svc.data_agg_source_ui import item_link_defs_list  # noqa: WPS433
+
+    return item_link_defs_list(it)
 
 
 def _join_search_targets_from_defs(join_defs: list[dict[str, Any]]) -> list[str]:
-    targets: list[str] = []
-    for jd in join_defs:
-        c = str(jd.get("item") or "").strip()
-        if c and c not in targets:
-            targets.append(c)
-    return targets
+    from svc.data_agg_source_ui import join_search_targets_from_defs  # noqa: WPS433
+
+    return join_search_targets_from_defs(join_defs)
 
 
 def _join_search_n_join_slices(jv: dict[str, Any], targets: list[str]) -> int:
@@ -691,52 +693,6 @@ def _build_match_key_frames_by_item(
     return frames_by_item
 
 
-def _item_source_file_patterns(item: dict[str, Any]) -> list[str]:
-    """
-    セル系 sources の file_pattern トークン（小文字）を重複なく列挙。
-
-    カンマ区切りは ``parse_comma_separated_patterns``（抽出フィルタと同じ）で分割する。
-    横断判定のトークン比較・デバッグ表示用。厳密なファイル一致は ``_item_file_filter_specs``。
-    """
-    patterns: list[str] = []
-    for src in item.get("sources") or []:
-        if not isinstance(src, dict):
-            continue
-        if str(src.get("type") or "cell").strip().lower() != "cell":
-            continue
-        block = source_ui_block(src)
-        if not isinstance(block, dict):
-            continue
-        for tok in parse_comma_separated_patterns(block.get("file_pattern")):
-            p = tok.lower()
-            if p and p not in patterns:
-                patterns.append(p)
-    return patterns
-
-
-def _item_file_filter_specs(item: dict[str, Any]) -> list[dict[str, str]]:
-    """
-    抽出と同じ file_pattern / file_name_rule を持つ制限ソースの仕様一覧。
-
-    file_pattern トークンが空のソースは含めない（フィルタなし）。
-    """
-    specs: list[dict[str, str]] = []
-    for src in item.get("sources") or []:
-        if not isinstance(src, dict):
-            continue
-        if str(src.get("type") or "cell").strip().lower() != "cell":
-            continue
-        block = source_ui_block(src)
-        if not isinstance(block, dict):
-            continue
-        raw_pat = str(block.get("file_pattern") or "")
-        if not parse_comma_separated_patterns(raw_pat):
-            continue
-        rule = str(block.get("file_name_rule") or "含む").strip() or "含む"
-        specs.append({"file_pattern": raw_pat, "file_name_rule": rule})
-    return specs
-
-
 def _extend_file_filter_specs(
     dst: list[dict[str, str]], item: dict[str, Any]
 ) -> None:
@@ -748,47 +704,22 @@ def _extend_file_filter_specs(
 def _file_path_matches_filter_specs(
     file_path: str, specs: Sequence[dict[str, Any]] | None
 ) -> bool:
-    """
-    結合／出力行判定を抽出と同じ ``source_passes_file_name_filter`` で評価する。
+    """結合／出力行判定。実装は source_ui（キャッシュ非依存）。"""
+    from svc.data_agg_source_ui import file_path_matches_filter_specs  # noqa: WPS433
 
-    specs 空 → False（ホスト／side 対象外）。いずれかの spec が True → True。
-    """
-    if not specs:
-        return False
-    from svc import svc_data_agg_extract as extract_mod  # noqa: E402
-
-    for spec in specs:
-        if not isinstance(spec, dict):
-            continue
-        src = {
-            "type": "cell",
-            "ui_scenario_source_v1": {
-                "file_pattern": spec.get("file_pattern"),
-                "file_name_rule": spec.get("file_name_rule") or "含む",
-            },
-        }
-        if extract_mod.source_passes_file_name_filter(file_path, src):
-            return True
-    return False
+    return file_path_matches_filter_specs(file_path, specs)
 
 
 def _item_sources_pass_file(item: dict[str, Any], file_path: str) -> bool:
-    from svc import svc_data_agg_extract as extract_mod  # noqa: E402
+    from svc.data_agg_source_ui import item_sources_pass_file  # noqa: WPS433
 
-    for src in item.get("sources") or []:
-        if isinstance(src, dict) and extract_mod.source_passes_file_name_filter(file_path, src):
-            return True
-    return False
+    return item_sources_pass_file(item, file_path)
 
 
 def _patterns_overlap(a: list[str], b: list[str]) -> bool:
-    if not a or not b:
-        return True
-    for pa in a:
-        for pb in b:
-            if pa in pb or pb in pa:
-                return True
-    return False
+    from svc.data_agg_source_ui import patterns_overlap  # noqa: WPS433
+
+    return patterns_overlap(a, b)
 
 
 def _join_host_needs_cross_file_pool(
@@ -796,49 +727,10 @@ def _join_host_needs_cross_file_pool(
     items: list[dict[str, Any]],
     headers: list[str],
 ) -> bool:
-    """
-    結合ホストの file_pattern と、結合比較列を供給する項目の pattern が異なるとき True
-    （光特性×紐づけのようなファイル横断照合）。
-    """
-    join_targets = _join_search_targets_from_defs(_item_join_defs_list(host_item))
-    if not join_targets:
-        return False
-    host_patterns = _item_source_file_patterns(host_item)
+    """横断結合が必要か。実装は source_ui（キャッシュ非依存）。"""
+    from svc.data_agg_source_ui import join_host_needs_cross_file_pool  # noqa: WPS433
 
-    def _patterns_differ_from_host(other_patterns: list[str]) -> bool:
-        return bool(
-            host_patterns
-            and other_patterns
-            and not _patterns_overlap(host_patterns, other_patterns)
-        )
-
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        h = str(it.get("name") or it.get("id") or "").strip()
-        if h not in join_targets:
-            continue
-        other = _item_source_file_patterns(it)
-        if _patterns_differ_from_host(other):
-            return True
-    # 比較列が link_defs のみで載る場合（MAC 等）
-    for jt in join_targets:
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            for src in it.get("sources") or []:
-                if not isinstance(src, dict):
-                    continue
-                block = source_ui_block(src)
-                if not isinstance(block, dict):
-                    continue
-                for ld in block.get("link_defs") or []:
-                    if str(ld.get("item") or "").strip() != jt:
-                        continue
-                    lp = _item_source_file_patterns(it)
-                    if _patterns_differ_from_host(lp):
-                        return True
-    return False
+    return join_host_needs_cross_file_pool(host_item, items, headers)
 
 
 def _join_comparison_side_file_patterns(
@@ -846,15 +738,9 @@ def _join_comparison_side_file_patterns(
     items: list[dict[str, Any]],
     headers: list[str],
 ) -> list[str]:
-    """横断結合の比較列を供給する項目の file_pattern（小文字・重複なし）。"""
-    specs = _join_comparison_side_file_filter_specs(host_item, items, headers)
-    patterns: list[str] = []
-    for spec in specs:
-        for tok in parse_comma_separated_patterns(spec.get("file_pattern")):
-            p = tok.lower()
-            if p and p not in patterns:
-                patterns.append(p)
-    return patterns
+    from svc.data_agg_source_ui import join_comparison_side_file_patterns  # noqa: WPS433
+
+    return join_comparison_side_file_patterns(host_item, items, headers)
 
 
 def _join_comparison_side_items(
@@ -862,33 +748,9 @@ def _join_comparison_side_items(
     items: list[dict[str, Any]],
     headers: list[str],
 ) -> list[dict[str, Any]]:
-    """横断結合の比較列を供給する項目一覧。"""
-    join_targets = _join_search_targets_from_defs(_item_join_defs_list(host_item))
-    if not join_targets:
-        return []
-    out: list[dict[str, Any]] = []
-    for i, it in enumerate(items):
-        if not isinstance(it, dict):
-            continue
-        h = headers[i] if i < len(headers) else str(it.get("name") or it.get("id") or "")
-        h = str(h).strip()
-        supplies = h in join_targets
-        if not supplies:
-            for src in it.get("sources") or []:
-                if not isinstance(src, dict):
-                    continue
-                block = source_ui_block(src)
-                if not isinstance(block, dict):
-                    continue
-                for ld in block.get("link_defs") or []:
-                    if str(ld.get("item") or "").strip() in join_targets:
-                        supplies = True
-                        break
-                if supplies:
-                    break
-        if supplies:
-            out.append(it)
-    return out
+    from svc.data_agg_source_ui import join_comparison_side_items  # noqa: WPS433
+
+    return join_comparison_side_items(host_item, items, headers)
 
 
 def _join_comparison_side_file_filter_specs(
@@ -896,11 +758,9 @@ def _join_comparison_side_file_filter_specs(
     items: list[dict[str, Any]],
     headers: list[str],
 ) -> list[dict[str, str]]:
-    """横断結合の比較側項目の file フィルタ仕様（抽出と同じ rule 付き）。"""
-    specs: list[dict[str, str]] = []
-    for it in _join_comparison_side_items(host_item, items, headers):
-        _extend_file_filter_specs(specs, it)
-    return specs
+    from svc.data_agg_source_ui import join_comparison_side_file_filter_specs  # noqa: WPS433
+
+    return join_comparison_side_file_filter_specs(host_item, items, headers)
 
 
 def _preview_join_topology_items(
@@ -1425,81 +1285,6 @@ def _index_pool_rows_by_host_file(
     return _build_join_pool_file_index(pool).by_path
 
 
-def _build_join_search_index(
-    search_rows: list[dict[str, Any]],
-    join_defs: list[dict[str, Any]],
-) -> tuple[list[str], dict[tuple[str, ...], list[dict[str, Any]]]]:
-    """
-    join_defs の比較列で検索行を前索引化する。
-    1スライスごとの全行走査を避け、長時間化（O(n_join * pool_len)）を抑える。
-    """
-    from svc.data_agg_cancel import poll_active_cancel_every  # noqa: WPS433
-
-    cols: list[str] = []
-    for jd in join_defs:
-        c = str(jd.get("item") or "").strip()
-        if c:
-            cols.append(c)
-    if not cols:
-        return [], {}
-    idx: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    for ri, r in enumerate(search_rows):
-        poll_active_cancel_every(ri, stride=256)
-        key = tuple(_join_cell_compare_norm(r.get(c)) for c in cols)
-        idx.setdefault(key, []).append(r)
-    return cols, idx
-
-
-def _join_search_rows_for_slice_indexed(
-    index_cols: list[str],
-    index_map: dict[tuple[str, ...], list[dict[str, Any]]],
-    join_values: dict[str, Any],
-    k: int,
-) -> list[dict[str, Any]]:
-    """
-    索引ヒット行を返す。戻り list は索引内部の共有参照（構造の破壊的変更禁止）。
-    行 dict への書込みは可。リストへ append/extend する場合は呼び出し側で copy すること。
-    """
-    if not index_cols:
-        return []
-    key_parts: list[str] = []
-    for c in index_cols:
-        vals = join_values.get(c) or []
-        ev = vals[k] if isinstance(vals, list) and k < len(vals) else None
-        key_parts.append(_join_cell_compare_norm(ev))
-    hit = index_map.get(tuple(key_parts))
-    return hit if hit is not None else []
-
-
-JoinSearchIndex = tuple[list[str], dict[tuple[str, ...], list[dict[str, Any]]]]
-
-
-def _join_defs_index_cache_key(join_defs: list[dict[str, Any]]) -> tuple[str, ...]:
-    return tuple(str(jd.get("item") or "").strip() for jd in join_defs if str(jd.get("item") or "").strip())
-
-
-def _resolve_join_search_index(
-    search_pool: list[dict[str, Any]],
-    join_defs: list[dict[str, Any]],
-    index_cache: Optional[dict[tuple[Any, ...], JoinSearchIndex]],
-    *,
-    stable_key: Any = None,
-) -> JoinSearchIndex:
-    """同一 search_pool・join_defs に対する前索引を再利用する（ファイル横断結合の重複構築を避ける）。"""
-    if index_cache is None:
-        return _build_join_search_index(search_pool, join_defs)
-    defs_key = _join_defs_index_cache_key(join_defs)
-    # 一時 list の id(search_pool) は毎回変わるため、呼び出し側の stable_key を優先
-    cache_key: tuple[Any, ...] = (
-        (stable_key, defs_key)
-        if stable_key is not None
-        else (id(search_pool), defs_key)
-    )
-    cached = index_cache.get(cache_key)
-    if cached is None:
-        cached = _build_join_search_index(search_pool, join_defs)
-        index_cache[cache_key] = cached
-    return cached
 
 
 def _result_column_values_from_row(
@@ -1715,99 +1500,6 @@ def _row_satisfies_join_and(
     return True
 
 
-def _join_dump_pv(val: Any, max_len: int = 96) -> str:
-    try:
-        s = "" if val is None else str(val).strip().replace("\n", " ")
-    except Exception:
-        s = "?"
-    if len(s) > max_len:
-        return s[: max_len - 1] + "…"
-    return s
-
-
-def _join_dump_col_filter_accepts(item_col: str) -> bool:
-    from core import core_env  # noqa: E402
-
-    f = core_env.data_agg_join_dump_col_filter()
-    if not f:
-        return True
-    return f.lower() in str(item_col or "").lower()
-
-
-def _join_dump_ctx_prefix(ctx: Optional[dict[str, Any]]) -> str:
-    if not isinstance(ctx, dict):
-        return ""
-    parts: list[str] = []
-    sid = ctx.get("scenario_id")
-    if sid:
-        parts.append("scenario=%s" % sid)
-    fp = ctx.get("file_path")
-    if fp:
-        parts.append("file=%s" % Path(str(fp)).name)
-    cal = ctx.get("caller")
-    if cal:
-        parts.append("caller=%s" % cal)
-    if "preview_master" in ctx:
-        parts.append("preview_master=%s" % ctx.get("preview_master"))
-    ixi = ctx.get("item_idx")
-    if ixi is not None:
-        parts.append("item_idx=%s" % ixi)
-    return " ".join(parts)
-
-
-def _join_dump_post_merge_file(
-    merged_rows: list[dict[str, Any]],
-    headers: list[str],
-    items: list[dict[str, Any]],
-    *,
-    file_path: str,
-    scenario_id: str,
-    caller: str,
-    preview_master: bool,
-) -> None:
-    from core import core_env  # noqa: E402
-
-    if not core_env.data_agg_join_dump_enabled():
-        return
-    fcol = core_env.data_agg_join_dump_col_filter()
-    max_r = core_env.data_agg_join_dump_max_rows()
-    cols: list[str] = []
-    for i, it in enumerate(items):
-        if not isinstance(it, dict):
-            continue
-        if not _item_join_defs_list(it):
-            continue
-        h = headers[i] if i < len(headers) else ""
-        hs = str(h or "").strip()
-        if not hs:
-            continue
-        if fcol and fcol.lower() not in hs.lower():
-            continue
-        cols.append(hs)
-    if not cols:
-        return
-    ctx = _join_dump_ctx_prefix(
-        {
-            "scenario_id": scenario_id,
-            "file_path": file_path,
-            "caller": caller,
-            "preview_master": preview_master,
-        }
-    )
-    n_m = len(merged_rows)
-    for c in cols:
-        head: list[str] = []
-        for ri in range(min(max_r, n_m)):
-            r = merged_rows[ri]
-            head.append(_join_dump_pv(r.get(c) if isinstance(r, dict) else None))
-        _agg_diag.info(
-            "[DATA_AGG_JOIN_DUMP] phase=post_merge %s col=%s merged_n=%s head=%s",
-            ctx,
-            c,
-            n_m,
-            head,
-        )
-
 
 _CROSS_JOIN_EMIT_DRIVEN_PROGRESS_STRIDE = 64
 
@@ -1849,24 +1541,6 @@ def _cross_join_should_use_emit_driven(
     return True
 
 
-def _join_key_tuple_from_values(
-    index_cols: list[str],
-    join_values: dict[str, Any],
-    k: int,
-) -> tuple[str, ...]:
-    parts: list[str] = []
-    for c in index_cols:
-        vals = join_values.get(c) or []
-        ev = vals[k] if isinstance(vals, list) and k < len(vals) else None
-        parts.append(_join_cell_compare_norm(ev))
-    return tuple(parts)
-
-
-def _join_key_tuple_from_row(
-    index_cols: list[str],
-    row: dict[str, Any],
-) -> tuple[str, ...]:
-    return tuple(_join_cell_compare_norm(row.get(c)) for c in index_cols)
 
 
 def _collapse_host_contribs_for_write_mode(
@@ -2395,11 +2069,6 @@ def _apply_join_key_search_write(
             len(_search),
             int((time.perf_counter() - t_join_start) * 1000),
         )
-
-
-def _join_dump_col_filter_accepts_link_target(target_col: str) -> bool:
-    """DATA_AGG_JOIN_DUMP_COL: 連携先列名でも詳細ログを出す。"""
-    return _join_dump_col_filter_accepts(target_col)
 
 
 def _apply_join_key_search_link_write(
@@ -3418,31 +3087,9 @@ def _joined_result_to_table_rows(joined: Any, headers: list[str]) -> list[list[A
 
 
 def _collect_linked_and_join_targets(items: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
-    """シナリオ内の連携先項目名・結合項目名を集約する。"""
-    linked_targets: set[str] = set()
-    join_targets: set[str] = set()
-    for item in items:
-        for src in (item.get("sources") or []):
-            if not isinstance(src, dict):
-                continue
-            pb = source_ui_block(src)
-            if not isinstance(pb, dict):
-                continue
-            for ld in pb.get("link_defs") or []:
-                if isinstance(ld, dict):
-                    nm = str(ld.get("item") or "").strip()
-                    if nm:
-                        linked_targets.add(nm)
-            for jd in pb.get("join_defs") or []:
-                if isinstance(jd, dict):
-                    nm = str(jd.get("item") or "").strip()
-                    if nm:
-                        join_targets.add(nm)
-            if (src.get("type") or "").strip().lower() == "name_extract":
-                nm2 = str(pb.get("path_item") or "").strip()
-                if nm2:
-                    linked_targets.add(nm2)
-    return linked_targets, join_targets
+    from svc.data_agg_source_ui import collect_linked_and_join_targets  # noqa: WPS433
+
+    return collect_linked_and_join_targets(items)
 
 
 def _get_config() -> dict[str, Any]:
@@ -5711,7 +5358,15 @@ def compute_batch_table_rows(
                     else nullcontext()
                 )
                 with file_wb_scope:
-                    extract_mod.precache_xlsx_workbook_sheets_for_items(file_path, items)
+                    items_for_precache = [
+                        it
+                        for it in items
+                        if isinstance(it, dict)
+                        and _item_sources_pass_file(it, str(file_path))
+                    ]
+                    extract_mod.precache_xlsx_workbook_sheets_for_items(
+                        file_path, items_for_precache
+                    )
                     _csv_prog = (
                         (lambda msg: _ph(4, msg, file_index=fi))
                         if progress_hook is not None

@@ -11,7 +11,8 @@ Purpose:
   svc_data_agg から呼び出され、サブモジュールとして分離する。
 History (latest 3):
   - 0.1.23 (2026-09-11) #10/#11: materialize 範囲限定。skip_hidden で read_only を潰さない（寸法用 full は別モジュールでファイル1回集約）。
-  - 0.1.22 (2026-09-11) 指定シート欠落はエラー化。セル読取例外は「（抽出失敗）」マーカー＋警告ログ。
+  - 0.1.22 (2026-09-11) 指定シート欠落は下位読取では例外。一括入口は空スキップ。
+  - 0.1.23 (2026-09-12) セル読取例外のセル値は「#ERR_EXTRACT」（空欄と区別し最後まで完了）。
   - 0.1.21 (2026-08-26) skip_hidden_rows: 非表示・フィルタ行を主キー走査から除外（.xls/.xlsx/.xlsm）。
 """
 from __future__ import annotations
@@ -269,7 +270,7 @@ def xlsx_workbook_scope_active() -> bool:
 def _xlsx_cache_path_key(file_path: str | Path) -> str:
     try:
         return str(Path(file_path).resolve())
-    except Exception:
+    except (OSError, RuntimeError, ValueError, TypeError):
         return str(file_path)
 
 
@@ -413,7 +414,7 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
         from svc.data_agg_cancel import poll_active_cancel  # noqa: WPS433
 
         poll_active_cancel(force=True)
-    except Exception:
+    except (ImportError, AttributeError, RuntimeError):
         pass
     try:
         import openpyxl  # noqa: E402
@@ -428,6 +429,11 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
         else:
             wb = _load_workbook_readonly(path)
     except Exception as e:
+        # openpyxl の失敗型は版差があるため I/O 想定型へ縮減し、それ以外は再送出（#12）
+        from svc.data_agg_sheet_resolve import _sheet_name_io_errors
+
+        if not isinstance(e, _sheet_name_io_errors()):
+            raise
         logger.debug("[DATA_AGG_EXTRACT] Excel 読込エラー %s: %s", path, e)
         return None
     wbs[key] = wb
@@ -1525,7 +1531,7 @@ def _get_excel_cell(
     if path.suffix.lower() == ".xls":
         try:
             from svc.data_agg_xls_io import read_xls_cell
-        except Exception:
+        except (ImportError, AttributeError):
             logger.warning("[DATA_AGG_EXTRACT] .xls 読取モジュール不可: %s", path)
             return EXTRACT_READ_ERROR_MARK
         try:
@@ -1745,6 +1751,9 @@ def precache_xlsx_workbook_sheets_for_items(
     """
     xlsx_workbook_scope 内で、大量反復が見込まれるシートを先に materialize する（Phase B）。
     スコープ外では何もしない。
+
+    横断結合などで「別ファイル向けシート名」が items に混ざる場合は、
+    当該ブックに無いシートはスキップする（抽出本体が欠落判定する）。
     """
     if _xlsx_workbook_cache_top() is None:
         return
@@ -1757,8 +1766,15 @@ def precache_xlsx_workbook_sheets_for_items(
     wb = _xlsx_workbook_from_cache(p_abs)
     if wb is None:
         return
+    available = {str(x).strip() for x in (getattr(wb, "sheetnames", None) or []) if str(x).strip()}
     for sheet_name in sheets:
-        _get_readonly_sheet_matrix(wb, sheet_name, p_abs, create=True)
+        if sheet_name is not None and str(sheet_name).strip() not in available:
+            continue
+        try:
+            _get_readonly_sheet_matrix(wb, sheet_name, p_abs, create=True)
+        except DataAggSheetMissingError:
+            # 条件付きシート解決など、一覧と実効名がずれても precache は落とさない
+            continue
 
 
 def _read_repeated_series_from_matrix(

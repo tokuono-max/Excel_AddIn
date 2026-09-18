@@ -131,13 +131,13 @@ def prepare_com_session_before_request(target_hwnd: int) -> bool:
 
 def record_com_session_hwnd(hwnd: int) -> None:
     """COM 接続成功時: 診断用に HWND を IPC へ記録する。"""
-    from svc.svc_host import write_last_svc_com_hwnd
+    from core.core_host_ipc import host_control_dir, write_last_svc_com_hwnd
 
-    write_last_svc_com_hwnd(int(hwnd or 0))
+    write_last_svc_com_hwnd(host_control_dir(), int(hwnd or 0))
 
 
 def read_last_com_session_hwnd() -> int:
     """前回 svc_server が COM 接続した Excel HWND（診断用）。"""
-    from svc.svc_host import read_last_svc_com_hwnd
+    from core.core_host_ipc import host_control_dir, read_last_svc_com_hwnd
 
-    return read_last_svc_com_hwnd()
+    return read_last_svc_com_hwnd(host_control_dir())

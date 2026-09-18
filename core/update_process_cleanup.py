@@ -154,10 +154,10 @@ def request_packaged_shutdown_flags() -> None:
     except Exception:
         pass
     try:
-        from svc.svc_host import _write_svc_shutdown_flag
+        from core.core_host_ipc import host_control_dir, write_svc_shutdown_flag
 
-        _write_svc_shutdown_flag()
-    except Exception:
+        write_svc_shutdown_flag(host_control_dir())
+    except (ImportError, OSError, RuntimeError):
         pass
 
 

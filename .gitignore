@@ -37,6 +37,9 @@ logs/
 canvases/node_modules/
 canvases/*.canvas.status.json
 
+# docs: 印刷・配布用 PDF は生成物（docx 原紙は追跡。方針は docs/README_docs_layout.md）
+docs/PDF/*.pdf
+
 # VSCode (keep encoding hints for bat/vb)
 .vscode/*
 !.vscode/settings.json

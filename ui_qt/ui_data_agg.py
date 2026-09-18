@@ -28,7 +28,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import (
+    QEventLoop,
+    QItemSelectionModel,
+    QObject,
+    QPoint,
+    QThread,
+    QTimer,
+    Qt,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -133,6 +143,35 @@ from core.core_log import get_data_agg_diag_logger, get_logger
 
 logger = get_logger(__name__)
 _data_agg_ui_diag = get_data_agg_diag_logger()
+
+# processEvents 再入防止（#21）。走査中ダイアログ表示・進捗 show で使用。
+_data_agg_ui_pump_depth = 0
+
+
+def _data_agg_pump_ui_once(*, exclude_user_input: bool = True) -> None:
+    """
+    イベントループを短く回す。ネスト呼び出しは無視する。
+    既定ではユーザー入力イベントを除外し、ダイアログ表示中の再入を抑える。
+    """
+    global _data_agg_ui_pump_depth
+    if _data_agg_ui_pump_depth > 0:
+        return
+    _data_agg_ui_pump_depth += 1
+    try:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if exclude_user_input:
+            app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        else:
+            app.processEvents()
+    except Exception:
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+    finally:
+        _data_agg_ui_pump_depth = max(0, _data_agg_ui_pump_depth - 1)
 
 
 def folder_scan_paths_from_state(state: dict[str, Any]) -> list[str]:
@@ -2465,10 +2504,7 @@ class _DataAggMainWindow(QDialog):
         self._scan_busy_dialog = dlg
         dlg.show()
         dlg.raise_()
-        try:
-            QApplication.processEvents()
-        except Exception:
-            pass
+        _data_agg_pump_ui_once()
 
     def _close_scan_busy_dialog(self) -> None:
         dlg = getattr(self, "_scan_busy_dialog", None)
@@ -4599,6 +4635,8 @@ class _DataAggMainWindow(QDialog):
             if self._apply_excel_menu_bar_lock(True):
                 self._excel_menu_bar_lock_applied = True
             else:
+                self._excel_menu_bar_lock_retry_i = 0
+                delays_ms = (150, 450, 1000)
 
                 def _retry_menu_lock() -> None:
                     if self._excel_menu_bar_lock_applied or not self.isVisible():
@@ -4607,9 +4645,14 @@ class _DataAggMainWindow(QDialog):
                         return
                     if self._apply_excel_menu_bar_lock(True):
                         self._excel_menu_bar_lock_applied = True
+                        return
+                    i = int(getattr(self, "_excel_menu_bar_lock_retry_i", 0) or 0)
+                    i += 1
+                    self._excel_menu_bar_lock_retry_i = i
+                    if i < len(delays_ms):
+                        QTimer.singleShot(int(delays_ms[i]), _retry_menu_lock)
 
-                for _delay_ms in (150, 450, 1000):
-                    QTimer.singleShot(_delay_ms, _retry_menu_lock)
+                QTimer.singleShot(int(delays_ms[0]), _retry_menu_lock)
         if getattr(self, "_scan_pending_auto", False):
             self._scan_pending_auto = False
             self._request_folder_scan(auto_mode=True)
@@ -4661,11 +4704,22 @@ class _DataAggMainWindow(QDialog):
         except Exception:
             pass
         try:
-            from core.core_xlc import get_excel_context_from_hwnd
+            from core.core_xlc import ExcelLookupUnavailable, get_excel_context_from_hwnd
 
-            # 周期監視のため成功ログは抑制（quiet）。失敗は INFO のまま。
-            ctx = get_excel_context_from_hwnd(hwnd, sid, quiet=True)
+            # 周期監視のため成功ログは抑制（quiet）。COM 繁忙はシート無しと区別する。
+            ctx = get_excel_context_from_hwnd(
+                hwnd, sid, quiet=True, on_unavailable="raise"
+            )
             return ctx is not None
+        except ExcelLookupUnavailable:
+            try:
+                logger.info(
+                    "[DATA_AGG] workbook watch keep open: excel lookup unavailable sheet_id=%s",
+                    sid,
+                )
+            except Exception:
+                pass
+            return None
         except Exception:
             return None
 
@@ -5641,14 +5695,41 @@ class _ScenarioEditDialog(QDialog):
                 QTimer.singleShot(120, _front)
             except Exception:
                 pass
-        QTimer.singleShot(0, self._center_on_parent_widget)
-        QTimer.singleShot(160, self._center_on_parent_widget)
-        QTimer.singleShot(0, self._sync_left_splitter_sizes)
-        QTimer.singleShot(80, self._sync_left_splitter_sizes)
-        QTimer.singleShot(0, lambda: self._apply_scenario_h_splitter_sizes(force=False))
-        QTimer.singleShot(80, lambda: self._apply_scenario_h_splitter_sizes(force=False))
-        QTimer.singleShot(160, lambda: self._apply_scenario_h_splitter_sizes(force=False))
-        QTimer.singleShot(0, self._clear_initial_button_focus)
+        self._schedule_scenario_edit_show_layout()
+
+    def _schedule_scenario_edit_show_layout(self) -> None:
+        """showEvent の多重 singleShot を 0/80/160ms の3段に集約（#21）。"""
+        if getattr(self, "_scenario_show_layout_scheduled", False):
+            return
+        self._scenario_show_layout_scheduled = True
+
+        def _at0() -> None:
+            try:
+                self._center_on_parent_widget()
+                self._sync_left_splitter_sizes()
+                self._apply_scenario_h_splitter_sizes(force=False)
+                self._clear_initial_button_focus()
+            except Exception:
+                pass
+
+        def _at80() -> None:
+            try:
+                self._sync_left_splitter_sizes()
+                self._apply_scenario_h_splitter_sizes(force=False)
+            except Exception:
+                pass
+
+        def _at160() -> None:
+            try:
+                self._center_on_parent_widget()
+                self._apply_scenario_h_splitter_sizes(force=False)
+            except Exception:
+                pass
+            self._scenario_show_layout_scheduled = False
+
+        QTimer.singleShot(0, _at0)
+        QTimer.singleShot(80, _at80)
+        QTimer.singleShot(160, _at160)
 
     def _center_on_parent_widget(self) -> None:
         pw = self.parentWidget()
@@ -7697,11 +7778,7 @@ class _DataAggProgressWrapper:
 
     def show(self) -> None:
         self._dlg.show()
-        try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-        except Exception:
-            pass
+        _data_agg_pump_ui_once()
 
     def get_result(self) -> dict[str, Any]:
         return getattr(self._dlg, "get_result", lambda: {})()

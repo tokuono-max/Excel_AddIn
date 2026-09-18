@@ -584,7 +584,7 @@ Nuitka ビルドが成功したあと、本番相当の動作に近づけるに�
 **再現性（バージョンの記録）**
 
 - 本番ビルドのたびに、少なくとも次をメモまたは CI ログに残すと追跡しやすい。**Python**（`python --version`）、**Nuitka**（`python -m nuitka --version`）、**Windows / MSVC** の概略（Build Tools の世代）。
-- `requirements.lock.txt` 等で **ビルド用 venv の依存**を固定しておくと、数か月後の再ビルドで取りこぼしや挙動差が出にくい。
+- 依存はレイヤ分割する（#18）。`requirements-runtime.txt`（本番必須）+ `requirements-optional.txt`（**polars**: 無いと動くが大 CSV/join が遅い → **削除しない**）+ `requirements-dev.txt` + `requirements-build.txt`（Nuitka）。まとめインストールは `requirements.lock.txt`（`-r` で上記を参照）。配布 ZIP サイズは Nuitka 同梱結果で決まり、lock 行＝ZIP ではない。旧 PyInstaller / debugpy / ruff は runtime に載せない。
 
 **典型的なビルド失敗**
 

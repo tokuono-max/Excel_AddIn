@@ -1625,3 +1625,151 @@ def test_workbook_once_read_reuses_same_path_in_one_compute(
     same_key = str(Path(same).resolve())
     assert load_keys.count(same_key) == 1, load_keys
     assert len(set(load_keys)) == len(load_keys)
+
+
+# --- 表示 cap / join_full_read 走査上限（旧 test_master_preview_read_cap） ---
+
+
+def test_master_preview_display_cap_limits_result_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """マスタプレビュー: 表示上限で結果 table_rows が打切られる。"""
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    data["__debug_diag"] = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+    }
+    monkeypatch.setenv("DATA_AGG_FILE_PARALLEL_WORKERS", "0")
+    monkeypatch.setenv("DATA_AGG_MASTER_PARALLEL_EXTRACT", "0")
+    _h, rows, _ev, _je = compute_batch_table_rows(
+        data,
+        paths,
+        max_primary_rows=2,
+        max_table_rows=2,
+        probe_caller="test_master_cap",
+    )
+    dd = data.get("__debug_diag") or {}
+    assert len(rows) <= 2
+    assert int(dd.get("master_preview_stats_files_read") or 0) >= 1
+
+
+def test_master_preview_join_full_read_uses_scan_cap_for_patterns(
+    tmp_path: Path,
+) -> None:
+    """join 参照ファイル全件読込時は pattern 一致ファイルの extract 上限が走査上限になる。"""
+    from svc.data_agg_master_preview_perf import master_preview_scan_row_cap  # noqa: E402
+    from svc.svc_data_agg import (  # noqa: E402
+        _master_preview_extract_max_primary_rows,
+        _master_preview_join_full_read_patterns,
+    )
+
+    data, paths = _cross_join_mini_scenario(tmp_path)
+    dd = {
+        "enabled": True,
+        "source": "ui_data_agg_debug.master_preview",
+        "master_preview_join_read_full_files": True,
+        "master_preview_join_side_patterns": ["紐づけ"],
+    }
+    patterns = _master_preview_join_full_read_patterns(dd)
+    assert patterns == ("紐づけ",)
+    cap_join = _master_preview_extract_max_primary_rows(
+        str(paths[1]),
+        preview_master_mode=True,
+        max_primary_rows=2,
+        join_full_patterns=patterns,
+    )
+    cap_host = _master_preview_extract_max_primary_rows(
+        str(paths[0]),
+        preview_master_mode=True,
+        max_primary_rows=2,
+        join_full_patterns=patterns,
+    )
+    assert cap_join == master_preview_scan_row_cap()
+    assert cap_host == 2
+
+
+# --- join_search seed 配線（旧 test_data_agg_master_preview_join_seed） ---
+
+
+def test_master_preview_join_search_seed_pool_populates_out() -> None:
+    from svc.data_agg_master_preview import MASTER_PREVIEW_DIAG_SOURCE  # noqa: E402
+
+    seed_row = {
+        "__norm_path": "n:/a.xlsx",
+        "__iter_index": 0,
+        "file_path": "n:/a.xlsx",
+        "A": "1",
+    }
+    data = {
+        "id": "t",
+        "items": [
+            {
+                "id": "h",
+                "name": "Host",
+                "sources": [{"type": "cell", "file": "a.xlsx"}],
+                "join_defs": [
+                    {
+                        "side_item_id": "s",
+                        "side_column": "A",
+                        "host_column": "A",
+                    }
+                ],
+            },
+            {"id": "s", "name": "Side", "sources": []},
+        ],
+        "__debug_diag": {
+            "enabled": False,
+            "source": MASTER_PREVIEW_DIAG_SOURCE,
+            "mi_idx": 0,
+            "join_search_seed_pool": [seed_row],
+            "join_search_pool_out": [],
+        },
+    }
+    compute_batch_table_rows(data, [], max_table_rows=10)
+    out = data["__debug_diag"].get("join_search_pool_out")
+    assert isinstance(out, list)
+
+
+def test_join_search_skip_seed_blocks_seed_pool() -> None:
+    """結合項目プレビュー: skip_seed 時は前項目の pool を引き継がない。"""
+    from svc.data_agg_master_preview import MASTER_PREVIEW_DIAG_SOURCE  # noqa: E402
+
+    seed_row = {
+        "__norm_path": "n:/seed_only.xlsx",
+        "__iter_index": 99,
+        "file_path": "n:/seed_only.xlsx",
+        "A": "seed",
+    }
+    data = {
+        "id": "t_skip",
+        "items": [
+            {
+                "id": "h",
+                "name": "Host",
+                "sources": [{"type": "cell", "file": "a.xlsx"}],
+                "join_defs": [
+                    {
+                        "side_item_id": "s",
+                        "side_column": "A",
+                        "host_column": "A",
+                    }
+                ],
+            },
+            {"id": "s", "name": "Side", "sources": []},
+        ],
+        "__debug_diag": {
+            "enabled": False,
+            "source": MASTER_PREVIEW_DIAG_SOURCE,
+            "mi_idx": 1,
+            "join_search_seed_pool": [seed_row],
+            "join_search_skip_seed": True,
+            "join_search_pool_out": [],
+            "preview_use_production_table_rows": True,
+        },
+    }
+    compute_batch_table_rows(data, [], max_table_rows=10)
+    out = data["__debug_diag"].get("join_search_pool_out")
+    assert isinstance(out, list)
+    assert not any(
+        isinstance(r, dict) and r.get("__iter_index") == 99 for r in out
+    )

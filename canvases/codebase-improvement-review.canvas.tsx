@@ -28,6 +28,8 @@ type Finding = {
   tradeoff: string;
   difficulty: string;
   done?: boolean;
+  /** 段階完了だが残作業あり。見出しの残数に含める。 */
+  remainder?: boolean;
 };
 
 const FINDINGS: Finding[] = [
@@ -143,13 +145,14 @@ const FINDINGS: Finding[] = [
     score: 8,
     items: "正確性 / スリム化",
     feature: "基盤層（core / svc 境界）",
-    title: "core → svc 循環依存（A/B 済・host系Cは後回し）",
+    title: "core → svc 循環依存（終了フラグと svc／UI／更新の起動呼び出し済。Nuitka は残）",
     impact: "初期化順・Nuitka・単体テストの脆さ",
     riskIfUnfixed: "起動失敗・バンドル抜け・テストが壊れて回帰見逃し",
     frequency: "低〜中（リファクタ・配布ビルド時）",
     tradeoff: "層分割は広い import 差し替えが必要。短期は回帰リスクが上がる",
     difficulty: "中",
     done: true,
+    remainder: true,
   },
   {
     id: 9,
@@ -157,7 +160,7 @@ const FINDINGS: Finding[] = [
     score: 8,
     items: "速度 / スリム化",
     feature: "データ集約コア／デバッグUI全体",
-    title: "巨大モノリス分割 (join merge 1継ぎ目済・継続可)",
+    title: "巨大モノリス分割（連携先集約とファイル通過判定まで外出し済・キャッシュ非変更・継続可）",
     impact: "変更リスク局所化",
     riskIfUnfixed: "修正の副作用が広がり、回帰バグ・レビュー不能が常態化",
     frequency: "高（機能追加のたび）",
@@ -165,6 +168,7 @@ const FINDINGS: Finding[] = [
       "分割作業自体が大規模・長期。途中はマージ衝突と二重メンテが増える",
     difficulty: "高",
     done: true,
+    remainder: true,
   },
   {
     id: 10,
@@ -202,7 +206,7 @@ const FINDINGS: Finding[] = [
     score: 7,
     items: "正確性 / スリム化",
     feature: "データ集約／UI／更新（横断）",
-    title: "広域 except Exception の縮減（シート/非表示ホットパス段階済）",
+    title: "広域 except（案1済: #ERR_EXTRACT。シート無しは空スキップ。COM は未着手）",
     impact: "障害可視化・再発防止",
     riskIfUnfixed: "本番障害の原因特定不能・誤った空結果の継続",
     frequency: "高（例外経路は日常的）",
@@ -210,6 +214,7 @@ const FINDINGS: Finding[] = [
       "例外を厳格化するとCOM/Excelの一時失敗で処理が止まりやすくなる",
     difficulty: "中",
     done: true,
+    remainder: true,
   },
   {
     id: 13,
@@ -296,6 +301,7 @@ const FINDINGS: Finding[] = [
     tradeoff:
       "polars等を外すと大ファイル高速経路が弱まる。任意依存のままが妥当な場合あり",
     difficulty: "中",
+    done: true,
   },
   {
     id: 19,
@@ -309,6 +315,7 @@ const FINDINGS: Finding[] = [
     frequency: "低（ドキュメント参照時）",
     tradeoff: "docx削除は社内提出物ワークフローと衝突し得る。生成物置き場分離が安全",
     difficulty: "低",
+    done: true,
   },
   {
     id: 20,
@@ -322,6 +329,7 @@ const FINDINGS: Finding[] = [
     frequency: "低（通常OFF）／高（誤ON時）",
     tradeoff: "外出しすると現場診断の即応性が下がる。フラグ付き別モジュールが妥協点",
     difficulty: "中",
+    done: true,
   },
   {
     id: 21,
@@ -336,6 +344,7 @@ const FINDINGS: Finding[] = [
     tradeoff:
       "状態マシン化は実装・検証コスト高。現状の簡易再試行は実装が短い",
     difficulty: "中",
+    done: true,
   },
   {
     id: 22,
@@ -349,6 +358,7 @@ const FINDINGS: Finding[] = [
     frequency: "中（CI実行のたび）",
     tradeoff: "統合しすぎるとカバレッジ穴。回帰の重要ケースは残す必要がある",
     difficulty: "中",
+    done: true,
   },
 ];
 
@@ -370,6 +380,14 @@ export default function CodebaseImprovementReview() {
   // スコア順を維持（完了行を末尾へ送らない。見え消しは現状位置の文言に付与）
   const sorted = FINDINGS.slice().sort((a, b) => b.score - a.score || a.id - b.id);
   const doneCount = FINDINGS.filter((f) => f.done).length;
+  const stillOpen = (f: Finding) => !f.done || f.remainder === true;
+  const highOpen = FINDINGS.filter((f) => f.priority === "高" && stillOpen(f)).length;
+  const accuracyOpen = FINDINGS.filter(
+    (f) => f.items.includes("正確性") && stillOpen(f),
+  ).length;
+  const highTotal = FINDINGS.filter((f) => f.priority === "高").length;
+  const accuracyTotal = FINDINGS.filter((f) => f.items.includes("正確性")).length;
+  const soonOpen = FINDINGS.filter((f) => f.priority === "すぐに" && stillOpen(f)).length;
 
   return (
     <Stack gap={16}>
@@ -379,10 +397,14 @@ export default function CodebaseImprovementReview() {
       </Text>
 
       <Grid columns={4} gap={12}>
-        <Stat value={String(doneCount)} label="修正済み" tone="success" />
-        <Stat value="0" label="すぐ残" tone="danger" />
-        <Stat value="9" label="高優先度" tone="warning" />
-        <Stat value="7" label="正確性関連" tone="info" />
+        <Stat value={String(doneCount)} label="修正済み（段階含む）" tone="success" />
+        <Stat value={String(soonOpen)} label="すぐ残" tone="danger" />
+        <Stat value={String(highOpen)} label={"高優先度（残 " + highOpen + "/" + highTotal + "）"} tone="warning" />
+        <Stat
+          value={String(accuracyOpen)}
+          label={"正確性関連（残 " + accuracyOpen + "/" + accuracyTotal + "）"}
+          tone="info"
+        />
       </Grid>
 
       <Callout tone="success" title="A / B / C / D / #7 / #15+#16 修正完了">
@@ -412,8 +434,9 @@ export default function CodebaseImprovementReview() {
       </Callout>
 
       <Callout tone="warning" title="最優先の結論">
-        正確性止血と掃除・I/O・今回の構造改善（段階）は完了。残は #8C（host循環）、
-        #9 の追加継ぎ目、#12 の他ホットパス、#18〜 など。
+        2026-09-12 17:27 実機は完走。ODN-164 50.6秒 / ODN375 27.9秒。バージョン確認の起動は core.host_ui_spawn。
+        残は #9 追加継ぎ目、#12 COM except。連携先の集約とファイル通過判定はキャッシュ外へ移した（実機確認待ち）。Nuitka は未実施。
+        進捗文言テスト3件は本キャンペーン終了後に、今の画面文言へテストを合わせる。
       </Callout>
 
       <H2>改善優先度一覧（スコア降順）</H2>
@@ -477,17 +500,19 @@ export default function CodebaseImprovementReview() {
             <Stack gap={6}>
               <Text>A(#2+#3) / B / C(#1) / D(#10+#11) / #7 / #15+#16 → 済</Text>
               <Text>#8A+#8B / #17 / #12段階 / #9 join-merge1 → 済（2026-09-12）</Text>
+              <Text>#20 / #12追加 / #9 join-index → 済（2026-09-12 続き）</Text>
               <Text>#10 追加ストリーム化は見送り（多ファイル小容量向けには効果薄）</Text>
             </Stack>
           </CardBody>
         </Card>
         <Card>
-          <CardHeader>次の着手（未着手）</CardHeader>
+          <CardHeader>残（段階の続き。未着手ではない）</CardHeader>
           <CardBody>
             <Stack gap={6}>
-              <Text>次候補: #18〜 / #8C（host） / #9 追加継ぎ目 / #12 他ホットパス</Text>
-              <Text>#8C・#9 残りは単独・長期（キャッシュ寿命を壊さないこと）</Text>
-              <Text>復帰: git reset --hard backup/pre-structure-improve-20260912</Text>
+              <Text>#8C svc／UI 起動と更新画面の呼び出しは core（Nuitka は未移動）</Text>
+              <Text>#9 連携先の集約とファイル通過判定はキャッシュ外。本体は残</Text>
+              <Text>#12 COM except（#ERR_EXTRACT は済。触ると一括が止まり得る）</Text>
+              <Text>終了後: 進捗文言テスト3件を今の画面に合わせる（件数には含めない）</Text>
             </Stack>
           </CardBody>
         </Card>

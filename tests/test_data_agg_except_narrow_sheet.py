@@ -32,3 +32,13 @@ def test_list_workbook_sheet_names_ok(tmp_path: Path) -> None:
     assert names is not None
     assert "Main" in names
     assert "Other" in names
+
+
+def test_xlsx_workbook_from_cache_corrupt_returns_none(tmp_path: Path) -> None:
+    """#12: 壊れた xlsx はキャッシュ load で例外を投げず None。"""
+    from svc import svc_data_agg_extract as ex
+
+    p = tmp_path / "bad.xlsx"
+    p.write_bytes(b"not-xlsx")
+    with ex.xlsx_workbook_scope():
+        assert ex._xlsx_workbook_from_cache(p) is None

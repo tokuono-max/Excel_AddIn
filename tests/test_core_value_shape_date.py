@@ -6,6 +6,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -51,3 +53,21 @@ def test_postprocess_cell_primary_date_check() -> None:
 def test_apply_check_labels_uses_raw_for_date() -> None:
     out = apply_check_labels("44708", ["年月日変換"], raw=44708.0)
     assert out == "2022/05/27"
+
+
+def test_excel_serial_fallback_without_pandas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pandas 経路が失敗しても 1899-12-30 起点の timedelta で変換できる。"""
+    import builtins
+
+    import core.core_value_shape as cvs
+
+    real_import = builtins.__import__
+
+    def _no_pandas(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "pandas" or (isinstance(name, str) and name.startswith("pandas.")):
+            raise ImportError("forced no pandas")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_pandas)
+    assert cvs._datetime_from_excel_serial(44708.0) == datetime(2022, 5, 27)
+    assert cvs.shape_date_value(44708.0) == "2022/05/27"

@@ -191,6 +191,18 @@ def test_workbook_watch_closes_when_sheet_gone(qapp):
     w.deleteLater()
 
 
+def test_workbook_watch_keeps_open_when_lookup_unavailable(qapp):
+    w = _make_main(qapp, dirty=False, sheet_id="busy", hwnd=99)
+    w._workbook_watch_seen_ok = True
+    w.show()
+    with patch.object(w, "_launch_sheet_still_available", return_value=None), patch.object(
+        w, "close"
+    ) as close_m:
+        w._on_workbook_watch_tick()
+        close_m.assert_not_called()
+    w.deleteLater()
+
+
 def test_cancel_active_batch_on_main_close_writes_flag(qapp, tmp_path):
     from ui_qt import ui_data_agg as mod
     from svc.data_agg_cancel import cancel_request_path_data_agg_batch
