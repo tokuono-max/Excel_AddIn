@@ -31,6 +31,20 @@ def test_coerce_strips_cell_newlines() -> None:
     assert "電源" in postprocess_link_rule_value("電\n源", {})
 
 
+def test_postprocess_split_picks_line_before_newline_strip() -> None:
+    """整形 DSL の split は改行除去より前に効き、採用行を返す。最終結果に改行は残さない。"""
+    raw = "見出し\n値A"
+    out1 = postprocess_cell_primary(raw, {"value_shape_script": "split,1"})
+    out2 = postprocess_cell_primary(raw, {"value_shape_script": "split,2"})
+    assert out1.lstrip("'") == "見出し"
+    assert out2.lstrip("'") == "値A"
+    assert "\n" not in out1 and "\r" not in out1
+    assert "\n" not in out2 and "\r" not in out2
+    link2 = postprocess_link_rule_value(raw, {"value_shape_script": "split,2"})
+    assert link2.lstrip("'") == "値A"
+    assert "\n" not in link2
+
+
 def test_split_plus_cell_refs() -> None:
     assert _split_plus_cell_refs("D10") == ["D10"]
     assert _split_plus_cell_refs("D10+E10") == ["D10", "E10"]
@@ -40,7 +54,27 @@ def test_split_plus_cell_refs() -> None:
     assert _split_plus_cell_refs("+") == []
 
 
-def test_extract_link_plus_concat_no_joiner_and_empty() -> None:
+def test_extract_link_plus_preserves_newlines_for_split() -> None:
+    """+ 連結でも改行は後処理まで残し、split で採用行を選べる。"""
+    cells = {"D10": "A\nB", "E10": "C"}
+
+    def _fake_extract(_path, sheet_name=None, cell_ref=None):  # noqa: ARG001
+        return cells.get(str(cell_ref or "").upper())
+
+    with patch("svc.svc_data_agg_extract.extract_cell", side_effect=_fake_extract):
+        v = _extract_from_cell_rule(
+            "dummy.xlsx",
+            {"sheet_name": "S"},
+            {
+                "cell": "D10+E10",
+                "mode": "セル座標",
+                "value_shape_script": "split,2",
+            },
+            allow_plus_concat=True,
+        )
+    assert str(v).lstrip("'") == "BC"
+    assert "\n" not in str(v)
+
     cells = {"D10": "AB", "E10": "CD", "F10": None, "G10": "XY"}
 
     def _fake_extract(_path, sheet_name=None, cell_ref=None):  # noqa: ARG001

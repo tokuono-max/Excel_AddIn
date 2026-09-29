@@ -127,6 +127,20 @@ def merge_cell_for_write_mode(old: Any, new: Any, mode: str) -> Any:
         return new
     return old
 
+
+def merge_cell_took_incoming(old: Any, new: Any, merged: Any, mode: str) -> bool:
+    """
+    merge_cell_for_write_mode の結果が「incoming を採用した」か。
+    """
+    m = (mode or "").strip().lower()
+    if m in (MODE_OVERWRITE, MODE_APPEND, MODE_DUPLICATE_APPEND):
+        return True
+    if m == MODE_FILL_IN:
+        return (old is None or old == "") and merged is new
+    if m in (MODE_PREPEND, MODE_APPEND_END):
+        return merged != old
+    return merged != old and merged is new
+
 EVENT_LOG_SHEET = "データ集約レポート"
 EVENT_LOG_SHEET_LEGACY = "DataAgg_EventLog"
 EVENT_LOG_HEADERS = [

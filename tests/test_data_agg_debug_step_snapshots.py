@@ -318,7 +318,8 @@ def test_master_dbg_batch_progress_hook_formats_reading_detail(monkeypatch) -> N
         dlg._master_dbg_batch_progress_hook(4, "ファイル 2/5: sample.xlsx 読込中", 2, 5)
 
         assert seen
-        assert seen[-1]["detail"] == "読込 2/5 — sample.xlsx"
+        # ファイル名は phase 1 行目へ移すため detail には載せない
+        assert seen[-1]["detail"] == "読込 2/5"
     finally:
         dlg.close()
 
@@ -340,7 +341,7 @@ def test_master_dbg_batch_progress_hook_formats_row_extract_detail(monkeypatch) 
         )
 
         assert seen
-        assert seen[-1]["detail"] == "読込 1/1 — 光特性履歴.xlsx · 行 3/100"
+        assert seen[-1]["detail"] == "読込 1/1 · 行 3/100"
         assert seen[-1].get("current_file", "") == ""
     finally:
         dlg.close()
@@ -923,9 +924,10 @@ def test_scenario_file_progress_is_enabled_for_link_and_join_even_without_many_f
     _app()
     dlg = DataAggDebugDialog(parent=None, debug_cfg={}, fixed_mode=0)
     try:
+        # 主キー・連携・結合は件数に依らずファイル単位進捗（止まって見えるのを防ぐ）
         assert dlg._scenario_wants_file_progress(3, 0) is True
         assert dlg._scenario_wants_file_progress(4, 0) is True
-        assert dlg._scenario_wants_file_progress(2, 999) is False
+        assert dlg._scenario_wants_file_progress(2, 999) is True
     finally:
         dlg.close()
 

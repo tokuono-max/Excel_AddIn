@@ -171,15 +171,14 @@ def _split_incoming_body(incoming: str) -> list[str]:
     return out
 
 
-def _rows_incoming(iname: str, incoming: str) -> list[list[str]]:
+def _rows_incoming(incoming: str) -> list[list[str]]:
+    """逆参照は続き行（項目名・シナリオ名は空欄、内容はシナリオ種別列）。"""
     parts = _split_incoming_body(incoming)
     if not parts:
         return []
     rows: list[list[str]] = []
-    for i, p in enumerate(parts):
+    for p in parts:
         r = _empty_wide_row()
-        if i == 0:
-            r[0] = iname
         r[2] = p
         rows.append(r)
     return rows
@@ -400,7 +399,6 @@ def _build_scenario_definition_body(
     for it in item_list:
         iname = str(it.get("name") or it.get("id") or "").strip() or "—"
         incoming = format_incoming_link_join_for_export(item_list, iname)
-        body.extend(_rows_incoming(iname, incoming))
         sources = it.get("sources") or []
         if not isinstance(sources, list):
             sources = []
@@ -411,16 +409,17 @@ def _build_scenario_definition_body(
             r[1] = "—"
             r[2] = "（取得ソースがありません）"
             body.append(r)
-            continue
-        for si, s in enumerate(valid_sources):
-            base_scn = export_row_scenario_display_name(iname, s, si)
-            stype = (s.get("type") or "cell").strip().lower()
-            if stype in ("metadata", "meta", "filename"):
-                stype = "name_extract"
-            if stype == "name_extract":
-                _append_name_source_rows(body, iname, base_scn, s, scenario_edit_cfg)
-            else:
-                _append_cell_source_rows(body, iname, base_scn, s, scenario_edit_cfg)
+        else:
+            for si, s in enumerate(valid_sources):
+                base_scn = export_row_scenario_display_name(iname, s, si)
+                stype = (s.get("type") or "cell").strip().lower()
+                if stype in ("metadata", "meta", "filename"):
+                    stype = "name_extract"
+                if stype == "name_extract":
+                    _append_name_source_rows(body, iname, base_scn, s, scenario_edit_cfg)
+                else:
+                    _append_cell_source_rows(body, iname, base_scn, s, scenario_edit_cfg)
+        body.extend(_rows_incoming(incoming))
     return body
 
 

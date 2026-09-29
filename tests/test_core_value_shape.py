@@ -228,3 +228,127 @@ def test_shape_step_syntax_error() -> None:
     assert not ok
     assert "rerp" in msg
     assert block == 'rerp,"-",""'
+
+
+def test_paren_form_basic_and_legacy_mix() -> None:
+    assert apply_value_shape("  abc  ", "trim()") == "abc"
+    assert apply_value_shape("abcdef", "left(3)") == "abc"
+    assert apply_value_shape("abcdef", 'rep("a","z")') == "zbcdef"
+    assert apply_value_shape("  x  ", "trim();case(upper)") == "X"
+    assert apply_value_shape("  x  ", "trim,case(upper)") == "X"
+    assert apply_value_shape("a\nb", "split(1);trim") == "a"
+    ok, msg = compile_shape_script('split(1);rep("a","b")')
+    assert ok and msg == ""
+
+
+def test_paren_form_numeric_expr() -> None:
+    assert apply_value_shape(_SAMPLE, 'left(pos("GH"))') == "ABCDEFG"
+    assert apply_value_shape(_SAMPLE, 'left(pos("GH")-1)') == "ABCDEF"
+    assert apply_value_shape(_SAMPLE, "left(len())") == _SAMPLE
+    assert apply_value_shape(_SAMPLE, 'ins(pos("G"),"X")') == "ABCDEFXGHIJK"
+    ok, msg = compile_shape_script('left(pos("GH")-1)')
+    assert ok and msg == ""
+
+
+def test_join_and_me() -> None:
+    assert apply_value_shape("ABC", 'join("X","Y")') == "XY"
+    assert apply_value_shape("ABC", "join()") == ""
+    assert apply_value_shape("ABC", 'join(me,"-","Z")') == "ABC-Z"
+    assert apply_value_shape("ABCDEF", 'join(me,"-",left(3))') == "ABCDEF-ABC"
+    assert apply_value_shape("hello", 'join(me,"/",case("upper"))') == "hello/HELLO"
+    # 旧形 join（次の裸コマンド手前まで）
+    assert apply_value_shape("Q", 'join,"A","B",trim') == "AB"
+    ok, msg = compile_shape_script('join(me,"-",left(3))')
+    assert ok and msg == ""
+
+
+def test_tokenize_paren_keeps_inner_commas() -> None:
+    assert tokenize_shape_script('rep("a,b","c");trim') == ['rep("a,b","c")', "trim"]
+    assert apply_value_shape("a,b", 'rep("a,b","c")') == "c"
+
+
+def test_shape_step_paren_join() -> None:
+    from core.core_value_shape import (
+        apply_value_shape_step_for_test,
+        shape_command_count,
+    )
+
+    script = 'trim();split(1);join(me,"-","x")'
+    assert shape_command_count(script) == 3
+    r1, d1, e1 = apply_value_shape_step_for_test("  a\nb  ", script, 1)
+    assert e1 is None and r1 == "a\nb" and d1 == "trim();"
+    r2, d2, e2 = apply_value_shape_step_for_test("  a\nb  ", script, 2)
+    assert e2 is None and r2 == "a" and d2 == "trim();split(1);"
+    r3, d3, e3 = apply_value_shape_step_for_test("  a\nb  ", script, 3)
+    assert e3 is None and r3 == "a-x"
+    assert d3 == 'trim();split(1);join(me,"-","x")'
+
+
+def test_join_args_share_same_current() -> None:
+    """A1: join 各引数は開始時点の同一現在値（引数間で現在値は更新しない）。"""
+    assert apply_value_shape("  ab  ", 'join(trim(),"|",me)') == "ab|  ab  "
+    assert apply_value_shape("ABCDEF", 'join(me,"-",left(3))') == "ABCDEF-ABC"
+
+
+def test_zero_arity_extra_args_lenient_shortage_errors() -> None:
+    """A2: 0引数への余分は寛容、不足はエラー。"""
+    ok, msg = compile_shape_script('trim("x")')
+    assert ok and msg == ""
+    assert apply_value_shape(" ab ", 'trim("x")') == "ab"
+    ok_w, _ = compile_shape_script("wide(1)")
+    assert ok_w
+    ok_s, msg_s = compile_shape_script("split()")
+    assert not ok_s
+    assert "不足" in msg_s
+    assert apply_value_shape("a\nb", "split()") == "a\nb"
+
+
+def test_bare_me_is_unknown_command() -> None:
+    """A3: 先頭の裸 me は未知コマンド（専用文言は付けない）。"""
+    ok, msg = compile_shape_script("me")
+    assert not ok
+    assert "未知" in msg
+    assert apply_value_shape("ABC", "me") == "ABC"
+    ok2, msg2 = compile_shape_script("trim,me,left,1")
+    assert not ok2
+    assert "未知" in msg2
+
+
+def test_legacy_join_is_supported() -> None:
+    """A4: 旧形 join,a,b,… は正式サポート（次の裸コマンド手前まで）。"""
+    assert apply_value_shape("Q", 'join,"A","B",trim') == "AB"
+    assert apply_value_shape("Q", 'join,"A","B",case,upper') == "AB"
+    ok, msg = compile_shape_script('join,"A","B",trim')
+    assert ok and msg == ""
+
+
+def test_ui_hint_documents_me_as_parameter_only() -> None:
+    """HINT が合意した me／入れ子の言い回しと矛盾しないこと。"""
+    import json
+    from pathlib import Path
+
+    cfg = json.loads(
+        (Path(__file__).resolve().parents[1] / "config" / "ui_data_agg.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for block in ("DETAIL_CELL", "DETAIL_NAME"):
+        h = cfg["SCREENS"]["SCENARIO_EDIT"][block]["VALUE_SHAPE_HINT_HTML"]
+        assert "パラメータのみ" in h
+        assert "直前コマンド結果" in h
+        assert "同一現在値" in h
+        assert "外側開始時の現在値" in h
+        # 記述例は () 形が主、旧形も可
+        assert "trim()" in h
+        assert "rep(\"検索\",\"置換\")" in h
+        assert "left(数)" in h
+        assert "旧形" in h
+        assert "split,ブロック" not in h
+        short = cfg["SCREENS"]["SCENARIO_EDIT"][block]["VALUE_SHAPE_HINT_SHORT_HTML"]
+        assert "パラメータのみ" in short
+        assert "() 形" in short and "旧形も可" in short
+    tip = cfg["SCREENS"]["SCENARIO_EDIT"]["DSL_TEST"]["TIP_CMD_INPUT"]
+    assert "パラメータのみ" in tip
+    assert "直前コマンド結果" in tip
+    assert "() 形を推奨" in tip
+    assert "旧形" in tip

@@ -71,6 +71,102 @@ def test_prepend_for_joined_master_rows() -> None:
     assert out == [["book.xlsx", "A001", 10], ["book.xlsx", "A002", 20]]
 
 
+def test_match_key_frames_keep_file_path() -> None:
+    from svc.svc_data_agg import _build_match_key_frames_by_item  # noqa: WPS433
+
+    merged = [
+        {
+            "機器番号": "PT1",
+            "MAC": "aa",
+            "__file_path": r"C:\a\one.xlsx",
+            "__norm_path": r"C:/a/one.xlsx",
+            "__iter_index": 0,
+        },
+        {
+            "機器番号": "PT2",
+            "MAC": "bb",
+            "__file_path": r"C:\b\two.xlsx",
+            "__norm_path": r"C:/b/two.xlsx",
+            "__iter_index": 1,
+        },
+    ]
+    items = [
+        {"id": "i0", "name": "機器番号"},
+        {"id": "i1", "name": "MAC"},
+    ]
+    frames = _build_match_key_frames_by_item(
+        merged,
+        items,
+        ["i0", "i1"],
+        ["機器番号", "MAC"],
+        ["機器番号"],
+        [],
+    )
+    assert frames["i0"][0]["__file_path"] == r"C:\a\one.xlsx"
+    assert frames["i1"][1]["__file_path"] == r"C:\b\two.xlsx"
+
+
+def test_merged_dict_rows_keeps_per_row_paths() -> None:
+    rows = [
+        {"__file_path": r"C:\a\one.xlsx", "品番": "A"},
+        {"__file_path": r"C:\b\two.xlsx", "品番": "B"},
+    ]
+    out = _merged_dict_rows_to_table_rows(
+        rows,
+        ["品番"],
+        result_columns={"include_path": True, "include_file": True},
+        fallback_file_path=r"C:\fallback\x.xlsx",
+    )
+    assert out[0][0] == normalize_source_path(r"C:\a\one.xlsx")
+    assert out[0][1] == "one.xlsx"
+    assert out[1][0] == normalize_source_path(r"C:\b\two.xlsx")
+    assert out[1][1] == "two.xlsx"
+
+
+def test_join_overwrite_does_not_change_row_origin_path() -> None:
+    """結合＋強制上書きで主キー列を更新しても __file_path は行追加時のまま。"""
+    from svc.svc_data_agg import _apply_join_key_search_write  # noqa: WPS433
+
+    seed_fp = r"C:\seed\anchor.xlsx"
+    host_fp = r"C:\host\join.xlsx"
+    pool = [
+        {
+            "機器番号": "OLD",
+            "MAC": "aa",
+            "__file_path": seed_fp,
+            "__norm_path": seed_fp,
+            "__iter_index": 0,
+        }
+    ]
+    item = {
+        "id": "i0",
+        "name": "機器番号",
+        "sources": [
+            {
+                "type": "cell",
+                "ui_scenario_source_v1": {
+                    "join_defs": [{"item": "MAC", "mode": "セル", "cell": "A1"}],
+                },
+            }
+        ],
+    }
+    bundle = {
+        "primary_values": ["NEW"],
+        "join_values": {"MAC": ["aa"]},
+        "link_values": {},
+    }
+    _apply_join_key_search_write(
+        pool,
+        item,
+        "機器番号",
+        bundle,
+        "overwrite",
+        host_file_path=host_fp,
+    )
+    assert pool[0]["機器番号"] == "NEW"
+    assert pool[0]["__file_path"] == seed_fp
+
+
 def test_output_table_headers_for_scenario() -> None:
     scen = {
         "items": [{"id": "i0", "name": "品番"}, {"id": "i1", "name": "値"}],

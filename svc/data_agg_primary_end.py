@@ -15,22 +15,78 @@ def parse_skip_primary_match(raw: str | None) -> list[str]:
     スキップ一致文字の入力をトークン化する。
 
     - 全体が未入力／空白のみ → [""]（空欄）
-    - カンマ区切り。各要素は trim（スペースのみ → 空欄）
-    - 先頭 `,` や途中 `,,` / `, ,` → 空欄トークン
-    - 末尾 `,` で終わる場合、末尾の空要素は捨てる（空欄にしない）
+    - 区切りは先頭レベルで `,` または `;`（同等）
+    - 各トークンは任意で `"..."`（CSV 方式。内側の `"` は `""`）
+    - クォートなしは従来どおり（要素は trim。スペースのみ → 空欄）
+    - クォートありは内側をそのまま（前後の区切り外側空白のみ無視）
+    - 先頭区切りや途中の連続区切り → 空欄トークン
+    - 末尾の `,` / `;`（その後の空白のみ）で終わる場合、末尾の空要素は捨てる
     """
     s = "" if raw is None else str(raw)
     if s.strip() == "":
         return [""]
-    ends_with_comma = s.rstrip(" \t").endswith(",")
-    parts = s.split(",")
+
+    stripped_right = s.rstrip(" \t")
+    ends_with_delim = bool(stripped_right) and stripped_right[-1] in ",;"
+
     out: list[str] = []
-    for i, part in enumerate(parts):
-        tok = str(part).strip()
-        is_last = i == len(parts) - 1
-        if is_last and ends_with_comma and tok == "":
+    buf: list[str] = []
+    in_quotes = False
+    field_quoted = False
+    i = 0
+    n = len(s)
+
+    def _flush() -> None:
+        nonlocal buf, field_quoted
+        if field_quoted:
+            out.append("".join(buf))
+        else:
+            out.append("".join(buf).strip())
+        buf = []
+        field_quoted = False
+
+    while i < n:
+        c = s[i]
+        if in_quotes:
+            if c == '"':
+                if i + 1 < n and s[i + 1] == '"':
+                    buf.append('"')
+                    i += 2
+                    continue
+                in_quotes = False
+                i += 1
+                continue
+            buf.append(c)
+            i += 1
             continue
-        out.append(tok)
+
+        if c in ",;":
+            _flush()
+            i += 1
+            continue
+
+        if c == '"':
+            # フィールド先頭（未クォート内容が空／空白のみ）でのみ開始
+            if not buf or "".join(buf).strip() == "":
+                buf = []
+                in_quotes = True
+                field_quoted = True
+                i += 1
+                continue
+            buf.append(c)
+            i += 1
+            continue
+
+        buf.append(c)
+        i += 1
+
+    if in_quotes:
+        # 閉じ忘れ: ここまでの内容をクォートフィールドとして採用
+        field_quoted = True
+    _flush()
+
+    if ends_with_delim and out and out[-1] == "":
+        out.pop()
     return out if out else [""]
 
 

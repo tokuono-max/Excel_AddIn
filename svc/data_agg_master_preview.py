@@ -24,12 +24,148 @@ FROZEN_SNAPSHOT_VERSION = 1
 
 
 def is_synthetic_mpv_row_file_path(file_path: Any) -> bool:
-    """ç©ã¿ä¸ã seed ç¨ã® synthetic __file_pathï¼mpv_table_seed://ï¼ãã"""
+    """積み上げ seed 用の synthetic __file_path（mpv_table_seed://）か。"""
     return str(file_path or "").strip().startswith("mpv_table_seed://")
 
 
+def _origin_path_header_candidates(*, path_header: str | None = None) -> list[str]:
+    """
+    行由来パスが入る表ヘッダ候補。
+
+    path_header 明示時のみその見出しを使う（結果付加の「パス」等）。
+    未指定時はレガシー「file_path」のみ — マスタ項目名が「パス」の誤認を避ける。
+    """
+    out: list[str] = []
+
+    def _add(name: str) -> None:
+        n = str(name or "").strip()
+        if n and n not in out:
+            out.append(n)
+
+    _add(path_header or "")
+    _add("file_path")
+    return out
+
+
+def _index_of_origin_path_header(
+    headers: Sequence[Any],
+    *,
+    path_header: str | None = None,
+) -> int:
+    hdrs = [str(h) for h in headers]
+    for name in _origin_path_header_candidates(path_header=path_header):
+        if name in hdrs:
+            return hdrs.index(name)
+    return -1
+
+
+def _origin_file_header_candidates(*, file_header: str | None = None) -> list[str]:
+    """
+    結果付加「ファイル」列（basename）の見出し候補。
+
+    file_header 明示時のみ（マスタ項目名「ファイル」の誤認を避ける）。
+    """
+    out: list[str] = []
+    fh = str(file_header or "").strip()
+    if fh:
+        out.append(fh)
+    return out
+
+
+def _index_of_origin_file_header(
+    headers: Sequence[Any],
+    *,
+    file_header: str | None = None,
+) -> int:
+    hdrs = [str(h) for h in headers]
+    for name in _origin_file_header_candidates(file_header=file_header):
+        if name in hdrs:
+            return hdrs.index(name)
+    return -1
+
+
+def _scan_paths_by_basename(scan_paths: Sequence[str]) -> dict[str, str]:
+    """scan_paths をファイル名（大小無視）→フルパスへ。同一名は先勝ち。"""
+    from pathlib import Path  # noqa: WPS433
+
+    out: dict[str, str] = {}
+    for p in scan_paths or []:
+        fp = str(p or "").strip()
+        if not fp:
+            continue
+        key = Path(fp).name.casefold()
+        if key and key not in out:
+            out[key] = fp
+    return out
+
+
+def _resolve_row_paths_from_file_basename_column(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    file_header: str | None,
+    scan_paths: Sequence[str] | None,
+) -> list[str] | None:
+    """
+    結果付加「ファイル」列の basename を scan_paths に照合してフルパス化する。
+
+    1 件も照合できなければ None（呼び出し側で次の候補へ）。
+    """
+    from pathlib import Path  # noqa: WPS433
+
+    file_ix = _index_of_origin_file_header(headers, file_header=file_header)
+    if file_ix < 0:
+        return None
+    by_name = _scan_paths_by_basename(scan_paths or [])
+    if not by_name:
+        return None
+    out: list[str] = []
+    hit = False
+    for row in rows:
+        fp = ""
+        if isinstance(row, (list, tuple)) and file_ix < len(row):
+            raw = str(row[file_ix] or "").strip()
+            if raw:
+                # 既にフルパス相当ならファイル名部分で照合
+                key = Path(raw).name.casefold()
+                fp = by_name.get(key, "")
+                if fp:
+                    hit = True
+        out.append(fp)
+    return out if hit else None
+
+
+def _basename_mismatch_vs_file_column(
+    file_paths: Sequence[str],
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    file_header: str | None,
+) -> int:
+    """行パスの basename と結果付加「ファイル」列が食い違う行数。"""
+    from pathlib import Path  # noqa: WPS433
+
+    file_ix = _index_of_origin_file_header(headers, file_header=file_header)
+    if file_ix < 0:
+        return 0
+    bad = 0
+    for i, row in enumerate(rows):
+        if not isinstance(row, (list, tuple)) or file_ix >= len(row):
+            continue
+        cell = str(row[file_ix] or "").strip()
+        if not cell:
+            continue
+        want = Path(cell).name.casefold()
+        got = ""
+        if i < len(file_paths):
+            got = Path(str(file_paths[i] or "").strip()).name.casefold()
+        if got and want and got != want:
+            bad += 1
+    return bad
+
+
 def row_file_paths_real_count(file_paths: Sequence[str] | None) -> int:
-    """synthetic ã§ãªãåç§åãã¹æ°ï¼åè³ªæ¯è¼ç¨ï¼ã"""
+    """synthetic でない参照元パス数（品質比較用）。"""
     return sum(
         1
         for p in (file_paths or [])
@@ -43,12 +179,18 @@ def table_row_file_paths_for_stacked_seed(
     *,
     scan_paths: Sequence[str] | None = None,
     stored_row_paths: Sequence[str] | None = None,
+    path_header: str | None = None,
+    file_header: str | None = None,
 ) -> list[str]:
     """
-    ç©ã¿ä¸ã join seed ç¨: table_rows åè¡ã®åç§åãã¡ã¤ã«ãã¹ãæ¨å®ããã
+    積み上げ join seed 用: table_rows 各行の参照元ファイルパスを推定する。
 
-    åªåé : stored_row_pathsï¼compute ã® iteration_contextï¼â file_path å
-    â å®è£è£ç½®çªå·ã®åºç¾é ã¨ scan_paths ã®å¯¾å¿ â scan_paths ã®åé ­è¡å²å½ï¼å¾æ¹äºæï¼ã
+    優先順: stored_row_paths（compute の iteration_context）→ 結果付加「パス」/
+    file_path 列 → 結果付加「ファイル」列の basename を scan_paths 照合 →
+    実装装置番号の出現順と scan_paths の対応 → scan_paths の先頭行割当。
+
+    stored が「ファイル」列と大きく食い違う場合はファイル列照合を優先する
+    （装置番号×scan 全件フォールバックで汚染された保存値の救済）。
     """
     n = len(rows)
     if n <= 0:
@@ -57,11 +199,37 @@ def table_row_file_paths_for_stacked_seed(
     def _norm_fp(fp: Any) -> str:
         return str(fp or "").strip()
 
+    def _fill_empty_from_scan(paths: list[str]) -> list[str]:
+        scan = [_norm_fp(p) for p in (scan_paths or []) if _norm_fp(p)]
+        if not scan:
+            return paths
+        out = list(paths)
+        for i, fp in enumerate(out):
+            if not fp:
+                out[i] = scan[min(i, len(scan) - 1)]
+        return out
+
+    from_file = _resolve_row_paths_from_file_basename_column(
+        headers,
+        rows,
+        file_header=file_header,
+        scan_paths=scan_paths,
+    )
+
     stored = [_norm_fp(p) for p in (stored_row_paths or [])]
     if len(stored) >= n and any(stored[:n]):
+        if from_file is not None and any(from_file):
+            stored_bad = _basename_mismatch_vs_file_column(
+                stored[:n], headers, rows, file_header=file_header
+            )
+            file_bad = _basename_mismatch_vs_file_column(
+                from_file[:n], headers, rows, file_header=file_header
+            )
+            if stored_bad > file_bad:
+                return _fill_empty_from_scan(list(from_file[:n]))
         return list(stored[:n])
 
-    path_ix = headers.index("file_path") if "file_path" in headers else -1
+    path_ix = _index_of_origin_path_header(headers, path_header=path_header)
     if path_ix >= 0:
         from_path: list[str] = []
         for row in rows:
@@ -70,13 +238,12 @@ def table_row_file_paths_for_stacked_seed(
                 fp = _norm_fp(row[path_ix])
             from_path.append(fp)
         if any(from_path):
-            scan = [_norm_fp(p) for p in (scan_paths or []) if _norm_fp(p)]
-            for i, fp in enumerate(from_path):
-                if not fp and scan:
-                    from_path[i] = scan[min(i, len(scan) - 1)]
-            return from_path
+            return _fill_empty_from_scan(from_path)
 
-    dev_ix = headers.index("å®è£è£ç½®çªå·") if "å®è£è£ç½®çªå·" in headers else -1
+    if from_file is not None and any(from_file):
+        return _fill_empty_from_scan(list(from_file))
+
+    dev_ix = headers.index("実装装置番号") if "実装装置番号" in headers else -1
     scan = [_norm_fp(p) for p in (scan_paths or []) if _norm_fp(p)]
     if dev_ix >= 0 and scan:
         from core.core_join_compare import join_compare_display_key  # noqa: WPS433
@@ -113,13 +280,21 @@ def table_rows_to_join_search_seed_pool(
     anchor_file_path: str | None = None,
     row_file_paths: Sequence[str] | None = None,
     stacked_join: bool = False,
+    path_header: str | None = None,
+    file_header: str | None = None,
 ) -> list[dict[str, Any]]:
-    """mpv æ®µéã­ã£ãã·ã¥ã® table_rows ã join_search seed ãã¼ã«è¡ã¸å¤æããã"""
+    """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。"""
     if not headers or not rows:
         return []
-    path_h = "file_path" if "file_path" in headers else None
+    _ = file_header  # 由来フルパスは呼び出し側の row_file_paths で解決済み
+    path_ix = _index_of_origin_path_header(headers, path_header=path_header)
+    path_h = str(headers[path_ix]) if path_ix >= 0 else None
     anchor_fp = str(anchor_file_path or "").strip()
-    row_fps = [str(p).strip() for p in (row_file_paths or []) if str(p).strip()]
+    # 行 index 対応を崩さない（空文字も位置を保つ）
+    row_fps = [
+        str(p).strip() if p is not None else ""
+        for p in (row_file_paths or [])
+    ]
     out: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         if not isinstance(row, (list, tuple)):
@@ -129,10 +304,11 @@ def table_rows_to_join_search_seed_pool(
             key = str(h)
             d[key] = row[c] if c < len(row) else None
         d["__iter_index"] = int(i)
+        fp = ""
         if path_h and d.get(path_h) not in (None, ""):
-            fp = str(d[path_h])
-        elif i < len(row_fps):
-            fp = row_fps[int(i)]
+            fp = str(d[path_h]).strip()
+        elif i < len(row_fps) and row_fps[i]:
+            fp = row_fps[i]
         elif anchor_fp and not stacked_join:
             fp = anchor_fp
         else:

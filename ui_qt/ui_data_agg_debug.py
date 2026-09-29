@@ -2731,6 +2731,8 @@ class DataAggDebugDialog(QDialog):
             list(rows),
             scan_paths=list(self._debug_scan_paths or []),
             stored_row_paths=stored,
+            path_header=self._mpv_result_path_header(),
+            file_header=self._mpv_result_file_header(),
         )
         if not (paths and any(paths)):
             return
@@ -2793,6 +2795,8 @@ class DataAggDebugDialog(QDialog):
             rows,
             scan_paths=list(self._debug_scan_paths or []),
             stored_row_paths=stored,
+            path_header=self._mpv_result_path_header(),
+            file_header=self._mpv_result_file_header(),
         )
         if paths:
             return paths[:n]
@@ -6530,6 +6534,36 @@ class DataAggDebugDialog(QDialog):
 
         return output_table_headers_for_scenario(self._scenario_for_dry_run or {})
 
+    def _mpv_result_path_header(self) -> str | None:
+        """結果付加パス列の見出し（include_path 時のみ）。"""
+        from svc.svc_data_agg_scenario import (  # noqa: WPS433
+            KEY_RESULT_COLUMNS,
+            normalize_result_columns,
+        )
+
+        rc = normalize_result_columns(
+            (self._scenario_for_dry_run or {}).get(KEY_RESULT_COLUMNS)
+        )
+        if not rc.get("include_path"):
+            return None
+        ph = str(rc.get("path_header") or "").strip()
+        return ph or None
+
+    def _mpv_result_file_header(self) -> str | None:
+        """結果付加ファイル列の見出し（include_file 時のみ）。"""
+        from svc.svc_data_agg_scenario import (  # noqa: WPS433
+            KEY_RESULT_COLUMNS,
+            normalize_result_columns,
+        )
+
+        rc = normalize_result_columns(
+            (self._scenario_for_dry_run or {}).get(KEY_RESULT_COLUMNS)
+        )
+        if not rc.get("include_file"):
+            return None
+        fh = str(rc.get("file_header") or "").strip()
+        return fh or None
+
     def _debug_carry_empty_target_names(self) -> set[str]:
         """
         前置保持(carry_empty)対象項目名。
@@ -7120,6 +7154,8 @@ class DataAggDebugDialog(QDialog):
                     prows,
                     row_file_paths=row_fps,
                     stacked_join=True,
+                    path_header=self._mpv_result_path_header(),
+                    file_header=self._mpv_result_file_header(),
                 )
                 from svc.data_agg_master_preview_perf import (  # noqa: WPS433
                     master_preview_stacked_seed_usable,

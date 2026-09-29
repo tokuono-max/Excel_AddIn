@@ -2,7 +2,13 @@
 """core_excel_text のユニットテスト。"""
 from __future__ import annotations
 
-from core.core_excel_text import as_excel_forced_text, matrix_as_excel_forced_text, scalar_to_text
+from core.core_excel_text import (
+    as_excel_forced_text,
+    matrix_as_excel_forced_text,
+    scalar_to_text,
+    strip_cell_newlines,
+    _coerce_cell_scalar_to_full_text,
+)
 
 
 def test_as_excel_forced_text_prefixes_non_empty() -> None:
@@ -37,3 +43,10 @@ def test_scalar_to_text_avoids_scientific_for_tiny_float() -> None:
 def test_matrix_as_excel_forced_text() -> None:
     out = matrix_as_excel_forced_text([["a", ""], ["1", "2"]])
     assert out == [["'a", ""], ["'1", "'2"]]
+
+
+def test_strip_cell_newlines_and_coerce() -> None:
+    assert strip_cell_newlines("電\n源") == "電源"
+    assert strip_cell_newlines("電\r\n源") == "電源"
+    assert _coerce_cell_scalar_to_full_text("電\n源") == "電源"
+    assert scalar_to_text("電\n源") == "電\n源"

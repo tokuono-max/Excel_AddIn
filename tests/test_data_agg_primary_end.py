@@ -42,6 +42,23 @@ def test_parse_trailing_comma_ignores_blank() -> None:
     assert parse_skip_primary_match("a,b,c,  ") == ["a", "b", "c"]
 
 
+def test_parse_semicolon_delim_compat() -> None:
+    assert parse_skip_primary_match("A;-") == ["A", "-"]
+    assert parse_skip_primary_match(",A;-") == ["", "A", "-"]
+    assert parse_skip_primary_match("A,B;C") == ["A", "B", "C"]
+    assert parse_skip_primary_match("a;b;c;") == ["a", "b", "c"]
+
+
+def test_parse_quoted_tokens() -> None:
+    assert parse_skip_primary_match('"A","-"') == ["A", "-"]
+    assert parse_skip_primary_match('"",A,-') == ["", "A", "-"]
+    assert parse_skip_primary_match('"a,b",-') == ["a,b", "-"]
+    assert parse_skip_primary_match('"a;b";-') == ["a;b", "-"]
+    assert parse_skip_primary_match('"He said ""Hi"""') == ['He said "Hi"']
+    assert parse_skip_primary_match('"A",-;B') == ["A", "-", "B"]
+    assert parse_skip_primary_match('A,"-",""') == ["A", "-", ""]
+
+
 def test_match_tokens() -> None:
     assert primary_value_matches_skip_tokens(None, [""])
     assert primary_value_matches_skip_tokens("  ", [""])

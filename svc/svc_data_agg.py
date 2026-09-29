@@ -667,6 +667,13 @@ def _finalize_master_preview_frozen_capture(
     )
 
 
+_ROW_ORIGIN_PATH_KEYS: tuple[str, ...] = (
+    "__file_path",
+    "__norm_path",
+    "__iter_index",
+)
+
+
 def _build_match_key_frames_by_item(
     merged_rows: list[Any],
     items: list[Any],
@@ -675,7 +682,12 @@ def _build_match_key_frames_by_item(
     match_cols: list[str],
     linked_hdrs: list[str],
 ) -> dict[str, Any]:
-    """照合キー結合のフレームに連携先列を含める（最終表で連携値が落ちないようにする）。"""
+    """
+    照合キー結合のフレームに連携先列と行由来パス（__file_path 等）を含める。
+
+    結果付加のパス／ファイル列は行追加時に付いた __file_path を使うため、
+    match_keys 結合でもメタを落とさない。
+    """
     frames_by_item: dict[str, Any] = {}
     for i, _it in enumerate(items):
         iid = item_ids_ordered[i]
@@ -689,6 +701,9 @@ def _build_match_key_frames_by_item(
             for lt in linked_hdrs:
                 if lt not in row_dict:
                     row_dict[lt] = r.get(lt)
+            for mk in _ROW_ORIGIN_PATH_KEYS:
+                if mk in r and mk not in row_dict:
+                    row_dict[mk] = r.get(mk)
             frames_by_item[iid].append(row_dict)
     return frames_by_item
 
@@ -1293,7 +1308,7 @@ def _result_column_values_from_row(
     *,
     fallback_file_path: str = "",
 ) -> list[Any]:
-    """結果付加列（パス・ファイル）のセル値。row の __file_path を優先し、無ければ fallback を使う。"""
+    """結果付加列（パス・ファイル）のセル値。行追加時の `__file_path` を優先し、無ければ fallback。"""
     from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
 
     opts = normalize_result_columns(result_columns)
@@ -1777,6 +1792,8 @@ def _apply_join_key_search_write(
     結合キー新仕様: セルから読んだ値と、表上の同一マスタ列の値を AND で比較し、
     プール内の全行から一致行を集め、自項目列へ主値を書込みモードで代入する。
     1:主1・結合N: 各スライスで検索し一致行の和集合へ同一主値。N:1（主複数・結合1）は無視。
+
+    既存行の __file_path は更新しない（結果のパス／ファイルは行新規作成時の主キー由来のまま）。
 
     join_dump_ctx: HC_DIAG_DATA_AGG_JOIN 時のみ参照。scenario_id / file_path / caller /
     preview_master / item_idx を載せるとログに付与する。
@@ -3060,7 +3077,12 @@ def _prepend_result_columns_to_master_table_rows(
     *,
     fallback_file_path: str = "",
 ) -> list[list[Any]]:
-    """マスタ列のみの table 行リストの先頭に結果付加列を挿入する。"""
+    """
+    マスタ列のみの table 行リストの先頭に結果付加列を挿入する。
+
+    行ごとの由来が無いレガシー用。通常は dict 行の __file_path を使う
+    _merged_dict_rows_to_table_rows を優先する。
+    """
     from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
 
     rc = normalize_result_columns(result_columns)
@@ -3072,17 +3094,20 @@ def _prepend_result_columns_to_master_table_rows(
     return [prefix + list(r) for r in rows]
 
 
-def _joined_result_to_table_rows(joined: Any, headers: list[str]) -> list[list[Any]]:
-    """join_on_match_keys の戻り（DataFrame または list[dict]）をマスタ行（headers 順）に変換する。"""
+def _joined_result_to_dict_rows(joined: Any) -> list[dict[str, Any]]:
+    """join_on_match_keys の戻りを list[dict] にする（__file_path 等を保持）。"""
     if joined is None:
         return []
-    records: list[dict[str, Any]]
     if isinstance(joined, list):
-        records = [x for x in joined if isinstance(x, dict)]
-    elif hasattr(joined, "to_dicts"):
-        records = joined.to_dicts()
-    else:
-        return []
+        return [x for x in joined if isinstance(x, dict)]
+    if hasattr(joined, "to_dicts"):
+        return list(joined.to_dicts())
+    return []
+
+
+def _joined_result_to_table_rows(joined: Any, headers: list[str]) -> list[list[Any]]:
+    """join_on_match_keys の戻り（DataFrame または list[dict]）をマスタ行（headers 順）に変換する。"""
+    records = _joined_result_to_dict_rows(joined)
     return [[r.get(h) for h in headers] for r in records]
 
 
@@ -6003,16 +6028,18 @@ def compute_batch_table_rows(
             event_log_rows.extend(
                 write_mod.format_join_events_for_event_log(scenario_id, row_path, join_events)
             )
-            joined_rows = _joined_result_to_table_rows(joined, headers)
             _ph(7, "", file_index=fi)
-            rows_to_add = list(joined_rows)
+            joined_records = _joined_result_to_dict_rows(joined)
             if _apply_batch_sparse:
-                rows_to_add = [
-                    r for r in rows_to_add if not _batch_sparse_table_row_noise(r, headers)
+                joined_records = [
+                    r
+                    for r in joined_records
+                    if not _batch_sparse_merged_row_noise(r, headers)
                 ]
-            rows_to_add = _prepend_result_columns_to_master_table_rows(
-                rows_to_add,
-                result_columns,
+            rows_to_add = _merged_dict_rows_to_table_rows(
+                joined_records,
+                headers,
+                result_columns=result_columns,
                 fallback_file_path=str(row_path),
             )
             if max_table_rows is not None and max_table_rows > 0:
@@ -6173,15 +6200,17 @@ def compute_batch_table_rows(
             event_log_rows.extend(
                 write_mod.format_join_events_for_event_log(scenario_id, file_path, join_events)
             )
-            joined_rows = _joined_result_to_table_rows(joined, headers)
-            rows_to_add = list(joined_rows)
+            joined_records = _joined_result_to_dict_rows(joined)
             if _apply_batch_sparse:
-                rows_to_add = [
-                    r for r in rows_to_add if not _batch_sparse_table_row_noise(r, headers)
+                joined_records = [
+                    r
+                    for r in joined_records
+                    if not _batch_sparse_merged_row_noise(r, headers)
                 ]
-            rows_to_add = _prepend_result_columns_to_master_table_rows(
-                rows_to_add,
-                result_columns,
+            rows_to_add = _merged_dict_rows_to_table_rows(
+                joined_records,
+                headers,
+                result_columns=result_columns,
                 fallback_file_path=str(file_path),
             )
             if max_table_rows is not None and max_table_rows > 0:

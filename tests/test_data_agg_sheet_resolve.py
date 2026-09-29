@@ -422,3 +422,143 @@ def test_extract_item_bundle_two_scenarios_two_files_vertical(tmp_path: Path) ->
     vals = [str(r[0]).lstrip("'") for r in rows]
     assert "NOW1" in vals
     assert "PAST1" in vals
+
+
+def test_mixed_sheet_rules_two_files_batch_ok(tmp_path: Path) -> None:
+    """シナリオごとに完全一致／含むが混在しても、ファイル別に抽出し一括も通る。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    from svc.svc_data_agg import compute_batch_table_rows
+    from svc.svc_data_agg_extract import (
+        extract_item_bundle,
+        matching_sheets_and_names_for_item,
+        xlsx_workbook_scope,
+    )
+
+    p_now = tmp_path / "mix_now.xlsx"
+    wb1 = openpyxl.Workbook()
+    wb1.active.title = "Cover"
+    s_sum = wb1.create_sheet("Summary")
+    s_sum["A1"] = "NOW"
+    wb1.save(p_now)
+    wb1.close()
+
+    p_past = tmp_path / "mix_past.xlsx"
+    wb2 = openpyxl.Workbook()
+    wb2.active.title = "Cover"
+    s1 = wb2.create_sheet("R_One")
+    s1["A1"] = "P1"
+    s2 = wb2.create_sheet("R_Two")
+    s2["A1"] = "P2"
+    wb2.save(p_past)
+    wb2.close()
+
+    item = {
+        "id": "item_mix",
+        "name": "機器番号",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "Summary",
+                "cell_ref": "A1",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "完全一致",
+                    "file_pattern": "mix_now",
+                    "file_name_rule": "含む",
+                },
+            },
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "A1",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "mix_past",
+                    "file_name_rule": "含む",
+                },
+            },
+        ],
+    }
+    sheets_now, _ = matching_sheets_and_names_for_item(str(p_now), item)
+    sheets_past, _ = matching_sheets_and_names_for_item(str(p_past), item)
+    assert sheets_now == ["Summary"]
+    assert sheets_past == ["R_One", "R_Two"]
+
+    with xlsx_workbook_scope():
+        b_now = extract_item_bundle(str(p_now), item, item_id="item_mix")
+        b_past = extract_item_bundle(str(p_past), item, item_id="item_mix")
+    assert [str(x).lstrip("'") for x in (b_now.get("primary_values") or [])] == ["NOW"]
+    assert [str(x).lstrip("'") for x in (b_past.get("primary_values") or [])] == [
+        "P1",
+        "P2",
+    ]
+
+    _h, rows, _, _ = compute_batch_table_rows(
+        {"version": 1, "items": [item], "match_keys": []},
+        [str(p_now), str(p_past)],
+        max_primary_rows=50,
+        max_table_rows=50,
+        probe_caller="excel_batch_submit",
+    )
+    vals = [str(r[0]).lstrip("'") for r in rows]
+    assert vals == ["NOW", "P1", "P2"]
+
+
+def test_mixed_sheet_rules_same_file_per_source_skip(tmp_path: Path) -> None:
+    """同一ファイルでモード混在時、各シナリオは自分の条件に合うシートだけ読む。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    from svc.svc_data_agg_extract import extract_item_bundle, xlsx_workbook_scope
+
+    fp = tmp_path / "same_file_mix.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Summary"
+    wb.active["A1"] = "SUM"
+    s1 = wb.create_sheet("R_One")
+    s1["A1"] = "P1"
+    s2 = wb.create_sheet("R_Two")
+    s2["A1"] = "P2"
+    wb.save(fp)
+    wb.close()
+
+    item = {
+        "id": "i1",
+        "name": "col",
+        "sources": [
+            {
+                "type": "cell",
+                "sheet_name": "Summary",
+                "cell_ref": "A1",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "完全一致",
+                    "file_pattern": "",
+                    "file_name_rule": "含む",
+                },
+            },
+            {
+                "type": "cell",
+                "sheet_name": "R_",
+                "cell_ref": "A1",
+                "repeat_until_empty": False,
+                "repeat_max": 1,
+                "ui_scenario_source_v1": {
+                    "sheet_rule": "含む",
+                    "file_pattern": "",
+                    "file_name_rule": "含む",
+                },
+            },
+        ],
+    }
+    with xlsx_workbook_scope():
+        b = extract_item_bundle(str(fp), item, item_id="i1")
+    prim = [str(x).lstrip("'") for x in (b.get("primary_values") or [])]
+    assert prim == ["SUM", "P1", "P2"]
+    parts = b.get("_sheet_parts") or []
+    assert [p["sheet_name"] for p in parts] == ["Summary", "R_One", "R_Two"]
+    spans = b.get("_cell_source_spans") or {}
+    assert spans.get(0) == (0, 1)
+    assert spans.get(1) == (1, 2)

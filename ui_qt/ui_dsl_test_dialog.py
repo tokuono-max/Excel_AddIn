@@ -156,11 +156,36 @@ def _apply_panel_line_edit(le: QLineEdit, dialog: QWidget) -> None:
     )
 
 
+def _apply_panel_plain_edit(pe: QPlainTextEdit, dialog: QWidget) -> None:
+    """枠線のみ。背景はダイアログと同色（複数行入力／結果用）。"""
+    bg = _dialog_bg_color_name(dialog)
+    pe.setStyleSheet(
+        "QPlainTextEdit { background-color: %s; border: 1px solid #a0a0a0; }" % bg
+    )
+
+
+def _plain_edit_min_height(widget: QPlainTextEdit, cfg: dict[str, Any], key: str, default: int) -> int:
+    """JSON の最小高さ。未指定時は行数見合いの default。"""
+    h = _cfg_int(cfg, key, default)
+    return max(h, widget.fontMetrics().lineSpacing() + 10)
+
+
+def _plain_edit_fixed_lines_height(
+    widget: QPlainTextEdit, cfg: dict[str, Any], key: str, default_lines: int = 2
+) -> int:
+    """表示行数に対応する固定高さ（枠＋行間）。中身はスクロールで複数行可。"""
+    lines = max(_cfg_int(cfg, key, default_lines), 1)
+    fm = widget.fontMetrics()
+    # 上下パディング相当。コマンド1行枠（lineSpacing+10）と同系統
+    return max(fm.lineSpacing() * lines + 10, fm.lineSpacing() + 10)
+
+
 def _dsl_test_default_input_text(cfg: dict[str, Any]) -> str:
     v = cfg.get("DEFAULT_INPUT_TEXT")
     if v is None:
         return ""
-    return str(v)
+    # JSON の "\\n" エスケープと実改行の両方を許容
+    return str(v).replace("\r\n", "\n")
 
 
 def _initial_dsl_test_input_text(cfg: dict[str, Any]) -> str:
@@ -272,11 +297,26 @@ class DslTestDialog(QDialog):
         input_row_lay = QHBoxLayout(input_row)
         input_row_lay.setContentsMargins(0, 0, 0, 0)
         input_row_lay.setSpacing(4)
-        self._input_text = QLineEdit()
-        self._input_text.setText(_initial_dsl_test_input_text(self._cfg))
+        input_row_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._input_text = QPlainTextEdit()
+        self._input_text.setPlainText(_initial_dsl_test_input_text(self._cfg))
+        self._input_text.setTabChangesFocus(True)
+        self._input_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._input_text.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._input_text.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._input_text.setFixedHeight(
+            _plain_edit_fixed_lines_height(
+                self._input_text, self._cfg, "INPUT_TEXT_VISIBLE_LINES", 2
+            )
+        )
         self._input_text.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        _apply_panel_plain_edit(self._input_text, self)
         set_widget_tooltip(self._input_text, _dcp(self._cfg, "TIP_INPUT_TEXT", ""))
         input_row_lay.addWidget(self._input_text, 1)
         btn_preset = _dsl_test_mini_button(
@@ -284,7 +324,7 @@ class DslTestDialog(QDialog):
             tooltip=_dcp(self._cfg, "TIP_BTN_DEFAULT_INPUT", ""),
             on_click=self._on_apply_default_input,
         )
-        input_row_lay.addWidget(btn_preset, 0)
+        input_row_lay.addWidget(btn_preset, 0, Qt.AlignmentFlag.AlignTop)
         left.addWidget(input_row)
 
         lbl_cmd = QLabel(_dcp(self._cfg, "LABEL_CMD_INPUT", "DSLコマンド入力"))
@@ -331,12 +371,26 @@ class DslTestDialog(QDialog):
         result_row_lay = QHBoxLayout(result_row)
         result_row_lay.setContentsMargins(0, 0, 0, 0)
         result_row_lay.setSpacing(4)
-        self._result_display = QLineEdit()
+        result_row_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._result_display = QPlainTextEdit()
         self._result_display.setReadOnly(True)
+        self._result_display.setTabChangesFocus(True)
+        self._result_display.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._result_display.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._result_display.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._result_display.setFixedHeight(
+            _plain_edit_fixed_lines_height(
+                self._result_display, self._cfg, "RESULT_VISIBLE_LINES", 2
+            )
+        )
         self._result_display.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        _apply_panel_line_edit(self._result_display, self)
+        _apply_panel_plain_edit(self._result_display, self)
         set_widget_tooltip(self._result_display, _dcp(self._cfg, "TIP_RESULT", ""))
         result_row_lay.addWidget(self._result_display, 1)
         btn_clear_result = _dsl_test_mini_button(
@@ -344,7 +398,7 @@ class DslTestDialog(QDialog):
             tooltip=_dcp(self._cfg, "TIP_BTN_CLEAR_RESULT", ""),
             on_click=self._on_clear_result_displays,
         )
-        result_row_lay.addWidget(btn_clear_result, 0)
+        result_row_lay.addWidget(btn_clear_result, 0, Qt.AlignmentFlag.AlignTop)
         left.addWidget(result_row)
 
         btn_step = QPushButton(_dcp(self._cfg, "BTN_STEP", "ステップ"))
@@ -398,9 +452,13 @@ class DslTestDialog(QDialog):
         self._hint_view.setReadOnly(True)
         self._hint_view.setHtml(hint_html or "")
         self._hint_view.setFrameShape(QTextEdit.Shape.Box)
-        hint_max_h = _cfg_int(self._cfg, "HINT_MAX_HEIGHT", 260)
+        # HINT_MAX_HEIGHT: 0 以下＝上限なし（右ペイン縦いっぱい）。正の値で最大高さを制限。
+        hint_max_h = _cfg_int(self._cfg, "HINT_MAX_HEIGHT", 0)
         if hint_max_h > 0:
             self._hint_view.setMaximumHeight(hint_max_h)
+        self._hint_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         set_widget_tooltip(self._hint_view, _dcp(self._cfg, "TIP_HINT_VIEW", ""))
         right.addWidget(self._hint_view, 1)
         right_wrap = QWidget()
@@ -555,11 +613,21 @@ class DslTestDialog(QDialog):
         super().showEvent(event)
         self._position_dialog()
 
+    def _sample_input_text(self) -> str:
+        """テスト用文字列（改行維持。\\r\\n は \\n に正規化）。"""
+        return self._input_text.toPlainText().replace("\r\n", "\n")
+
+    def _set_sample_input_text(self, text: str) -> None:
+        self._input_text.setPlainText(str(text or "").replace("\r\n", "\n"))
+
+    def _set_result_display_text(self, text: str) -> None:
+        self._result_display.setPlainText(str(text or "").replace("\r\n", "\n"))
+
     def _cmd_script_text(self) -> str:
         return self._cmd_text.toPlainText().replace("\r\n", "\n").replace("\n", "")
 
     def _on_apply_default_input(self) -> None:
-        self._input_text.setText(_dsl_test_default_input_text(self._cfg))
+        self._set_sample_input_text(_dsl_test_default_input_text(self._cfg))
 
     def _on_clear_result_displays(self) -> None:
         self._exec_display.clear()
@@ -704,7 +772,7 @@ class DslTestDialog(QDialog):
         self._on_clear_result_displays()
 
     def _on_step(self) -> None:
-        sample = self._input_text.text()
+        sample = self._sample_input_text()
         script = self._cmd_script_text()
         n_cmd = shape_command_count(script)
         if n_cmd <= 0:
@@ -712,7 +780,7 @@ class DslTestDialog(QDialog):
             self._set_exec_display_plain(
                 _dcp(self._cfg, "TEXT_NO_COMMAND", "(コマンドなし)")
             )
-            self._result_display.setText(sample)
+            self._set_result_display_text(sample)
             return
         if not self._validate_script_syntax(script):
             return
@@ -729,10 +797,10 @@ class DslTestDialog(QDialog):
             return
         self._clear_cmd_error_highlight()
         self._set_exec_display_plain(display)
-        self._result_display.setText(result)
+        self._set_result_display_text(result)
 
     def _on_batch(self) -> None:
-        sample = self._input_text.text()
+        sample = self._sample_input_text()
         script = self._cmd_script_text()
         if script.strip() and not self._validate_script_syntax(script):
             return
@@ -748,7 +816,7 @@ class DslTestDialog(QDialog):
         else:
             display = ""
         self._set_exec_display_plain(display)
-        self._result_display.setText(result)
+        self._set_result_display_text(result)
 
     def _on_paste(self) -> None:
         script = self._cmd_script_text()
@@ -760,15 +828,15 @@ class DslTestDialog(QDialog):
         if self._closing:
             return
         self._closing = True
-        set_shared_dsl_test_input(self._input_text.text())
+        set_shared_dsl_test_input(self._sample_input_text())
         self.close()
 
     def save_shared_input(self) -> None:
-        set_shared_dsl_test_input(self._input_text.text())
+        set_shared_dsl_test_input(self._sample_input_text())
 
     def closeEvent(self, event: Any) -> None:
         if not self._closing:
-            set_shared_dsl_test_input(self._input_text.text())
+            set_shared_dsl_test_input(self._sample_input_text())
             self._closing = True
         super().closeEvent(event)
 

@@ -8,6 +8,8 @@ from typing import Any
 from core.core_excel_text import (
     _coerce_cell_scalar_to_full_text,
     as_excel_forced_text,
+    scalar_to_text,
+    strip_cell_newlines,
 )
 from core.core_value_shape import apply_value_shape, shape_date_value
 
@@ -25,6 +27,7 @@ __all__ = [
     "postprocess_link_rule_value_batch",
     "postprocess_metadata_like_primary",
     "postprocess_name_extract_primary",
+    "strip_cell_newlines",
 ]
 
 _YMD_TEXT_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
@@ -107,16 +110,33 @@ def _finalize_excel_text(s: str) -> str:
     return as_excel_forced_text(s)
 
 
+def _postprocess_with_shape(
+    val: Any,
+    *,
+    checks: list[Any] | None,
+    shape_script: Any,
+) -> str:
+    """
+    セル系後処理の共通順:
+    文字列化（改行保持）→ 加工チェック → 整形 DSL → 残改行除去 → Excel 文字固定。
+    split で採用行を選ぶため、改行除去は整形の後。
+    """
+    s = scalar_to_text(val)
+    s = apply_check_labels(s, checks, raw=val)
+    s = apply_value_shape(s, shape_script)
+    s = strip_cell_newlines(s)
+    return _finalize_excel_text(s)
+
+
 def postprocess_link_rule_value(val: Any, rule: dict[str, Any] | None) -> str:
     """
-    連携キー定義 1 件分: 加工チェック → value_shape_script。
+    連携キー定義 1 件分: 加工チェック → value_shape_script → 残改行除去。
     結合キーでも同関数を使う（checks / value_shape_script が無ければ実質そのまま）。
     """
     r = rule if isinstance(rule, dict) else {}
-    s = _coerce_cell_scalar_to_full_text(val)
-    s = apply_check_labels(s, r.get("checks"), raw=val)
-    s = apply_value_shape(s, r.get("value_shape_script"))
-    return _finalize_excel_text(s)
+    return _postprocess_with_shape(
+        val, checks=r.get("checks"), shape_script=r.get("value_shape_script")
+    )
 
 
 def postprocess_link_rule_value_batch(
@@ -136,12 +156,11 @@ def postprocess_link_rule_value_batch(
 
 
 def postprocess_cell_primary(val: Any, ui_block: dict[str, Any] | None) -> str:
-    """セル主キー: チェック → value_shape_script（正規表現欄は廃止。旧 JSON の normalize は無視）。"""
+    """セル主キー: チェック → value_shape_script → 残改行除去（旧 normalize は無視）。"""
     p = ui_block if isinstance(ui_block, dict) else {}
-    s = _coerce_cell_scalar_to_full_text(val)
-    s = apply_check_labels(s, p.get("cell_checks"), raw=val)
-    s = apply_value_shape(s, p.get("value_shape_script"))
-    return _finalize_excel_text(s)
+    return _postprocess_with_shape(
+        val, checks=p.get("cell_checks"), shape_script=p.get("value_shape_script")
+    )
 
 
 def postprocess_cell_primary_batch(
@@ -162,7 +181,10 @@ def postprocess_cell_primary_batch(
 
 
 def postprocess_name_extract_primary(val: Any, ui_block: dict[str, Any] | None) -> str:
-    """名前取得主値: pattern/replacement は extract_from_name 済み。チェック → value_shape_script。"""
+    """名前取得主値: pattern/replacement は extract_from_name 済み。チェック → value_shape_script。
+
+    フォルダ／ファイル名由来のためセル内改行除去はしない（従来どおり）。
+    """
     p = ui_block if isinstance(ui_block, dict) else {}
     s = "" if val is None else str(val)
     s = apply_check_labels(s, p.get("name_checks"), raw=val)
@@ -171,9 +193,8 @@ def postprocess_name_extract_primary(val: Any, ui_block: dict[str, Any] | None) 
 
 
 def postprocess_metadata_like_primary(val: Any, ui_block: dict[str, Any] | None) -> str:
-    """メタデータ／ファイル名系: ブロックにチェック・整形のみ。"""
+    """メタデータ／ファイル名系: チェック → 整形 → 残改行除去。"""
     p = ui_block if isinstance(ui_block, dict) else {}
-    s = _coerce_cell_scalar_to_full_text(val)
-    s = apply_check_labels(s, p.get("cell_checks"), raw=val)
-    s = apply_value_shape(s, p.get("value_shape_script"))
-    return _finalize_excel_text(s)
+    return _postprocess_with_shape(
+        val, checks=p.get("cell_checks"), shape_script=p.get("value_shape_script")
+    )

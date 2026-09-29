@@ -4,8 +4,10 @@ Python: 3.12+
 Module: core/core_value_shape.py
 Purpose:
   データ集約の「整形」DSL。先頭レベルはカンマまたはセミコロンでトークン分割、CSV 方式の "" クォート。
-  rep は部分文字列のすべてを置換（str.replace、先頭 N 回のみのモードはない）。
-  split は行分割（str.splitlines）で N 行目（1 始まり）を返す。改行文字は結果に含めない。
+  コマンドは旧形（cmd,引数…）と () 形（cmd(引数…)）の両方。() 形の引数では入れ子コマンドと me（現在値）可。
+  rep は部分文字列のすべてを置換。split は行分割で N 行目。
+  join は引数文字列の連結（現在値は自動混入しない）。各引数は join 開始時点の同じ現在値を見る。
+  0 引数コマンドへの余分な引数は検証で通し実行時は無視。不足は検証エラー。裸の me は未知コマンド。
   left/right/mid/cut/ins の位置・長さ引数は整数または式（len(), len("…"), pos("…"), + - ()）。
 """
 from __future__ import annotations
@@ -23,12 +25,19 @@ _EXCEL_SERIAL_INT_MIN = 10000
 from core.core_log import get_logger
 
 logger = get_logger(__name__)
-__version__ = "0.2.0"
+__version__ = "0.3.0"
+
+SHAPE_EXPR_MAX_LEN = 200
+SHAPE_EXPR_MAX_DEPTH = 8
+SHAPE_CMD_NEST_MAX_DEPTH = 8
+
+_CMD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def tokenize_shape_script_with_spans(script: str) -> tuple[list[str], list[tuple[int, int]]]:
     """
-    tokenize_shape_script と同じ分割に加え、strip 後 script 内の各トークン [start, end) を返す。
+    先頭レベルで `,` / `;` 分割（クォート内・括弧深度>0 では区切らない）。
+    トークンが "…" のみのときは従来どおり中身を返す。それ以外は元部分文字列（括弧付きコマンド用）。
     """
     s = script.strip()
     if not s:
@@ -61,26 +70,49 @@ def tokenize_shape_script_with_spans(script: str) -> tuple[list[str], list[tuple
                     buf.append(s[i])
                     i += 1
             tokens.append("".join(buf))
-        else:
-            while i < n and s[i] not in ",;":
+            char_spans.append((tok_start, i))
+            continue
+        depth = 0
+        in_q = False
+        while i < n:
+            c = s[i]
+            if in_q:
+                if c == '"':
+                    if i + 1 < n and s[i + 1] == '"':
+                        i += 2
+                    else:
+                        in_q = False
+                        i += 1
+                else:
+                    i += 1
+                continue
+            if c == '"':
+                in_q = True
                 i += 1
-            tokens.append(s[tok_start:i].strip())
+                continue
+            if c == "(":
+                depth += 1
+                i += 1
+                continue
+            if c == ")":
+                depth = max(0, depth - 1)
+                i += 1
+                continue
+            if c in ",;" and depth == 0:
+                break
+            i += 1
+        tokens.append(s[tok_start:i].strip())
         char_spans.append((tok_start, i))
     return tokens, char_spans
 
 
 def tokenize_shape_script(script: str) -> list[str]:
     """
-    先頭レベルでカンマ `,` またはセミコロン `;` で分割（コマンド境界の明示用に `;` 可）。
-    ダブルクォート内はいずれも区切りにしない。"" は " 一文字。
-    前後空白はトークンごとに strip（クォート内は保持）。
+    先頭レベルでカンマ `,` またはセミコロン `;` で分割。
+    ダブルクォート内および () 内では区切らない。"" は " 一文字。
     """
     tokens, _ = tokenize_shape_script_with_spans(script)
     return tokens
-
-
-SHAPE_EXPR_MAX_LEN = 200
-SHAPE_EXPR_MAX_DEPTH = 8
 
 _INT_LITERAL_RE = re.compile(r"^-?\d+$")
 
@@ -517,8 +549,273 @@ def shape_datetime_value(val: Any) -> str:
     return s
 
 
-def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
+def _split_paren_arg_list(inner: str) -> list[str]:
+    """括弧内引数を `,` / `;` で分割（ネスト括弧・クォート尊重）。空引数も保持。"""
+    s = inner
+    if s.strip() == "":
+        return []
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_q = False
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if in_q:
+            buf.append(c)
+            if c == '"':
+                if i + 1 < n and s[i + 1] == '"':
+                    buf.append('"')
+                    i += 2
+                    continue
+                in_q = False
+            i += 1
+            continue
+        if c == '"':
+            in_q = True
+            buf.append(c)
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            buf.append(c)
+            i += 1
+            continue
+        if c == ")":
+            depth = max(0, depth - 1)
+            buf.append(c)
+            i += 1
+            continue
+        if c in ",;" and depth == 0:
+            out.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    out.append("".join(buf).strip())
+    return out
+
+
+def split_paren_invocation(tok: str) -> tuple[str, list[str]] | None:
+    """
+    `cmd(...)` / `cmd()` なら (cmd, raw_args)。該当しなければ None。
+    旧形の裸コマンド名は None。
+    """
+    t = (tok or "").strip()
+    if not t or "(" not in t:
+        return None
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(", t)
+    if not m:
+        return None
+    cmd = m.group(1)
+    open_i = m.end() - 1
+    depth = 0
+    in_q = False
+    i = open_i
+    n = len(t)
+    close_i = -1
+    while i < n:
+        c = t[i]
+        if in_q:
+            if c == '"':
+                if i + 1 < n and t[i + 1] == '"':
+                    i += 2
+                    continue
+                in_q = False
+            i += 1
+            continue
+        if c == '"':
+            in_q = True
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            if depth == 0:
+                close_i = i
+                break
+            i += 1
+            continue
+        i += 1
+    if close_i < 0:
+        return None
+    if t[close_i + 1 :].strip():
+        return None
+    inner = t[open_i + 1 : close_i]
+    return cmd, _split_paren_arg_list(inner)
+
+
+def _parse_quoted_literal(s: str) -> str | None:
+    """全体が "…" なら中身（"" → "）。でなければ None。"""
+    t = s.strip()
+    if len(t) < 2 or t[0] != '"':
+        return None
+    i = 1
+    buf: list[str] = []
+    n = len(t)
+    while i < n:
+        if t[i] == '"':
+            if i + 1 < n and t[i + 1] == '"':
+                buf.append('"')
+                i += 2
+                continue
+            if i + 1 == n or t[i + 1 :].strip() == "":
+                return "".join(buf)
+            return None
+        buf.append(t[i])
+        i += 1
+    return None
+
+
+def _is_known_shape_command_name(name: str) -> bool:
+    return (name or "").strip().lower() in _SHAPE_KNOWN_COMMANDS
+
+
+def eval_shape_arg(raw: str, text: str, *, depth: int = 0) -> str:
+    """
+    () 形の引数を評価。me=現在値、"…"=リテラル、既知cmd(…)=入れ子適用、それ以外は素通し。
+    pos()/len() など式用の括弧は入れ子コマンドにしない（数値引数側で式評価する）。
+    """
+    if depth > SHAPE_CMD_NEST_MAX_DEPTH:
+        logger.debug("[VALUE_SHAPE] nest depth exceeded")
+        return text
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.lower() == "me":
+        return text
+    lit = _parse_quoted_literal(s)
+    if lit is not None:
+        return lit
+    inv = split_paren_invocation(s)
+    if inv is not None and _is_known_shape_command_name(inv[0]):
+        cmd, args = inv
+        return apply_invocation(text, cmd, args, depth=depth + 1)
+    return s
+
+
+def _resolve_numeric_arg(raw: str, text: str, *, depth: int) -> int | None:
+    """数値／式引数。me・入れ子コマンド結果は整数化。pos/len 式は従来どおり _parse_numeric_arg。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.lower() == "me":
+        return _parse_int(text)
+    lit = _parse_quoted_literal(s)
+    if lit is not None:
+        return _parse_int(lit)
+    inv = split_paren_invocation(s)
+    if inv is not None and _is_known_shape_command_name(inv[0]):
+        ev = eval_shape_arg(s, text, depth=depth)
+        return _parse_int(ev)
+    return _parse_numeric_arg(s, text)
+
+
+_SHAPE_KNOWN_COMMANDS = frozenset(
+    {
+        "trim",
+        "split",
+        "left",
+        "right",
+        "rep",
+        "mid",
+        "cut",
+        "ins",
+        "padr",
+        "padl",
+        "pad_r",
+        "pad_l",
+        "padright",
+        "padleft",
+        "case",
+        "wide",
+        "date",
+        "join",
+    }
+)
+
+
+def apply_invocation(
+    text: str, cmd: str, raw_args: list[str], *, depth: int = 0
+) -> str:
+    """1 コマンドを適用（() 形・入れ子用）。raw_args は未評価の引数文字列。"""
+    if depth > SHAPE_CMD_NEST_MAX_DEPTH:
+        return text
     c = cmd.strip().lower()
+    t = text
+    if c == "join":
+        parts = [eval_shape_arg(a, t, depth=depth) for a in raw_args]
+        return "".join(parts)
+    if c in ("trim", "wide", "date"):
+        return _apply_one_command(t, c, [])
+    if c == "split":
+        if len(raw_args) < 1:
+            return t
+        ln = _resolve_numeric_arg(raw_args[0], t, depth=depth)
+        if ln is None:
+            ln = _parse_int(eval_shape_arg(raw_args[0], t, depth=depth))
+        if ln is None:
+            return t
+        return _shape_split(t, ln)
+    if c in ("left", "right"):
+        if len(raw_args) < 1:
+            return t
+        n = _resolve_numeric_arg(raw_args[0], t, depth=depth)
+        if n is None:
+            return t
+        return _shape_left(t, n) if c == "left" else _shape_right(t, n)
+    if c == "rep":
+        if len(raw_args) < 2:
+            return t
+        old = eval_shape_arg(raw_args[0], t, depth=depth)
+        new = eval_shape_arg(raw_args[1], t, depth=depth)
+        return _shape_rep_all(t, old, new)
+    if c in ("mid", "cut"):
+        if len(raw_args) < 2:
+            return t
+        a = _resolve_numeric_arg(raw_args[0], t, depth=depth)
+        b = _resolve_numeric_arg(raw_args[1], t, depth=depth)
+        if a is None or b is None:
+            return t
+        return _shape_mid(t, a, b) if c == "mid" else _shape_cut(t, a, b)
+    if c == "ins":
+        if len(raw_args) < 2:
+            return t
+        pos = _resolve_numeric_arg(raw_args[0], t, depth=depth)
+        if pos is None:
+            return t
+        ins = eval_shape_arg(raw_args[1], t, depth=depth)
+        return _shape_ins(t, pos, ins)
+    if c in ("padr", "pad_r", "padright", "padl", "pad_l", "padleft"):
+        if len(raw_args) < 2:
+            return t
+        w = _parse_int(eval_shape_arg(raw_args[0], t, depth=depth))
+        if w is None:
+            w = _parse_int(raw_args[0].strip())
+        if w is None:
+            return t
+        pad = eval_shape_arg(raw_args[1], t, depth=depth)
+        return _shape_pad(t, w, pad, left=c.startswith("padl") or c in ("pad_l", "padleft"))
+    if c == "case":
+        if len(raw_args) < 1:
+            return t
+        mode = eval_shape_arg(raw_args[0], t, depth=depth)
+        return _shape_case(t, mode)
+    if c:
+        logger.debug("[VALUE_SHAPE] unknown command: %s", c)
+    return t
+
+
+def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
+    """旧形用: args は既にトークン化済み（文字列リテラルはクォート除去済み）。"""
+    c = cmd.strip().lower()
+    if c == "join":
+        return "".join(args)
     if c == "trim":
         return _shape_trim(t)
     if c == "split":
@@ -596,63 +893,71 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
     return t
 
 
+def _legacy_arg_count(cmd: str) -> int:
+    c = cmd.strip().lower()
+    if c in ("trim", "wide", "date"):
+        return 0
+    if c in ("split", "left", "right", "case"):
+        return 1
+    if c in (
+        "rep",
+        "mid",
+        "cut",
+        "ins",
+        "padr",
+        "padl",
+        "pad_r",
+        "pad_l",
+        "padright",
+        "padleft",
+    ):
+        return 2
+    if c == "join":
+        return -1  # variable; legacy join,a,b not primary — treat remaining until next cmd
+    return 0
+
+
 def parse_and_apply_commands(text: str, tokens: list[str]) -> str:
-    """トークン列をコマンドと引数に解釈し左から適用する。"""
+    """トークン列をコマンドと引数に解釈し左から適用する（() 形と旧形）。"""
     t = text
     i = 0
     n = len(tokens)
     while i < n:
-        cmd = tokens[i]
+        tok = tokens[i]
         i += 1
-        if not cmd:
+        if not (tok or "").strip():
             continue
+        inv = split_paren_invocation(tok)
+        if inv is not None:
+            cmd, raw_args = inv
+            t = apply_invocation(t, cmd, raw_args, depth=0)
+            continue
+        cmd = tok
         c0 = cmd.strip().lower()
-        args: list[str] = []
-        if c0 == "trim" or c0 == "wide" or c0 == "date":
+        if c0 == "join":
+            # 旧形 join,a,b,… : 次の「裸の既知コマンド」手前までを引数にする
+            args = []
+            while i < n:
+                raw_n = tokens[i]
+                if split_paren_invocation(raw_n) is not None:
+                    break
+                bare = raw_n.strip()
+                if bare.lower() in _SHAPE_KNOWN_COMMANDS and "(" not in bare:
+                    break
+                args.append(raw_n)
+                i += 1
+            t = _apply_one_command(t, "join", args)
+            continue
+        nargs = _legacy_arg_count(c0)
+        args = []
+        if nargs == 0:
             t = _apply_one_command(t, cmd, [])
             continue
-        if c0 == "split":
-            if i < n:
-                args = [tokens[i]]
-                i += 1
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 in ("left", "right"):
-            if i < n:
-                args = [tokens[i]]
-                i += 1
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 == "rep":
-            if i + 1 < n:
-                args = [tokens[i], tokens[i + 1]]
-                i += 2
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 in ("mid", "cut"):
-            if i + 1 < n:
-                args = [tokens[i], tokens[i + 1]]
-                i += 2
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 == "ins":
-            if i + 1 < n:
-                pos_tok = tokens[i]
-                ins_tok = tokens[i + 1]
-                args = [pos_tok, ins_tok]
-                i += 2
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 in ("padr", "pad_r", "padright", "padl", "pad_l", "padleft"):
-            if i + 1 < n:
-                args = [tokens[i], tokens[i + 1]]
-                i += 2
-            t = _apply_one_command(t, cmd, args)
-            continue
-        if c0 == "case":
-            if i < n:
-                args = [tokens[i]]
-                i += 1
+        if nargs > 0:
+            for _ in range(nargs):
+                if i < n:
+                    args.append(tokens[i])
+                    i += 1
             t = _apply_one_command(t, cmd, args)
             continue
         t = _apply_one_command(t, cmd, [])
@@ -688,27 +993,76 @@ def _validate_shape_numeric_token(tok: str, cmd: str) -> tuple[bool, str]:
     return (False, "%s の引数が不正です: %s" % (cmd, err))
 
 
-_SHAPE_KNOWN_COMMANDS = frozenset(
-    {
-        "trim",
-        "split",
-        "left",
-        "right",
-        "rep",
-        "mid",
-        "cut",
-        "ins",
-        "padr",
-        "padl",
-        "pad_r",
-        "pad_l",
-        "padright",
-        "padleft",
-        "case",
-        "wide",
-        "date",
-    }
-)
+def _validate_paren_arg_list(cmd: str, raw_args: list[str], *, depth: int = 0) -> tuple[bool, str]:
+    """() 形の引数をざっくり検証（入れ子コマンド名・数値式）。"""
+    if depth > SHAPE_CMD_NEST_MAX_DEPTH:
+        return (False, "コマンドの入れ子が深すぎます（上限 %d）" % SHAPE_CMD_NEST_MAX_DEPTH)
+    c = cmd.strip().lower()
+    if c not in _SHAPE_KNOWN_COMMANDS:
+        return (False, "未知のコマンド: %s" % cmd)
+    if c == "join":
+        for a in raw_args:
+            ok, err = _validate_shape_arg_value(a, depth=depth)
+            if not ok:
+                return (False, err)
+        return (True, "")
+    if c in ("trim", "wide", "date"):
+        return (True, "")
+    need = _legacy_arg_count(c)
+    if need > 0 and len(raw_args) < need:
+        return (False, "%s の引数が不足しています" % c)
+
+    def _num_or_nested(a: str) -> tuple[bool, str]:
+        s = a.strip()
+        if s.lower() == "me" or _parse_quoted_literal(s) is not None:
+            return _validate_shape_arg_value(s, depth=depth)
+        inv = split_paren_invocation(s)
+        if inv is not None and _is_known_shape_command_name(inv[0]):
+            return _validate_shape_arg_value(s, depth=depth)
+        return _validate_shape_numeric_token(s, c)
+
+    if c in ("left", "right", "split"):
+        return _num_or_nested(raw_args[0])
+    if c in ("mid", "cut"):
+        ok, err = _num_or_nested(raw_args[0])
+        if not ok:
+            return (False, err)
+        return _num_or_nested(raw_args[1])
+    if c == "ins":
+        ok, err = _num_or_nested(raw_args[0])
+        if not ok:
+            return (False, err)
+        return _validate_shape_arg_value(raw_args[1], depth=depth)
+    if c == "rep":
+        ok, err = _validate_shape_arg_value(raw_args[0], depth=depth)
+        if not ok:
+            return (False, err)
+        return _validate_shape_arg_value(raw_args[1], depth=depth)
+    if c in ("padr", "padl", "pad_r", "pad_l", "padright", "padleft"):
+        a0 = raw_args[0].strip()
+        if _parse_int(a0) is None:
+            ok, err = _validate_shape_arg_value(a0, depth=depth)
+            if not ok:
+                return (False, "%s の引数が不正です" % c)
+        return _validate_shape_arg_value(raw_args[1], depth=depth)
+    if c == "case":
+        return _validate_shape_arg_value(raw_args[0], depth=depth)
+    return (True, "")
+
+
+def _validate_shape_arg_value(raw: str, *, depth: int) -> tuple[bool, str]:
+    s = (raw or "").strip()
+    if not s or s.lower() == "me":
+        return (True, "")
+    if _parse_quoted_literal(s) is not None:
+        return (True, "")
+    inv = split_paren_invocation(s)
+    if inv is not None and _is_known_shape_command_name(inv[0]):
+        return _validate_paren_arg_list(inv[0], inv[1], depth=depth + 1)
+    # bare expression / word / pos()・len() など式用括弧
+    if validate_shape_expr_syntax(s)[0]:
+        return (True, "")
+    return (True, "")  # case upper 等
 
 
 def _shape_error_tok_end_for_unknown(
@@ -717,8 +1071,12 @@ def _shape_error_tok_end_for_unknown(
     """未知コマンドエラー時: 次の既知コマンド名の手前までを同一コマンドとみなす。"""
     end_tok = cmd_start + 1
     while end_tok < n_tok:
-        t = tokens[end_tok].strip().lower()
-        if t in _SHAPE_KNOWN_COMMANDS:
+        raw = tokens[end_tok]
+        inv = split_paren_invocation(raw)
+        if inv is not None and inv[0].strip().lower() in _SHAPE_KNOWN_COMMANDS:
+            break
+        t = raw.strip().lower()
+        if t in _SHAPE_KNOWN_COMMANDS and "(" not in raw:
             break
         end_tok += 1
     return end_tok
@@ -730,7 +1088,6 @@ def _compile_shape_script_tokens(
     """
     トークン列を検証。
     戻り値: (ok, message, error_tok_start, error_tok_end)。
-    成功時は error_tok_* は 0。失敗時は [start, end) がエラーとなったコマンドのトークン範囲。
     """
     if not tokens:
         return (True, "", 0, 0)
@@ -738,17 +1095,36 @@ def _compile_shape_script_tokens(
     i = 0
     n_tok = len(tokens)
     while i < n_tok:
-        cmd = tokens[i].strip().lower()
-        if not cmd:
+        raw = tokens[i]
+        if not (raw or "").strip():
             i += 1
             continue
         cmd_start = i
+        inv = split_paren_invocation(raw)
+        if inv is not None:
+            cmd, args = inv
+            ok, err = _validate_paren_arg_list(cmd, args, depth=0)
+            if not ok:
+                return (False, err, cmd_start, cmd_start + 1)
+            i += 1
+            continue
+        cmd = raw.strip().lower()
         i += 1
         if cmd not in known:
             if re.fullmatch(r"-?\d+", cmd):
                 return (False, "不正なトークン: %s" % cmd, cmd_start, i)
             end_tok = _shape_error_tok_end_for_unknown(tokens, cmd_start, n_tok)
             return (False, "未知のコマンド: %s" % cmd, cmd_start, end_tok)
+        if cmd == "join":
+            while i < n_tok:
+                r2 = tokens[i]
+                if split_paren_invocation(r2) is not None:
+                    break
+                bare = r2.strip()
+                if bare.lower() in known and "(" not in bare:
+                    break
+                i += 1
+            continue
         if cmd == "rep":
             if i + 2 > n_tok:
                 return (False, "rep の引数が不足しています", cmd_start, n_tok)
@@ -859,13 +1235,31 @@ def shape_command_token_spans(tokens: list[str]) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     i = 0
     n = len(tokens)
+    known = _SHAPE_KNOWN_COMMANDS
     while i < n:
-        cmd = tokens[i].strip().lower()
-        if not cmd:
+        raw = tokens[i]
+        if not (raw or "").strip():
             i += 1
             continue
         start = i
+        inv = split_paren_invocation(raw)
+        if inv is not None:
+            spans.append((start, start + 1))
+            i += 1
+            continue
+        cmd = raw.strip().lower()
         i += 1
+        if cmd == "join":
+            while i < n:
+                r2 = tokens[i]
+                if split_paren_invocation(r2) is not None:
+                    break
+                bare = r2.strip()
+                if bare.lower() in known and "(" not in bare:
+                    break
+                i += 1
+            spans.append((start, i))
+            continue
         if cmd in ("trim", "wide", "date"):
             spans.append((start, i))
             continue

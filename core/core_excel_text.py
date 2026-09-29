@@ -34,18 +34,24 @@ def scalar_to_text(val: Any) -> str:
     return str(val)
 
 
+def strip_cell_newlines(s: str) -> str:
+    """セル内改行（\\n / \\r\\n / \\r）を除去する（例: 「電\\n源」→「電源」）。"""
+    if not s:
+        return s
+    if "\n" in s or "\r" in s:
+        return s.replace("\r\n", "").replace("\n", "").replace("\r", "")
+    return s
+
+
 def _coerce_cell_scalar_to_full_text(val: Any) -> str:
     """セル由来のスカラーを文字列化する。実装は scalar_to_text に寄せる。
 
     セル内改行（結合セルの折り返し等）は除去する（例: 「電\\n源」→「電源」）。
-    結合比較・抽出後処理の共通経路で使う（core leaf。svc に依存しない）。
+    結合比較・照合キーなど、整形 DSL を通さない経路で使う（core leaf。svc に依存しない）。
+    抽出後処理（チェック→整形）では改行を残したまま DSL を適用し、その後に
+    strip_cell_newlines する（split で採用行を選べるようにするため）。
     """
-    s = scalar_to_text(val)
-    if not s:
-        return s
-    if "\n" in s or "\r" in s:
-        s = s.replace("\r\n", "").replace("\n", "").replace("\r", "")
-    return s
+    return strip_cell_newlines(scalar_to_text(val))
 
 
 def as_excel_forced_text(val: Any) -> str:

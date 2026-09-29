@@ -34,6 +34,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from core.core_log import get_logger  # noqa: E402
+from core.core_excel_text import scalar_to_text  # noqa: E402
 from svc.data_agg_polars import get_polars as _get_polars  # noqa: E402
 from svc.data_agg_extract_limit import (  # noqa: E402
     record_extract_truncation_if_needed,
@@ -67,7 +68,6 @@ from svc.data_agg_excel_read import (  # noqa: E402
     extract_read_openpyxl_row,
 )
 from svc.data_agg_value_post import (  # noqa: E402
-    _coerce_cell_scalar_to_full_text,
     postprocess_cell_primary,
     postprocess_cell_primary_batch,
     postprocess_link_rule_value,
@@ -3211,7 +3211,7 @@ def _extract_from_cell_rule(
     for part in parts:
         cell_ref = _resolve_cell_with_offset(part, rule.get("row"), rule.get("col"))
         v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        chunks.append(_coerce_cell_scalar_to_full_text(v))
+        chunks.append(scalar_to_text(v))
     return postprocess_link_rule_value("".join(chunks), rdict)
 
 
@@ -3281,7 +3281,7 @@ def _extract_from_cell_rule_with_context(
     for part in parts:
         cell_ref = _resolve_cell_with_offset(part, row_off, col_off)
         v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        chunks.append(_coerce_cell_scalar_to_full_text(v))
+        chunks.append(scalar_to_text(v))
     return postprocess_link_rule_value("".join(chunks), rdict)
 
 

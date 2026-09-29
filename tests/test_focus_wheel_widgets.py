@@ -109,3 +109,24 @@ def test_spin_wheel_changes_when_focused(_app: QApplication) -> None:
 
     assert sb.value() != 5
     assert ev.isAccepted()
+
+
+def test_focus_wheel_widgets_use_strong_focus_not_wheel_focus(_app: QApplication) -> None:
+    """WheelFocus だとホバー＋ホイールでフォーカスが付くため StrongFocus に固定する。"""
+    host = QWidget()
+    host.show()
+    sb = FocusWheelSpinBox(host)
+    cb = FocusWheelComboBox(host)
+    sb.show()
+    cb.show()
+    _app.processEvents()
+    assert sb.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert cb.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert sb.focusPolicy() != Qt.FocusPolicy.WheelFocus
+    assert cb.focusPolicy() != Qt.FocusPolicy.WheelFocus
+    # 既定の QSpinBox は WheelFocus（回帰検知用の対照）
+    from PySide6.QtWidgets import QSpinBox
+
+    plain = QSpinBox(host)
+    assert plain.focusPolicy() == Qt.FocusPolicy.WheelFocus
+    host.close()

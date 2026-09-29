@@ -462,6 +462,122 @@ def test_table_row_file_paths_prefers_stored_iteration_paths() -> None:
     assert fps == stored
 
 
+def test_seed_pool_reads_result_path_header_pasu() -> None:
+    """結果付加列「パス」を seed の __file_path に使う（file_path レガシーのみ依存しない）。"""
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        table_row_file_paths_for_stacked_seed,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    headers = ["パス", "機器番号", "MAC"]
+    rows = [
+        [r"C:\origin\a.xlsx", "DEV1", "aa"],
+        [r"C:\origin\b.xlsx", "DEV2", "bb"],
+    ]
+    scan = [r"C:\scan\wrong1.xlsx", r"C:\scan\wrong2.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(
+        headers, rows, scan_paths=scan, path_header="パス"
+    )
+    assert fps == [r"C:\origin\a.xlsx", r"C:\origin\b.xlsx"]
+
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        row_file_paths=scan,
+        stacked_join=True,
+        path_header="パス",
+    )
+    assert pool[0]["__file_path"] == r"C:\origin\a.xlsx"
+    assert pool[1]["__file_path"] == r"C:\origin\b.xlsx"
+
+
+def test_seed_pool_does_not_treat_master_item_named_pasu_as_origin() -> None:
+    """結果付加 OFF 時、マスタ項目名「パス」を由来パス列と誤認しない。"""
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        table_row_file_paths_for_stacked_seed,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    headers = ["パス", "機器番号"]
+    rows = [["NOT_A_FILE", "DEV1"]]
+    scan = [r"C:\scan\real.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(headers, rows, scan_paths=scan)
+    assert fps == [scan[0]]
+
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        row_file_paths=scan,
+        stacked_join=True,
+    )
+    assert pool[0]["__file_path"] == scan[0]
+    assert pool[0]["パス"] == "NOT_A_FILE"
+
+
+def test_seed_pool_file_only_resolves_basename_not_device_scan_order() -> None:
+    """ファイル付与のみ: 「ファイル」列 basename を scan 照合し、装置×scan[0] 付け替えをしない。"""
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        table_row_file_paths_for_stacked_seed,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    hist = r"C:\data\2026年度ODN-375 ユニット出荷履歴V2.xlsm"
+    plant_a = r"C:\data\A0511C3132100_東和発電所.xlsm"
+    plant_b = r"C:\data\A0511C3132100_東和電力所(新事務所).xlsm"
+    scan = [hist, plant_a, plant_b]
+    headers = ["ファイル", "局名", "実装装置番号"]
+    rows = [
+        ["A0511C3132100_東和発電所.xlsm", "東和発電所", "DEV-A"],
+        ["A0511C3132100_東和発電所.xlsm", "東和発電所", "DEV-A"],
+        ["A0511C3132100_東和電力所(新事務所).xlsm", "東和電力所(新事務所)", "DEV-B"],
+    ]
+    # 汚染済み stored（装置順×scan[0]=出荷履歴）があってもファイル列が勝つ
+    poisoned = [hist, hist, plant_a]
+    fps = table_row_file_paths_for_stacked_seed(
+        headers,
+        rows,
+        scan_paths=scan,
+        stored_row_paths=poisoned,
+        file_header="ファイル",
+    )
+    assert fps == [plant_a, plant_a, plant_b]
+
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        row_file_paths=fps,
+        stacked_join=True,
+        file_header="ファイル",
+    )
+    assert pool[0]["__file_path"] == plant_a
+    assert pool[2]["__file_path"] == plant_b
+
+
+def test_seed_pool_does_not_treat_master_item_named_file_as_origin() -> None:
+    """結果付加 OFF 時、マスタ項目名「ファイル」を結果付加列と誤認しない。"""
+    from svc.data_agg_master_preview import table_row_file_paths_for_stacked_seed  # noqa: WPS433
+
+    headers = ["ファイル", "機器番号"]
+    rows = [["NOT_ORIGIN.xlsm", "DEV1"]]
+    scan = [r"C:\scan\real.xlsx", r"C:\scan\other.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(headers, rows, scan_paths=scan)
+    assert fps == [scan[0]]
+
+
+def test_seed_pool_prefers_custom_path_header_over_pasu() -> None:
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+
+    headers = ["フルパス", "パス", "機器番号"]
+    rows = [[r"C:\custom\x.xlsx", r"C:\legacy\y.xlsx", "DEV1"]]
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        stacked_join=True,
+        path_header="フルパス",
+    )
+    assert pool[0]["__file_path"] == r"C:\custom\x.xlsx"
+
+
 def test_patch_stacked_join_pool_skips_multi_distinct_device_ids() -> None:
     from svc.svc_data_agg import _patch_stacked_join_pool_row_join_targets  # noqa: WPS433
 

@@ -398,7 +398,17 @@ def set_widget_tooltip(widget: Any, text: str | None) -> None:
 
 
 class _FocusWheelGuardMixin:
-    """SpinBox / ComboBox: フォーカス中のみマウスホイールで値を変更する。"""
+    """
+    SpinBox / ComboBox: フォーカス中のみマウスホイールで値を変更する。
+
+    QSpinBox / QComboBox の既定は WheelFocus のため、ポインタが乗っただけの
+    ホイール操作でフォーカスが付き値が変わってしまう。StrongFocus に固定し、
+    クリックまたは Tab で選択したあとだけホイールを有効にする。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         if not self.hasFocus():
@@ -408,11 +418,11 @@ class _FocusWheelGuardMixin:
 
 
 class FocusWheelSpinBox(_FocusWheelGuardMixin, QSpinBox):
-    """フォーカス中のみホイールで値変更する QSpinBox。"""
+    """クリック／Tab でフォーカスした後のみホイールで値変更する QSpinBox。"""
 
 
 class FocusWheelComboBox(_FocusWheelGuardMixin, QComboBox):
-    """フォーカス中のみホイールで選択変更する QComboBox。"""
+    """クリック／Tab でフォーカスした後のみホイールで選択変更する QComboBox。"""
 
 
 def apply_common_window_flags(w: QWidget) -> None:
