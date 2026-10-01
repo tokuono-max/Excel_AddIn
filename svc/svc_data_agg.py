@@ -361,20 +361,32 @@ def _log_data_agg_ui_ipc(
 
 
 def _excel_options_log_summary(raw: Any) -> str:
-    """イベントログ「書込み方式」列用（Excel タブの出力先・書込み方式に相当）。"""
+    """イベントログ「書込み方式」列用（Excel タブの現在選択に相当）。
+
+    - アクティブシート: ``アクティブシート / {追加|上書き|クリア後書込み|セル指定}``
+    - 新規シート: ``新規シート / {シナリオ名_連番|シート名}``
+    """
     from svc import svc_data_agg_scenario as sm
 
     ex = sm.normalize_excel_options(raw if isinstance(raw, dict) else {})
     ot = str(ex.get("output_target") or "active_sheet")
-    wm = str(ex.get("write_mode") or "append")
-    out_j = "アクティブシート" if ot == "active_sheet" else "新規シート"
+    if ot == "new_sheet":
+        nsr = str(ex.get("new_sheet_name_rule") or "scenario_name_seq").strip().lower()
+        rule_j = {
+            "scenario_name_seq": "シナリオ名_連番",
+            "scenario_datetime": "シナリオ名_連番",
+            "scenario_seq": "シナリオ名_連番",
+            "custom_sheet_name": "シート名",
+        }.get(nsr, "シナリオ名_連番")
+        return "新規シート / %s" % rule_j
+    wm = str(ex.get("write_mode") or "append").strip().lower()
     wm_j = {
         "append": "追加",
         "overwrite": "上書き",
-        "clear_write": "クリア書込み",
-        "anchor_cell": "指定セル",
+        "clear_write": "クリア後書込み",
+        "anchor_cell": "セル指定",
     }.get(wm, wm)
-    return "%s / %s" % (out_j, wm_j)
+    return "アクティブシート / %s" % wm_j
 
 
 def _try_apply_new_sheet_view_options(

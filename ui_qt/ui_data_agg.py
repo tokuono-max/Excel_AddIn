@@ -1774,16 +1774,16 @@ class _DataAggMainWindow(QDialog):
             _u("EXCEL_WRITE_MODE_OVERWRITE", "上書き"), "overwrite"
         )
         self._combo_excel_write_mode.addItem(
-            _u("EXCEL_WRITE_MODE_CLEAR_WRITE", "クリア書込み"), "clear_write"
+            _u("EXCEL_WRITE_MODE_CLEAR_WRITE", "クリア後書込み"), "clear_write"
         )
         self._combo_excel_write_mode.addItem(
-            _u("EXCEL_WRITE_MODE_ANCHOR", "指定セル"), "anchor_cell"
+            _u("EXCEL_WRITE_MODE_ANCHOR", "セル指定"), "anchor_cell"
         )
         _excel_compact_control(self._combo_excel_write_mode, _EXCEL_COMBO_WRITE_MODE_W)
         _apply_tip(
             self._combo_excel_write_mode,
             "TOOLTIP_EXCEL_WRITE_MODE",
-            "アクティブシート選択時の書き込み方式です（追加・上書き・クリア書込み・指定セル）。",
+            "アクティブシート選択時の書き込み方式です（追加・上書き・クリア後書込み・セル指定）。",
         )
         row_wm.addWidget(self._lbl_excel_write_mode)
         row_wm.addWidget(self._combo_excel_write_mode, 0)
@@ -3589,7 +3589,7 @@ class _DataAggMainWindow(QDialog):
             _data_agg_warn_debug_open_failed(self, t_dbg, exc)
 
     def _on_scenario_export(self) -> None:
-        """読込済みシナリオを、ソース1行単位で Excel シートへ書き出す（既定シート名＝ファイル stem）。"""
+        """読込済みシナリオを、ソース1行単位で Excel シートへ書き出す（既定タブ名＝シナリオ内容_{stem}）。"""
         if bool(getattr(self, "_batch_ui_locked", False)):
             show_warning_notice(
                 self,
@@ -3628,9 +3628,11 @@ class _DataAggMainWindow(QDialog):
             )
             return
         stem = Path(self._scenario_path).stem
-        base_name = write_mod.sanitize_excel_tab_name(stem)
+        # タブ名: シナリオ内容_{シナリオ名}（Excel 31 文字制限は sanitize 側）
+        raw_tab = "シナリオ内容_%s" % (stem or "シナリオ")
+        base_name = write_mod.sanitize_excel_tab_name(raw_tab)
         if not base_name:
-            base_name = "シナリオ"
+            base_name = write_mod.sanitize_excel_tab_name("シナリオ内容") or "シナリオ内容"
         screen_cfg = (_get_cfg().get("SCREENS") or {}).get("SCENARIO_EDIT") or {}
         headers, rows = build_scenario_definition_sheet_matrix_with_headers(
             data.get("items") or [],

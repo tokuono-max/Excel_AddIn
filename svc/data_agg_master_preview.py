@@ -679,12 +679,20 @@ def run_preview_compute(
     cancel_check: Optional[Callable[..., None]] = None,
     iteration_contexts_out: list[dict[str, Any]] | None = None,
     scan_root: str | None = None,
+    source_display_paths: list[str] | None = None,
+    skip_network_stage: bool = False,
 ) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
-    """マスタプレビュー用に compute_batch_table_rows を実行する。"""
+    """マスタプレビュー用に compute_batch_table_rows を実行する。
+
+    skip_network_stage=True のとき file_paths を io として使い、ステージ作成／掃除は
+    呼び出し側（共有 ScenarioDebugStageSession 等）に任せる。
+    このとき source_display_paths があれば表示用パスとして渡す。
+    """
     from svc.data_agg_cancel import DataAggCancelled  # noqa: WPS433
     from svc.svc_data_agg import compute_batch_table_rows  # noqa: WPS433
 
     paths = [str(p) for p in file_paths]
+    owns_stage_cleanup = not skip_network_stage
 
     def _compute(
         io_paths: list[str],
@@ -704,6 +712,14 @@ def run_preview_compute(
         )
 
     try:
+        if skip_network_stage:
+            disp = (
+                [str(p) for p in source_display_paths]
+                if source_display_paths is not None
+                else None
+            )
+            return _compute(paths, display_paths=disp)
+
         from core import core_env
         from svc.data_agg_network_stage import network_stage_batch
         from svc.data_agg_path_network import path_is_network
@@ -728,12 +744,15 @@ def run_preview_compute(
         _logger.exception("master preview compute_batch_table_rows failed")
         return [], [], [], 0
     finally:
-        try:
-            from svc.data_agg_network_stage import cleanup_all_network_stage_dirs
-
-            cleanup_all_network_stage_dirs()
-        except Exception:
+        if not owns_stage_cleanup:
             pass
+        else:
+            try:
+                from svc.data_agg_network_stage import cleanup_all_network_stage_dirs
+
+                cleanup_all_network_stage_dirs()
+            except Exception:
+                pass
 
 
 def run_production_parity_preview_compute(

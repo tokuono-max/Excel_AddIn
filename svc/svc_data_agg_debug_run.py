@@ -194,13 +194,27 @@ class ScenarioDebugStageSession:
 
     def _clear_unlocked(self) -> None:
         batch = self._batch
-        self._batch = None
         self._scan_root = None
         self._read_map = {}
         self._covered = frozenset()
-        if batch is not None:
+        if batch is None:
+            self._batch = None
+            return
+        try:
+            ok = batch.cleanup()
+        except Exception:
+            ok = False
+        # 削除失敗時は batch を残し、次回 clear / cleanup_all で再試行する
+        if ok:
+            self._batch = None
+        else:
+            self._batch = batch
             try:
-                batch.cleanup()
+                from core.core_log import get_logger
+
+                get_logger(__name__).warning(
+                    "[DATA_AGG_STAGE] session clear incomplete; batch retained for retry"
+                )
             except Exception:
                 pass
 

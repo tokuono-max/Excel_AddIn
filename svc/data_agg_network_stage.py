@@ -46,32 +46,119 @@ def unregister_stage_dir(path: Path | None) -> None:
         _registered_stage_dirs.discard(key)
 
 
-def _force_remove_stage_dir(path: Path) -> bool:
+# ロック解放待ちの短いリトライ（秒）。最終失敗時は登録を残し次回 cleanup_all で再試行する。
+_REMOVE_RETRY_DELAYS_SEC: tuple[float, ...] = (0.05, 0.2, 0.5, 1.0)
+
+
+def _force_remove_stage_dir(path: Path, *, retries: Sequence[float] | None = None) -> bool:
+    """ステージ dir を削除する。成功時のみ True（dir が無い場合も True）。"""
+    if not path.exists():
+        return True
     if not path.is_dir():
         return False
+    delays = list(_REMOVE_RETRY_DELAYS_SEC if retries is None else retries)
+    attempts = 1 + len(delays)
+    last_err: BaseException | None = None
+    for i in range(attempts):
+        try:
+            _remove_orphan_part_files(path)
+            _remove_empty_dirs(path, remove_root=True)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            if not path.exists():
+                return True
+        except OSError as e:
+            last_err = e
+        if i < len(delays):
+            try:
+                time.sleep(float(delays[i]))
+            except Exception:
+                pass
     try:
-        _remove_orphan_part_files(path)
-        _remove_empty_dirs(path, remove_root=True)
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        return not path.is_dir()
-    except OSError as e:
-        logger.warning("[DATA_AGG_STAGE] force remove failed dir=%s err=%s", path, e)
-        return False
+        logger.warning(
+            "[DATA_AGG_STAGE] force remove incomplete dir=%s exists=%s err=%s",
+            path,
+            path.exists(),
+            last_err,
+        )
+    except Exception:
+        pass
+    return not path.exists()
 
 
 def cleanup_all_network_stage_dirs(*, prune_orphans: bool = True) -> int:
-    """登録済みステージ dir を削除。マスタデバッグ終了・キャンセル後の掃除用。"""
+    """登録済みステージ dir を削除。マスタ／シナリオデバッグ終了・キャンセル後の掃除用。
+
+    削除に失敗した dir はレジストリに残し、次回呼び出しで再試行する。
+    prune_orphans 時は非登録残骸を年齢 0（即時）で掃除する（明示クリーンアップ経路）。
+    """
     with _registry_lock:
-        dirs = [Path(p) for p in _registered_stage_dirs]
+        dirs = [Path(p) for p in list(_registered_stage_dirs)]
     removed = 0
     for sd in dirs:
         if _force_remove_stage_dir(sd):
             removed += 1
-        unregister_stage_dir(sd)
+            unregister_stage_dir(sd)
+        else:
+            try:
+                logger.warning(
+                    "[DATA_AGG_STAGE] cleanup_all kept registered (still on disk) dir=%s",
+                    sd,
+                )
+            except Exception:
+                pass
     if prune_orphans:
-        # 実行中以外（非登録）の残骸は中身ごと削除（短時間経過でも掃除）
-        removed += _prune_stale_stage_dirs(max_age_sec=60)
+        # 明示掃除経路では年齢ゲートなし（部分削除残骸を即拾う）
+        removed += _prune_stale_stage_dirs(max_age_sec=0)
+    return removed
+
+
+def wipe_data_agg_stage_base(*, include_registered: bool = True) -> int:
+    """
+    ``data_agg_stage`` 配下の UUID dir をすべて削除試行する（デバッグダイアログ閉鎖用）。
+
+    include_registered=True のときは登録中も含めて消す（閉鎖時は自プロセスの
+    ステージを残さない）。失敗した登録 dir はレジストリに残す。
+    """
+    base = _stage_temp_base()
+    if not base.is_dir():
+        return 0
+    removed = 0
+    with _registry_lock:
+        active = set(_registered_stage_dirs)
+    try:
+        children = list(base.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_dir():
+            continue
+        try:
+            key = str(child.resolve())
+        except OSError:
+            key = str(child)
+        if (not include_registered) and key in active:
+            continue
+        if _force_remove_stage_dir(child):
+            removed += 1
+            unregister_stage_dir(child)
+            try:
+                logger.info("[DATA_AGG_STAGE] wipe dir=%s", child)
+            except Exception:
+                pass
+        else:
+            try:
+                logger.warning(
+                    "[DATA_AGG_STAGE] wipe incomplete dir=%s registered=%s",
+                    child,
+                    key in active,
+                )
+            except Exception:
+                pass
+    try:
+        _remove_empty_dirs(base, remove_root=False)
+    except Exception:
+        pass
     return removed
 
 
@@ -90,22 +177,35 @@ class NetworkStageBatch:
         key = normalize_source_path(io_path)
         return self._norm_to_display.get(key, str(io_path))
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> bool:
+        """ステージ dir を削除する。成功（または元々無し）なら True。
+
+        削除失敗時はレジストリに残し stage_dir も保持して再試行可能にする。
+        """
         sd = self.stage_dir
         if sd is None:
-            return
-        try:
-            if sd.is_dir():
-                _remove_orphan_part_files(sd)
-                _remove_empty_dirs(sd, remove_root=True)
-                if sd.is_dir():
-                    shutil.rmtree(sd, ignore_errors=True)
-                logger.info("[DATA_AGG_STAGE] cleanup dir=%s", sd)
-        except OSError as e:
-            logger.warning("[DATA_AGG_STAGE] cleanup failed dir=%s err=%s", sd, e)
-        finally:
+            return True
+        if not sd.exists():
             unregister_stage_dir(sd)
             self.stage_dir = None
+            return True
+        ok = _force_remove_stage_dir(sd)
+        if ok:
+            try:
+                logger.info("[DATA_AGG_STAGE] cleanup dir=%s", sd)
+            except Exception:
+                pass
+            unregister_stage_dir(sd)
+            self.stage_dir = None
+            return True
+        try:
+            logger.warning(
+                "[DATA_AGG_STAGE] cleanup incomplete dir=%s (kept registered for retry)",
+                sd,
+            )
+        except Exception:
+            pass
+        return False
 
 
 def _stage_temp_base() -> Path:

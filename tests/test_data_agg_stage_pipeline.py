@@ -30,13 +30,41 @@ def test_on_file_staged_callback_local_passthrough(tmp_path: Path) -> None:
     assert batch.stage_dir is None
 
 
+def test_wipe_data_agg_stage_base_removes_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from svc.data_agg_network_stage import wipe_data_agg_stage_base
+
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._stage_temp_base",
+        lambda: tmp_path / "data_agg_stage",
+    )
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._REMOVE_RETRY_DELAYS_SEC",
+        (),
+    )
+    base = tmp_path / "data_agg_stage"
+    base.mkdir(parents=True, exist_ok=True)
+    a = base / "aaa"
+    b = base / "bbb"
+    a.mkdir()
+    b.mkdir()
+    (a / "1.xlsx").write_bytes(b"1")
+    (b / "2.xlsx").write_bytes(b"2")
+    register_stage_dir(a)
+    n = wipe_data_agg_stage_base(include_registered=True)
+    assert n >= 2
+    assert not a.exists()
+    assert not b.exists()
+
+
 def test_cleanup_all_registered_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "svc.data_agg_network_stage._stage_temp_base",
         lambda: tmp_path / "data_agg_stage",
     )
     base = tmp_path / "data_agg_stage"
-    base.mkdir(parents=True)
+    base.mkdir(parents=True, exist_ok=True)
     sd = base / "abc123"
     sd.mkdir()
     (sd / "f.xlsx").write_bytes(b"1")
@@ -44,6 +72,92 @@ def test_cleanup_all_registered_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cleanup_all_network_stage_dirs(prune_orphans=False) >= 1
     assert not sd.is_dir()
     unregister_stage_dir(sd)
+
+
+def test_cleanup_keeps_registered_when_remove_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """削除失敗時は unregister せず、次回 cleanup_all で再試行できる。"""
+    from svc import data_agg_network_stage as ns
+
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._stage_temp_base",
+        lambda: tmp_path / "data_agg_stage",
+    )
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._REMOVE_RETRY_DELAYS_SEC",
+        (),
+    )
+    base = tmp_path / "data_agg_stage"
+    base.mkdir(parents=True)
+    sd = base / "locked_dir"
+    sd.mkdir()
+    (sd / "f.xlsx").write_bytes(b"1")
+    register_stage_dir(sd)
+
+    real_force = ns._force_remove_stage_dir
+    fail_once = {"n": True}
+
+    def _force(path, retries=None):  # noqa: ANN001
+        if fail_once["n"]:
+            return False
+        return real_force(path, retries=retries)
+
+    monkeypatch.setattr(ns, "_force_remove_stage_dir", _force)
+    n = cleanup_all_network_stage_dirs(prune_orphans=False)
+    assert n == 0
+    with ns._registry_lock:
+        assert str(sd.resolve()) in ns._registered_stage_dirs
+    assert sd.is_dir()
+
+    fail_once["n"] = False
+    n2 = cleanup_all_network_stage_dirs(prune_orphans=False)
+    assert n2 >= 1
+    assert not sd.exists()
+    with ns._registry_lock:
+        assert str(sd.resolve()) not in ns._registered_stage_dirs
+
+
+def test_cleanup_prunes_orphan_immediately_on_cleanup_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cleanup_all の orphan prune は年齢 0（即時）で残骸を消す。"""
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._stage_temp_base",
+        lambda: tmp_path / "data_agg_stage",
+    )
+    base = tmp_path / "data_agg_stage"
+    base.mkdir(parents=True)
+    orphan = base / "orphan_fresh"
+    orphan.mkdir()
+    (orphan / "partial.xlsx").write_bytes(b"half")
+    n = cleanup_all_network_stage_dirs(prune_orphans=True)
+    assert n >= 1
+    assert not orphan.is_dir()
+
+
+def test_batch_cleanup_verifies_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from svc.data_agg_network_stage import NetworkStageBatch
+
+    monkeypatch.setattr(
+        "svc.data_agg_network_stage._REMOVE_RETRY_DELAYS_SEC",
+        (),
+    )
+    sd = tmp_path / "batch_sd"
+    sd.mkdir()
+    (sd / "a.xlsx").write_bytes(b"x")
+    register_stage_dir(sd)
+    batch = NetworkStageBatch(
+        display_paths=["//x/a.xlsx"],
+        io_paths=[str(sd / "a.xlsx")],
+        stage_dir=sd,
+        staged_files=1,
+    )
+    assert batch.cleanup() is True
+    assert batch.stage_dir is None
+    assert not sd.exists()
 
 
 def test_cleanup_prunes_orphan_with_contents(
@@ -60,7 +174,7 @@ def test_cleanup_prunes_orphan_with_contents(
     orphan.mkdir()
     (orphan / "partial.xlsx").write_bytes(b"half")
     (orphan / "x.part").write_bytes(b"part")
-    # mtime を古くする（60 秒閾値を超える）
+    # mtime を古くする（build 時 prune の 1h ゲート用の互換）
     old = time.time() - 120
     import os
 

@@ -2684,6 +2684,8 @@ class DataAggDebugDialog(QDialog):
             except Exception:
                 pass
             self._close_run_progress(cancelled=True)
+            # キャンセル後は共有ステージも破棄（wb 閉鎖→削除の順はヘルパ内）
+            self._debug_release_stage_resources(join_prefetch=True)
             if getattr(self, "_continuous_busy", False):
                 self._finish_continuous_run()
             else:
@@ -3618,25 +3620,129 @@ class DataAggDebugDialog(QDialog):
             _logger.exception("summary table sync failed")
             self._log_append("【内部】サマリ表の同期に失敗しました。コンソールに詳細を出力しました。")
 
+    def _mpv_wait_wb_idle_and_flush(self, *, timeout_sec: float = 60.0) -> None:
+        """ワーカー終了と pending frame 閉鎖を同期的に待つ（ステージ削除前用）。"""
+        import time as _time
+
+        t0 = _time.monotonic()
+        while self._mpv_wb_worker_alive():
+            th = getattr(self, "_mpv_wb_worker_thread", None)
+            if th is not None:
+                remain = max(0.05, timeout_sec - (_time.monotonic() - t0))
+                try:
+                    th.join(timeout=min(1.0, remain))
+                except Exception:
+                    pass
+            if (_time.monotonic() - t0) >= timeout_sec:
+                break
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+        self._mpv_clear_wb_worker_if_done()
+        # ロック取得して pending を強制フラッシュ
+        lock = getattr(self, "_mpv_prog_compute_lock", None)
+        if lock is not None:
+            got = False
+            try:
+                got = bool(lock.acquire(timeout=max(0.1, timeout_sec)))
+            except Exception:
+                got = False
+            if got:
+                try:
+                    self._mpv_flush_pending_wb_frames_unlocked()
+                finally:
+                    try:
+                        lock.release()
+                    except Exception:
+                        pass
+            else:
+                # ロック取れなくても残 frame は閉じを試みる
+                pending = getattr(self, "_mpv_item_wb_pending_close", None)
+                if pending:
+                    self._mpv_item_wb_pending_close = []
+                    for fr in list(pending):
+                        self._mpv_close_wb_frame_obj(fr)
+        else:
+            self._mpv_flush_pending_wb_frames_unlocked()
+            pending = getattr(self, "_mpv_item_wb_pending_close", None)
+            if pending:
+                self._mpv_item_wb_pending_close = []
+                for fr in list(pending):
+                    self._mpv_close_wb_frame_obj(fr)
+
+    def _debug_release_stage_resources(self, *, join_prefetch: bool = True) -> None:
+        """デバッグ用ネットワークステージを破棄する。
+
+        workbook ハンドルがステージファイルを掴んだまま削除しないよう、
+        先に wb／prefetch を**同期的に**閉じてから session clear と wipe を行う。
+        キャンセル・ダイアログ閉鎖・フルリセットで共用する。
+        """
+        try:
+            _logger.info("[DATA_AGG_STAGE] debug_release enter")
+        except Exception:
+            pass
+        if join_prefetch:
+            self._cancel_scenario_link_prefetch(join=True)
+        self._bump_mpv_prefetch_cancel()
+        self._mpv_close_item_wb_frame()
+        self._mpv_wait_wb_idle_and_flush(timeout_sec=60.0)
+        self._scenario_stage_session_clear(join_prefetch=False)
+        try:
+            from svc.data_agg_network_stage import (
+                cleanup_all_network_stage_dirs,
+                wipe_data_agg_stage_base,
+            )
+
+            cleanup_all_network_stage_dirs()
+            # ダイアログ終了・キャンセル時は base 配下を強制掃討（残骸ゼロを目指す）
+            n = wipe_data_agg_stage_base(include_registered=True)
+            try:
+                _logger.info("[DATA_AGG_STAGE] debug_release wipe removed=%s", n)
+            except Exception:
+                pass
+        except Exception:
+            _logger.exception("[DATA_AGG_STAGE] debug_release wipe failed")
+        # wipe 後は session を強制空に（削除失敗で batch が残っていても参照を切る）
+        sess = getattr(self, "_scenario_stage_session", None)
+        if sess is not None:
+            try:
+                with sess._lock:
+                    sess._batch = None
+                    sess._scan_root = None
+                    sess._read_map = {}
+                    sess._covered = frozenset()
+            except Exception:
+                pass
+        try:
+            _logger.info("[DATA_AGG_STAGE] debug_release exit")
+        except Exception:
+            pass
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self._continuous_busy = False
         self._continuous_steps_left = 0
-        self._cancel_scenario_link_prefetch(join=True)
-        self._scenario_stage_session_clear(join_prefetch=False)
-        self._bump_mpv_prefetch_cancel()
-        self._mpv_close_item_wb_frame()
-        self._mpv_try_flush_pending_wb_frames()
-        try:
-            from svc.data_agg_network_stage import cleanup_all_network_stage_dirs
-
-            cleanup_all_network_stage_dirs()
-        except Exception:
-            pass
+        self._debug_release_stage_resources(join_prefetch=True)
         if self._mode == 0:
             self._persist_scenario_state()
         self._scenario_snapshots.clear()
         self._clear_master_item_snapshots()
         super().closeEvent(event)
+
+    def reject(self) -> None:
+        # exec() 終了経路でも確実に掃除（closeEvent と二重でも wipe は冪等）
+        try:
+            self._debug_release_stage_resources(join_prefetch=True)
+        except Exception:
+            _logger.exception("[DATA_AGG_STAGE] reject release failed")
+        super().reject()
+
+    def accept(self) -> None:
+        try:
+            self._debug_release_stage_resources(join_prefetch=True)
+        except Exception:
+            _logger.exception("[DATA_AGG_STAGE] accept release failed")
+        super().accept()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -4293,11 +4399,7 @@ class DataAggDebugDialog(QDialog):
         return {}
 
     def _full_reset(self, keep_selection: bool) -> None:
-        self._cancel_scenario_link_prefetch(join=True)
-        self._scenario_stage_session_clear(join_prefetch=False)
-        self._bump_mpv_prefetch_cancel()
-        self._mpv_close_item_wb_frame()
-        self._mpv_try_flush_pending_wb_frames()
+        self._debug_release_stage_resources(join_prefetch=True)
         self._mpv_invalidate_final_table_rows()
         self._scenario_bundle_caches.clear()
         self._master_sparse_notice_shown = False
@@ -4615,8 +4717,7 @@ class DataAggDebugDialog(QDialog):
             return
         if self._mode == 0:
             if r != self._sc_idx:
-                self._cancel_scenario_link_prefetch(join=True)
-                self._scenario_stage_session_clear(join_prefetch=False)
+                self._debug_release_stage_resources(join_prefetch=True)
                 self._persist_scenario_state()
                 self._sc_idx = r
                 self._load_scenario_state(self._sc_idx)
@@ -7350,17 +7451,42 @@ class DataAggDebugDialog(QDialog):
                 list[str], list[list[Any]], list[list[Any]], int
             ]:
                 iter_ctx: list[dict[str, Any]] = []
+                display_paths = [
+                    str(p) for p in (scan_paths or []) if str(p or "").strip()
+                ]
+                io_paths = list(display_paths)
+                # マスタもシナリオと同様に共有ステージを使い、ステップ毎の作成／削除を避ける。
+                # （wb bind 中に TEMP を消すと部分削除残骸が残るため）
+                sess = getattr(self, "_scenario_stage_session", None)
+                cancel_chk = self._master_run_cancel_check()
+                if sess is not None and display_paths:
+                    try:
+                        read_map = sess.ensure(
+                            display_paths,
+                            scan_root=getattr(self, "_scan_root", None),
+                            cancel_check=cancel_chk,
+                        )
+                    except DataAggCancelled:
+                        raise
+                    except Exception:
+                        read_map = {}
+                    if read_map:
+                        io_paths = [
+                            str(read_map.get(p, p) or p) for p in display_paths
+                        ]
                 with self._mpv_item_wb_bind(int(mi_idx)):
                     result = run_preview_compute(
                         scen,
-                        scan_paths,
+                        io_paths,
                         max_primary_rows=self._master_preview_display_rows(),
                         max_table_rows=self._master_preview_display_rows(),
                         progress_hook=eff_hook,
                         probe_caller=probe_caller,
-                        cancel_check=self._master_run_cancel_check(),
+                        cancel_check=cancel_chk,
                         iteration_contexts_out=iter_ctx,
                         scan_root=getattr(self, "_scan_root", None),
+                        source_display_paths=display_paths,
+                        skip_network_stage=True,
                     )
                 if iter_ctx:
                     dd_local = scen.get("__debug_diag")
@@ -10105,8 +10231,7 @@ class DataAggDebugDialog(QDialog):
         th.start()
 
     def _clear_current_scenario_results_only(self) -> None:
-        self._cancel_scenario_link_prefetch(join=True)
-        self._scenario_stage_session_clear(join_prefetch=False)
+        self._debug_release_stage_resources(join_prefetch=True)
         self._scenario_bundle_caches.pop(self._sc_idx, None)
         self._phase_idx = 0
         self._summary_rows.clear()
@@ -10809,6 +10934,7 @@ class DataAggDebugDialog(QDialog):
                 self._d("MSG_MASTER_RUN_CANCEL", "（連続実行を中止しました）")
             )
             self._show_master_run_cancel_notice(continuous=True)
+            self._debug_release_stage_resources(join_prefetch=True)
             self._finish_continuous_run()
             return
         if self._continuous_steps_left <= 0:

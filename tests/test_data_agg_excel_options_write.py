@@ -59,6 +59,59 @@ def test_normalize_excel_options_clear_write() -> None:
     assert d["write_mode"] == "clear_write"
 
 
+def test_excel_options_log_summary_active_and_new() -> None:
+    """レポート「書込み方式」は Excel タブ選択（アクティブ4択／新規2択）を反映する。"""
+    from svc.svc_data_agg import _excel_options_log_summary
+
+    assert (
+        _excel_options_log_summary(
+            {"output_target": "active_sheet", "write_mode": "append"}
+        )
+        == "アクティブシート / 追加"
+    )
+    assert (
+        _excel_options_log_summary(
+            {"output_target": "active_sheet", "write_mode": "clear_write"}
+        )
+        == "アクティブシート / クリア後書込み"
+    )
+    assert (
+        _excel_options_log_summary(
+            {"output_target": "active_sheet", "write_mode": "anchor_cell"}
+        )
+        == "アクティブシート / セル指定"
+    )
+    assert (
+        _excel_options_log_summary(
+            {
+                "output_target": "new_sheet",
+                "write_mode": "append",
+                "new_sheet_name_rule": "scenario_name_seq",
+            }
+        )
+        == "新規シート / シナリオ名_連番"
+    )
+    assert (
+        _excel_options_log_summary(
+            {
+                "output_target": "new_sheet",
+                "write_mode": "overwrite",
+                "new_sheet_name_rule": "custom_sheet_name",
+            }
+        )
+        == "新規シート / シート名"
+    )
+
+
+def test_scenario_export_tab_name_prefix() -> None:
+    """シナリオ出力タブ名は シナリオ内容_{stem} を sanitize した形。"""
+    stem = "ODN375_root"
+    raw = "シナリオ内容_%s" % stem
+    name = sanitize_excel_tab_name(raw)
+    assert name.startswith("シナリオ内容_")
+    assert "ODN375" in name
+
+
 def test_normalize_excel_options_new_sheet_view_defaults() -> None:
     d = normalize_excel_options({})
     assert d["output_target"] == "new_sheet"

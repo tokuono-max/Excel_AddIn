@@ -2005,7 +2005,10 @@ def write_scenario_export_table(
     *,
     sheet_title: str = "",
 ) -> None:
-    """シナリオ定義エクスポート: 1 行目タイトル（結合・左寄せ）・2 行目ヘッダ・3 行目以降データ。列幅・行高の自動調整は行わない。"""
+    """シナリオ定義エクスポート: 1 行目タイトル（結合・左寄せ）・2 行目ヘッダ・3 行目以降データ。
+
+    書込み後に列幅オートフィットを行う。
+    """
     if not headers:
         return
     try:
@@ -2041,6 +2044,19 @@ def write_scenario_export_table(
             end_row=end_row,
             has_title=has_title,
         )
+        try:
+            core_xlc.autofit_sheet_columns(
+                sheet_pointer,
+                min_row=1,
+                min_col=1,
+                max_row=int(end_row),
+                max_col=int(n_col),
+            )
+        except Exception:
+            logger.warning(
+                "[DATA_AGG_WRITE] scenario export autofit failed",
+                exc_info=True,
+            )
     except Exception:
         logger.warning(
             "[DATA_AGG_WRITE] write_scenario_export_table failed", exc_info=True
