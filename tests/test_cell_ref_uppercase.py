@@ -21,6 +21,7 @@ def test_ascii_upper_cell_ref_only_latin() -> None:
     assert ascii_upper_cell_ref("d10+d11") == "D10+D11"
     assert ascii_upper_cell_ref("AB12") == "AB12"
     assert ascii_upper_cell_ref("値a1") == "値A1"
+    assert ascii_upper_cell_ref('a1+"ab"+b2') == 'A1+"ab"+B2'
 
 
 def test_bind_cell_ref_uppercase_live() -> None:
@@ -34,6 +35,8 @@ def test_bind_cell_ref_uppercase_live() -> None:
     assert le.text() == "B2"
     le.setText("xy9")
     assert le.text() == "XY9"
+    le.setText('a1+"cd"+b2')
+    assert le.text() == 'A1+"cd"+B2'
 
 
 def test_bind_cell_ref_uppercase_skips_when_disabled() -> None:

@@ -70,15 +70,7 @@ def cell_coordinate_setting_lines(
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_SHEET_NAME", "シート名"), sn))
 
     cref = str(src.get("cell_ref") or "").strip() or "—"
-    ro = int(src.get("row_offset") or 0)
-    co = int(src.get("col_offset") or 0)
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_CELL_REF", "セル座標"), cref))
-    lines.append(
-        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro)
-    )
-    lines.append(
-        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co)
-    )
 
     end_items = dc.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
@@ -94,6 +86,17 @@ def cell_coordinate_setting_lines(
         rm = src.get("repeat_max")
         end_disp = "%s: %s" % (n_lbl, rm if rm is not None else "—")
     lines.append("%s%s: %s" % (pfx, _lbl(dc, "LABEL_END_MODE", "終結モード"), end_disp))
+
+    from svc.data_agg_primary_end import effective_primary_step_offsets
+
+    ro, co = effective_primary_step_offsets(src)
+    lines.append(
+        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro)
+    )
+    lines.append(
+        "%s%s: %s" % (pfx, _lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co)
+    )
+
     if src.get("skip_empty_primary"):
         sm = str(src.get("skip_primary_match") or "").strip()
         lines.append(
@@ -255,8 +258,9 @@ def cell_coordinate_full_detail_lines(
 
     # 3. 主キー
     cref = str(src.get("cell_ref") or "").strip() or "—"
-    ro = int(src.get("row_offset") or 0)
-    co = int(src.get("col_offset") or 0)
+    from svc.data_agg_primary_end import effective_primary_step_offsets
+
+    ro, co = effective_primary_step_offsets(src)
     end_items = dc.get("END_MODE_ITEMS")
     if not isinstance(end_items, list) or len(end_items) < 2:
         end_items = ["N件", "空白まで", "終端"]
@@ -277,9 +281,9 @@ def cell_coordinate_full_detail_lines(
     wm_txt = fmt_write_mode_from_ui_block(dc, pb, for_name=False)
     sec3: list[str] = [
         "3.1 %s: %s" % (_lbl(dc, "LABEL_CELL_REF", "セル座標"), cref),
-        "3.2 %s: %s" % (_lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro),
-        "3.3 %s: %s" % (_lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co),
-        "3.4 %s: %s" % (_lbl(dc, "LABEL_END_MODE", "終結モード"), end_disp),
+        "3.2 %s: %s" % (_lbl(dc, "LABEL_END_MODE", "終結モード"), end_disp),
+        "3.3 %s: %s" % (_lbl(dc, "LABEL_ROW_OFFSET", "行移動オフセット"), ro),
+        "3.4 %s: %s" % (_lbl(dc, "LABEL_COL_OFFSET", "列移動オフセット"), co),
     ]
     if src.get("skip_empty_primary"):
         sm = str(src.get("skip_primary_match") or "").strip()

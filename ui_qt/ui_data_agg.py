@@ -3619,12 +3619,15 @@ class _DataAggMainWindow(QDialog):
             return
         errs = scenario_mod.validate_scenario(data)
         if errs:
+            from svc.data_agg_plus_cell_spec import format_grouped_validation_errors
+
+            err_lines = format_grouped_validation_errors(errs).split("\n")
             show_warning_notice(
                 self,
                 _u("TITLE_SCENARIO_EXPORT", "シナリオ出力"),
                 _u("MSG_SCENARIO_EXPORT_VALIDATE", "検証エラーのため出力できません。")
                 + "\n"
-                + "\n".join(str(x) for x in errs[:8]),
+                + "\n".join(err_lines[:24]),
             )
             return
         stem = Path(self._scenario_path).stem
@@ -3972,7 +3975,8 @@ class _DataAggMainWindow(QDialog):
                 return
             from svc import svc_data_agg_scenario as scenario_mod
             data = scenario_mod.load_scenario(path)
-            errs = scenario_mod.validate_scenario(data)
+            # 構造検証は読込拒否。セル座標式は既存シナリオ互換のため警告のみ（登録・保存・実行では厳密検証）。
+            errs = scenario_mod.validate_scenario(data, check_cell_specs=False)
             if errs:
                 title_ld = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込")
                 pre = _ui_disp_str(
@@ -3986,6 +3990,68 @@ class _DataAggMainWindow(QDialog):
                     pre + "\n" + "\n".join(errs[:5]),
                 )
                 return
+
+            from svc.data_agg_scenario_expr_modernize import (
+                modernize_scenario_expressions,
+                scenario_needs_expr_modernize,
+            )
+
+            modernized = False
+            modernize_notes: list[str] = []
+            if scenario_needs_expr_modernize(data):
+                title_ld = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込")
+                q_msg = _ui_disp_str(
+                    self._ui or {},
+                    "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM",
+                    "旧い記述表現が含まれています。\n"
+                    "新フォーマット表現に修正しますか？\n"
+                    "（メモリ上のみ。シナリオ保存は操作者の判断です。"
+                    "保存しない場合、次回読込時にも確認します）",
+                )
+                yn = QMessageBox.question(
+                    self,
+                    title_ld,
+                    q_msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if yn == QMessageBox.StandardButton.Yes:
+                    mres = modernize_scenario_expressions(data, inplace=True)
+                    modernized = bool(mres.changed)
+                    modernize_notes = list(mres.notes or [])
+                    if modernize_notes:
+                        note_pre = _ui_disp_str(
+                            self._ui or {},
+                            "MSG_SCENARIO_LOAD_MODERNIZE_PARTIAL",
+                            "一部の表現は自動修正できませんでした（旧表記のままです）:",
+                        )
+                        show_warning_notice(
+                            self,
+                            title_ld,
+                            note_pre + "\n" + "\n".join(modernize_notes[:24]),
+                        )
+
+            # 現代化「はい」で変更した場合は座標ソフト警告を出さない（合意）。
+            # いいえ／未変更時のみ従来どおり警告。部分失敗は上の notes で通知済み。
+            cell_errs = scenario_mod.validate_scenario(data, check_cell_specs=True)
+            soft = [e for e in cell_errs if e not in errs]
+            if soft and not modernized:
+                from svc.data_agg_plus_cell_spec import format_grouped_validation_errors
+
+                soft_text = format_grouped_validation_errors(soft)
+                title_ld = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込")
+                pre_soft = _ui_disp_str(
+                    self._ui or {},
+                    "MSG_SCENARIO_LOAD_CELL_SPEC_WARN_PREFIX",
+                    "セル座標に問題があります（読込は続行します。シナリオ編集で修正してください）:",
+                )
+                soft_lines = soft_text.split("\n")
+                show_warning_notice(
+                    self,
+                    title_ld,
+                    pre_soft + "\n" + "\n".join(soft_lines[:24]),
+                )
+
             self._scenario = data
             self._scenario_path = path
             self._scenario_save_empty_filename = False
@@ -4033,7 +4099,10 @@ class _DataAggMainWindow(QDialog):
                 self._item_table.blockSignals(False)
                 self._suppress_scenario_dirty = False
             self._sync_item_table_master_name_roles()
-            self._clear_scenario_dirty()
+            if modernized:
+                self._mark_scenario_dirty()
+            else:
+                self._clear_scenario_dirty()
             self._update_item_count_label()
             self._fit_item_table_columns()
             self._refresh_scenario_display_label()
@@ -4161,15 +4230,18 @@ class _DataAggMainWindow(QDialog):
 
             save_errs = scenario_mod.validate_scenario(data)
             if save_errs:
+                from svc.data_agg_plus_cell_spec import format_grouped_validation_errors
+
                 pre_sv = _ui_disp_str(
                     self._ui or {},
                     "MSG_SCENARIO_SAVE_VALIDATE_PREFIX",
                     "保存できません（検証エラー）:",
                 )
+                err_lines = format_grouped_validation_errors(save_errs).split("\n")
                 show_warning_notice(
                     self,
                     title_sv,
-                    pre_sv + "\n" + "\n".join(save_errs[:8]),
+                    pre_sv + "\n" + "\n".join(err_lines[:24]),
                 )
                 return False
 
@@ -4464,10 +4536,13 @@ class _DataAggMainWindow(QDialog):
 
             pre_errs = scenario_mod.validate_scenario(data)
             if pre_errs:
+                from svc.data_agg_plus_cell_spec import format_grouped_validation_errors
+
+                err_lines = format_grouped_validation_errors(pre_errs).split("\n")
                 show_warning_notice(
                     self,
                     "データ集約",
-                    "一括実行できません（検証エラー）:\n" + "\n".join(pre_errs[:8]),
+                    "一括実行できません（検証エラー）:\n" + "\n".join(err_lines[:24]),
                 )
                 return
         except Exception as exc:
@@ -5831,9 +5906,52 @@ class _ScenarioEditDialog(QDialog):
         if isinstance(w, QAbstractButton):
             w.clearFocus()
 
+    @staticmethod
+    def _needs_register_enabled(*, dirty: bool, sources: list[Any]) -> bool:
+        """
+        登録ボタンを有効にするか。
+        ・編集セッションに未確定変更がある（dirty）
+        ・または未登録（registered=False）のシナリオが残っている
+        """
+        if dirty:
+            return True
+        for src in sources or []:
+            if isinstance(src, dict) and not bool(src.get("registered", False)):
+                return True
+        return False
+
+    @staticmethod
+    def _commit_all_sources_registered(
+        sources: list[Any],
+        snapshots: list[Any],
+        *,
+        default_name_at: Any,
+    ) -> list[Any]:
+        """
+        マスタ項目にぶら下がる全シナリオを登録確定する。
+        registered=True・空の scenario_name 補完・表示スナップショット更新。
+        """
+        while len(snapshots) < len(sources):
+            snapshots.append(None)
+        if len(snapshots) > len(sources):
+            del snapshots[len(sources) :]
+        for i, src in enumerate(sources):
+            if not isinstance(src, dict):
+                continue
+            src["registered"] = True
+            if not str(src.get("scenario_name") or "").strip():
+                src["scenario_name"] = str(default_name_at(i) or "").strip() or (
+                    "シナリオ%d" % (i + 1)
+                )
+            snapshots[i] = copy.deepcopy(src)
+        return snapshots
+
     def _update_register_button_state(self) -> None:
         has = bool(self._sources_data) and self._current_source_index >= 0
-        self._btn_register.setEnabled(self._dirty and has)
+        pending = self._needs_register_enabled(
+            dirty=bool(self._dirty), sources=self._sources_data
+        )
+        self._btn_register.setEnabled(pending and has)
 
     def _on_scenario_name_text_changed(self, text: str) -> None:
         if (text or "").strip():
@@ -5991,6 +6109,10 @@ class _ScenarioEditDialog(QDialog):
                     items_snap[mr] = item_one
                     _val_errs = _scenario_mod.validate_scenario({"items": items_snap})
                     if _val_errs:
+                        from svc.data_agg_plus_cell_spec import (
+                            format_grouped_validation_errors,
+                        )
+
                         t_reg = (
                             _ui_disp_str(self._screen_cfg, "MSGBOX_TITLE", "").strip()
                             or _ui_disp_str(self._screen_cfg, "TITLE", "シナリオ編集")
@@ -6000,22 +6122,23 @@ class _ScenarioEditDialog(QDialog):
                             "MSG_REGISTER_VALIDATE_PREFIX",
                             "登録できません:",
                         )
+                        err_text = format_grouped_validation_errors(_val_errs)
+                        err_lines = err_text.split("\n")
                         show_warning_notice(
                             self,
                             t_reg,
-                            pre_reg + "\n" + "\n".join(_val_errs[:8]),
+                            pre_reg + "\n" + "\n".join(err_lines[:24]),
                         )
                         return
             snap = copy.deepcopy(self._sources_data)
             restore_row = self._current_source_index
-            src = self._sources_data[self._current_source_index]
-            src["registered"] = True
-            if not str(src.get("scenario_name") or "").strip():
-                src["scenario_name"] = self._default_scenario_name(self._current_source_index)
+            # 登録＝このマスタ項目にぶら下がるシナリオをすべて確定（切替先からでも可）
+            self._commit_all_sources_registered(
+                self._sources_data,
+                self._registered_display_snapshots,
+                default_name_at=self._default_scenario_name,
+            )
             ri = self._current_source_index
-            while len(self._registered_display_snapshots) <= ri:
-                self._registered_display_snapshots.append(None)
-            self._registered_display_snapshots[ri] = copy.deepcopy(src)
             self._refresh_sources_table()
             self._sync_sources_selection_and_form(ri)
             if self._on_registered is not None:
@@ -6848,6 +6971,7 @@ class _ScenarioEditDialog(QDialog):
             self._form_combo_type.setEnabled(False)
             self._edit_scenario_ident.setEnabled(False)
             self._update_summary_preview(-1)
+        self._update_register_button_state()
         self._update_step_button_enabled()
 
     def _on_source_move_up(self) -> None:
@@ -7050,6 +7174,7 @@ class _ScenarioEditDialog(QDialog):
 
         self._loading_source_form = True
         self._block_detail_form_signals(True)
+        prev_dirty = bool(self._dirty)
         try:
             i = self._form_combo_type.findData(stype)
             if i >= 0:
@@ -7301,12 +7426,8 @@ class _ScenarioEditDialog(QDialog):
             self._edit_scenario_ident.setPlaceholderText(default_nm)
             self._edit_scenario_ident.setText(form_nm)
             self._on_scenario_name_text_changed(form_nm)
-
-            self._dirty = False
-            self._update_register_button_state()
         finally:
             self._block_detail_form_signals(False)
-            self._loading_source_form = False
             try:
                 sync_sheet = self._cell_refs.get("sync_sheet_name_enabled")
                 if callable(sync_sheet):
@@ -7320,6 +7441,10 @@ class _ScenarioEditDialog(QDialog):
                         sync_fin()
             except Exception:
                 pass
+            # load 後処理の副作用で dirty を落とさない／立てない（切替前の未確定を維持）
+            self._loading_source_form = False
+            self._dirty = prev_dirty
+            self._update_register_button_state()
             self._resync_right_pane_layout()
 
     @staticmethod

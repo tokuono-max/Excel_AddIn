@@ -430,17 +430,23 @@ def infer_item_lineage(sources: list[Any]) -> Optional[str]:
     return next(iter(kinds))
 
 
-def validate_scenario(data: dict[str, Any]) -> list[str]:
+def validate_scenario(
+    data: dict[str, Any],
+    *,
+    check_cell_specs: bool = True,
+) -> list[str]:
     """
     シナリオ辞書の簡易検証を行い、エラーメッセージのリストを返す。
 
     【概要】
       items がリストであること、各項目に id / name が含まれること、write_mode が許容値であること、
       match_keys がリストであること、scan が辞書であることなどを確認する。
-      詳細なソース・抽出ルールの検証は抽出エンジン側で行う想定。
+      check_cell_specs=True（既定）のとき、主キー／連携／結合のセル座標式（A1・+ 連結）も検証する。
+      シナリオ読込では既存 JSON の互換のため check_cell_specs=False を使い、登録・保存・実行では True。
 
     【引数】
       data: load_scenario で得た辞書。
+      check_cell_specs: セル座標式の厳密検証を行うか。
 
     【戻り値】
       検証エラーのメッセージリスト。空リストのときは検証通過。
@@ -528,6 +534,40 @@ def validate_scenario(data: dict[str, Any]) -> list[str]:
                                 )
                         st = (src.get("type") or SOURCE_TYPE_CELL).strip().lower()
                         if st == SOURCE_TYPE_CELL:
+                            sn_label = str(src.get("scenario_name") or "").strip()
+                            if not sn_label:
+                                sn_label = "シナリオ%d" % (j + 1)
+
+                            def _cell_err(detail: str, _sn: str = sn_label) -> str:
+                                from svc.data_agg_plus_cell_spec import (
+                                    attach_scenario_to_cell_error,
+                                )
+
+                                return attach_scenario_to_cell_error(_sn, detail)
+
+                            if check_cell_specs:
+                                from svc.data_agg_plus_cell_spec import (
+                                    format_plus_cell_input_error,
+                                    validate_plus_cell_spec,
+                                )
+
+                                cref = str(src.get("cell_ref") or "").strip()
+                                cerr = validate_plus_cell_spec(
+                                    cref,
+                                    empty_ok=False,
+                                    empty_message="セル座標を入力してください",
+                                )
+                                if cerr:
+                                    errors.append(
+                                        _cell_err(
+                                            format_plus_cell_input_error(
+                                                cerr,
+                                                field_label="セル座標(Excel方式)",
+                                                value=cref,
+                                                key_kind="主キー",
+                                            )
+                                        )
+                                    )
                             ldefs = pb.get("link_defs") or []
                             if not isinstance(ldefs, list):
                                 errors.append("items[%s].sources[%s].link_defs は配列です" % (i, j))
@@ -538,6 +578,34 @@ def validate_scenario(data: dict[str, Any]) -> list[str]:
                                         continue
                                     if not str(ld.get("item") or "").strip():
                                         errors.append("items[%s].sources[%s].link_defs[%s].item は必須です" % (i, j, k))
+                                    ld_mode = str(ld.get("mode") or "セル座標").strip()
+                                    if check_cell_specs and "固定" not in ld_mode and ld_mode.lower() not in (
+                                        "fixed",
+                                        "literal",
+                                    ):
+                                        from svc.data_agg_plus_cell_spec import (
+                                            format_plus_cell_input_error,
+                                            validate_plus_cell_spec,
+                                        )
+
+                                        lcell = str(ld.get("cell") or "")
+                                        lerr = validate_plus_cell_spec(
+                                            lcell,
+                                            empty_ok=False,
+                                            empty_message="セル座標を入力してください",
+                                        )
+                                        if lerr:
+                                            errors.append(
+                                                _cell_err(
+                                                    format_plus_cell_input_error(
+                                                        lerr,
+                                                        field_label="セル座標/固定値",
+                                                        value=lcell,
+                                                        key_kind="連携キー",
+                                                        key_index=k + 1,
+                                                    )
+                                                )
+                                            )
                                     for rk in ("row", "col"):
                                         rv = ld.get(rk, 0)
                                         if not isinstance(rv, (int, float)):
@@ -560,6 +628,30 @@ def validate_scenario(data: dict[str, Any]) -> list[str]:
                                         continue
                                     if not str(jd.get("item") or "").strip():
                                         errors.append("items[%s].sources[%s].join_defs[%s].item は必須です" % (i, j, k))
+                                    if check_cell_specs:
+                                        from svc.data_agg_plus_cell_spec import (
+                                            format_plus_cell_input_error,
+                                            validate_plus_cell_spec,
+                                        )
+
+                                        jcell = str(jd.get("cell") or "")
+                                        jerr = validate_plus_cell_spec(
+                                            jcell,
+                                            empty_ok=False,
+                                            empty_message="セル座標を入力してください",
+                                        )
+                                        if jerr:
+                                            errors.append(
+                                                _cell_err(
+                                                    format_plus_cell_input_error(
+                                                        jerr,
+                                                        field_label="セル座標",
+                                                        value=jcell,
+                                                        key_kind="結合キー",
+                                                        key_index=k + 1,
+                                                    )
+                                                )
+                                            )
                                     for rk in ("row", "col"):
                                         rv = jd.get(rk, 0)
                                         if not isinstance(rv, (int, float)):

@@ -112,7 +112,7 @@ def test_pipeline_trim_rep() -> None:
 
 
 def test_compile_ok() -> None:
-    ok, msg = compile_shape_script("trim,case,upper")
+    ok, msg = compile_shape_script("trim,upr")
     assert ok and msg == ""
 
 
@@ -120,6 +120,12 @@ def test_compile_unknown() -> None:
     ok, msg = compile_shape_script("bogus")
     assert not ok
     assert "未知" in msg or "bogus" in msg
+
+
+def test_compile_case_removed() -> None:
+    ok, msg = compile_shape_script("case(upper)")
+    assert not ok
+    assert "未知" in msg or "case" in msg
 
 
 def test_parse_cut() -> None:
@@ -234,8 +240,8 @@ def test_paren_form_basic_and_legacy_mix() -> None:
     assert apply_value_shape("  abc  ", "trim()") == "abc"
     assert apply_value_shape("abcdef", "left(3)") == "abc"
     assert apply_value_shape("abcdef", 'rep("a","z")') == "zbcdef"
-    assert apply_value_shape("  x  ", "trim();case(upper)") == "X"
-    assert apply_value_shape("  x  ", "trim,case(upper)") == "X"
+    assert apply_value_shape("  x  ", "trim();upr()") == "X"
+    assert apply_value_shape("  x  ", "trim,upr()") == "X"
     assert apply_value_shape("a\nb", "split(1);trim") == "a"
     ok, msg = compile_shape_script('split(1);rep("a","b")')
     assert ok and msg == ""
@@ -255,7 +261,7 @@ def test_join_and_me() -> None:
     assert apply_value_shape("ABC", "join()") == ""
     assert apply_value_shape("ABC", 'join(me,"-","Z")') == "ABC-Z"
     assert apply_value_shape("ABCDEF", 'join(me,"-",left(3))') == "ABCDEF-ABC"
-    assert apply_value_shape("hello", 'join(me,"/",case("upper"))') == "hello/HELLO"
+    assert apply_value_shape("hello", 'join(me,"/",upr())') == "hello/HELLO"
     # 旧形 join（次の裸コマンド手前まで）
     assert apply_value_shape("Q", 'join,"A","B",trim') == "AB"
     ok, msg = compile_shape_script('join(me,"-",left(3))')
@@ -317,9 +323,33 @@ def test_bare_me_is_unknown_command() -> None:
 def test_legacy_join_is_supported() -> None:
     """A4: 旧形 join,a,b,… は正式サポート（次の裸コマンド手前まで）。"""
     assert apply_value_shape("Q", 'join,"A","B",trim') == "AB"
-    assert apply_value_shape("Q", 'join,"A","B",case,upper') == "AB"
+    assert apply_value_shape("Q", 'join,"A","B",upr') == "AB"
     ok, msg = compile_shape_script('join,"A","B",trim')
     assert ok and msg == ""
+
+
+def test_upr_low_tok_rep_count_lenstr() -> None:
+    assert apply_value_shape("AbC", "upr()") == "ABC"
+    assert apply_value_shape("AbC", "low()") == "abc"
+    assert apply_value_shape("hello", "upr(me)") == "HELLO"
+    assert apply_value_shape("hello", "upr(left(2))") == "HE"
+    assert apply_value_shape("HELLO", "low(right(2))") == "lo"
+    assert apply_value_shape("a_b_c", 'tok("_",2)') == "b"
+    assert apply_value_shape("a_b_c", 'tok("_",1)') == "a"
+    assert apply_value_shape("a_b_c", 'tok("_",9)') == ""
+    assert apply_value_shape("a_b_c", 'tok("",2)') == "a_b_c"
+    assert apply_value_shape("aaa", 'rep("a","A")') == "AAA"
+    assert apply_value_shape("aaa", 'rep(1,"a","A")') == "Aaa"
+    assert apply_value_shape("aaa", 'rep(2,"a","A")') == "AAa"
+    assert apply_value_shape("aaa", "rep,1,a,A") == "Aaa"
+    assert apply_value_shape("hello", "lenstr()") == "5"
+    assert apply_value_shape("hello", "lenstr(me)") == "5"
+    assert apply_value_shape("hello", "lenstr(left(2))") == "2"
+    assert apply_value_shape("hello", 'join("L=",lenstr())') == "L=5"
+    # 式の len は従来どおり
+    assert apply_value_shape("AB", "left(len())") == "AB"
+    ok, _ = compile_shape_script('upr();tok("_",1);rep(1,"a","b");lenstr()')
+    assert ok
 
 
 def test_ui_hint_documents_me_as_parameter_only() -> None:
@@ -341,6 +371,10 @@ def test_ui_hint_documents_me_as_parameter_only() -> None:
         # 記述例は () 形が主、旧形も可
         assert "trim()" in h
         assert "rep(\"検索\",\"置換\")" in h
+        assert "upr()" in h
+        assert "tok(" in h
+        assert "lenstr()" in h
+        assert "case(upper)" not in h
         assert "left(数)" in h
         assert "旧形" in h
         assert "split,ブロック" not in h

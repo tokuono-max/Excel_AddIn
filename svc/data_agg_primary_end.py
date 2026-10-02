@@ -163,6 +163,47 @@ def source_end_mode(src: dict[str, Any]) -> str:
     return END_MODE_N_COUNT
 
 
+def primary_offsets_ui_enabled(*, is_n_mode: bool, n_count: int) -> bool:
+    """
+    主キー行/列オフセットを UI で有効にするか。
+    終結が N件かつ取得件数=1 のときは進みが不要のため無効（下限は1）。
+    """
+    if is_n_mode:
+        try:
+            n = int(n_count)
+        except (TypeError, ValueError):
+            n = 1
+        if n <= 1:
+            return False
+    return True
+
+
+def effective_primary_step_offsets(src: dict[str, Any]) -> tuple[int, int]:
+    """
+    主キー反復の実効ステップ（行, 列）。
+    N件かつ repeat_max=1 のときは UI 上オフセット無効に合わせ 0/0 とする
+    （JSON に非ゼロが残っていても進まない）。
+    """
+    try:
+        ro = int(src.get("row_offset") or 0)
+    except (TypeError, ValueError):
+        ro = 0
+    try:
+        co = int(src.get("col_offset") or 0)
+    except (TypeError, ValueError):
+        co = 0
+    if source_end_mode(src) != END_MODE_N_COUNT:
+        return ro, co
+    rm = src.get("repeat_max")
+    try:
+        rm_i = int(rm) if rm is not None else None
+    except (TypeError, ValueError):
+        rm_i = None
+    if rm_i is not None and rm_i == 1:
+        return 0, 0
+    return ro, co
+
+
 def source_keep_empty_primary_slots(src: dict[str, Any]) -> bool:
     """
     読取中に空主キーを落さずスロットとして残すか。

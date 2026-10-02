@@ -5,10 +5,12 @@ Module: core/core_value_shape.py
 Purpose:
   データ集約の「整形」DSL。先頭レベルはカンマまたはセミコロンでトークン分割、CSV 方式の "" クォート。
   コマンドは旧形（cmd,引数…）と () 形（cmd(引数…)）の両方。() 形の引数では入れ子コマンドと me（現在値）可。
-  rep は部分文字列のすべてを置換。split は行分割で N 行目。
+  rep は部分文字列の置換（2引数＝すべて、3引数＝先頭から最大 N 回）。split は行分割で N 行目。
+  tok は区切文字で分割した 1 始まり N 番目。upr/low は大／小文字。lenstr は文字長を文字列化。
   join は引数文字列の連結（現在値は自動混入しない）。各引数は join 開始時点の同じ現在値を見る。
   0 引数コマンドへの余分な引数は検証で通し実行時は無視。不足は検証エラー。裸の me は未知コマンド。
   left/right/mid/cut/ins の位置・長さ引数は整数または式（len(), len("…"), pos("…"), + - ()）。
+  式の len() とコマンド lenstr() は別物。
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ _EXCEL_SERIAL_INT_MIN = 10000
 from core.core_log import get_logger
 
 logger = get_logger(__name__)
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 SHAPE_EXPR_MAX_LEN = 200
 SHAPE_EXPR_MAX_DEPTH = 8
@@ -317,10 +319,47 @@ def _shape_trim(t: str) -> str:
     return t.strip()
 
 
-def _shape_rep_all(t: str, old: str, new: str) -> str:
+def _shape_rep_all(t: str, old: str, new: str, *, count: int | None = None) -> str:
+    """部分置換。count が None ならすべて、整数なら先頭から最大 count 回。"""
     if old == "":
         return t
-    return t.replace(old, new)
+    if count is None:
+        return t.replace(old, new)
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        return t
+    if n <= 0:
+        return t
+    return t.replace(old, new, n)
+
+
+def _shape_tok(t: str, sep: str, index_1: int) -> str:
+    """区切文字で分割し 1 始まり index 番目。空区切は変更なし。範囲外は空文字。"""
+    if sep == "":
+        return t
+    try:
+        n = int(index_1)
+    except (TypeError, ValueError):
+        return ""
+    if n < 1:
+        return ""
+    parts = t.split(sep)
+    if n > len(parts):
+        return ""
+    return parts[n - 1]
+
+
+def _shape_upr(t: str) -> str:
+    return t.upper()
+
+
+def _shape_low(t: str) -> str:
+    return t.lower()
+
+
+def _shape_lenstr(t: str) -> str:
+    return str(len(t))
 
 
 def _shape_mid(t: str, start_1: int, length: int) -> str:
@@ -373,15 +412,6 @@ def _shape_pad(t: str, width: int, pad: str, left: bool) -> str:
     if left:
         return t.rjust(width, ch)
     return t.ljust(width, ch)
-
-
-def _shape_case(t: str, mode: str) -> str:
-    m = mode.strip().lower()
-    if m == "upper":
-        return t.upper()
-    if m == "lower":
-        return t.lower()
-    return t
 
 
 def _shape_wide(t: str) -> str:
@@ -650,8 +680,8 @@ def split_paren_invocation(tok: str) -> tuple[str, list[str]] | None:
     return cmd, _split_paren_arg_list(inner)
 
 
-def _parse_quoted_literal(s: str) -> str | None:
-    """全体が "…" なら中身（"" → "）。でなければ None。"""
+def parse_csv_quoted_literal(s: str) -> str | None:
+    """全体が CSV 方式 "…" なら中身（内側の "" → "）。でなければ None。"""
     t = s.strip()
     if len(t) < 2 or t[0] != '"':
         return None
@@ -670,6 +700,11 @@ def _parse_quoted_literal(s: str) -> str | None:
         buf.append(t[i])
         i += 1
     return None
+
+
+def _parse_quoted_literal(s: str) -> str | None:
+    """互換エイリアス（parse_csv_quoted_literal）。"""
+    return parse_csv_quoted_literal(s)
 
 
 def _is_known_shape_command_name(name: str) -> bool:
@@ -732,12 +767,24 @@ _SHAPE_KNOWN_COMMANDS = frozenset(
         "pad_l",
         "padright",
         "padleft",
-        "case",
+        "upr",
+        "low",
+        "tok",
+        "lenstr",
         "wide",
         "date",
         "join",
     }
 )
+
+
+def _optional_text_source(
+    text: str, raw_args: list[str], *, depth: int
+) -> str:
+    """引数 0＝現在値、1＝評価結果（me／入れ子／リテラル）。余分は無視。"""
+    if not raw_args:
+        return text
+    return eval_shape_arg(raw_args[0], text, depth=depth)
 
 
 def apply_invocation(
@@ -753,6 +800,21 @@ def apply_invocation(
         return "".join(parts)
     if c in ("trim", "wide", "date"):
         return _apply_one_command(t, c, [])
+    if c in ("upr", "low", "lenstr"):
+        src = _optional_text_source(t, raw_args, depth=depth)
+        if c == "upr":
+            return _shape_upr(src)
+        if c == "low":
+            return _shape_low(src)
+        return _shape_lenstr(src)
+    if c == "tok":
+        if len(raw_args) < 2:
+            return t
+        sep = eval_shape_arg(raw_args[0], t, depth=depth)
+        n = _resolve_numeric_arg(raw_args[1], t, depth=depth)
+        if n is None:
+            return ""
+        return _shape_tok(t, sep, n)
     if c == "split":
         if len(raw_args) < 1:
             return t
@@ -770,6 +832,13 @@ def apply_invocation(
             return t
         return _shape_left(t, n) if c == "left" else _shape_right(t, n)
     if c == "rep":
+        if len(raw_args) >= 3:
+            cnt = _resolve_numeric_arg(raw_args[0], t, depth=depth)
+            if cnt is None:
+                return t
+            old = eval_shape_arg(raw_args[1], t, depth=depth)
+            new = eval_shape_arg(raw_args[2], t, depth=depth)
+            return _shape_rep_all(t, old, new, count=cnt)
         if len(raw_args) < 2:
             return t
         old = eval_shape_arg(raw_args[0], t, depth=depth)
@@ -801,11 +870,6 @@ def apply_invocation(
             return t
         pad = eval_shape_arg(raw_args[1], t, depth=depth)
         return _shape_pad(t, w, pad, left=c.startswith("padl") or c in ("pad_l", "padleft"))
-    if c == "case":
-        if len(raw_args) < 1:
-            return t
-        mode = eval_shape_arg(raw_args[0], t, depth=depth)
-        return _shape_case(t, mode)
     if c:
         logger.debug("[VALUE_SHAPE] unknown command: %s", c)
     return t
@@ -840,9 +904,30 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
             return t
         return _shape_right(t, n)
     if c == "rep":
+        if len(args) >= 3:
+            cnt = _parse_int(args[0])
+            if cnt is None:
+                return t
+            return _shape_rep_all(t, args[1], args[2], count=cnt)
         if len(args) < 2:
             return t
         return _shape_rep_all(t, args[0], args[1])
+    if c == "tok":
+        if len(args) < 2:
+            return t
+        n = _parse_int(args[1])
+        if n is None:
+            return ""
+        return _shape_tok(t, args[0], n)
+    if c == "upr":
+        src = args[0] if args else t
+        return _shape_upr(src)
+    if c == "low":
+        src = args[0] if args else t
+        return _shape_low(src)
+    if c == "lenstr":
+        src = args[0] if args else t
+        return _shape_lenstr(src)
     if c == "mid":
         if len(args) < 2:
             return t
@@ -880,10 +965,6 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
         if w is None:
             return t
         return _shape_pad(t, w, args[1], left=True)
-    if c == "case":
-        if len(args) < 1:
-            return t
-        return _shape_case(t, args[0])
     if c == "wide":
         return _shape_wide(t)
     if c == "date":
@@ -895,12 +976,13 @@ def _apply_one_command(t: str, cmd: str, args: list[str]) -> str:
 
 def _legacy_arg_count(cmd: str) -> int:
     c = cmd.strip().lower()
-    if c in ("trim", "wide", "date"):
+    if c in ("trim", "wide", "date", "upr", "low", "lenstr"):
         return 0
-    if c in ("split", "left", "right", "case"):
+    if c in ("split", "left", "right"):
         return 1
     if c in (
         "rep",
+        "tok",
         "mid",
         "cut",
         "ins",
@@ -947,6 +1029,18 @@ def parse_and_apply_commands(text: str, tokens: list[str]) -> str:
                 args.append(raw_n)
                 i += 1
             t = _apply_one_command(t, "join", args)
+            continue
+        if c0 == "rep":
+            # 3 引数（回数,旧,新）または 2 引数（旧,新＝すべて）
+            if i + 2 < n and _parse_int(str(tokens[i]).strip()) is not None:
+                args = [tokens[i], tokens[i + 1], tokens[i + 2]]
+                i += 3
+            elif i + 1 < n:
+                args = [tokens[i], tokens[i + 1]]
+                i += 2
+            else:
+                args = []
+            t = _apply_one_command(t, "rep", args)
             continue
         nargs = _legacy_arg_count(c0)
         args = []
@@ -1008,8 +1102,19 @@ def _validate_paren_arg_list(cmd: str, raw_args: list[str], *, depth: int = 0) -
         return (True, "")
     if c in ("trim", "wide", "date"):
         return (True, "")
+    if c in ("upr", "low", "lenstr"):
+        if len(raw_args) >= 1:
+            return _validate_shape_arg_value(raw_args[0], depth=depth)
+        return (True, "")
     need = _legacy_arg_count(c)
-    if need > 0 and len(raw_args) < need:
+    if c == "rep":
+        if len(raw_args) >= 3:
+            need = 3
+        elif len(raw_args) >= 2:
+            need = 2
+        else:
+            return (False, "rep の引数が不足しています")
+    elif need > 0 and len(raw_args) < need:
         return (False, "%s の引数が不足しています" % c)
 
     def _num_or_nested(a: str) -> tuple[bool, str]:
@@ -1033,7 +1138,20 @@ def _validate_paren_arg_list(cmd: str, raw_args: list[str], *, depth: int = 0) -
         if not ok:
             return (False, err)
         return _validate_shape_arg_value(raw_args[1], depth=depth)
+    if c == "tok":
+        ok, err = _validate_shape_arg_value(raw_args[0], depth=depth)
+        if not ok:
+            return (False, err)
+        return _num_or_nested(raw_args[1])
     if c == "rep":
+        if len(raw_args) >= 3:
+            ok, err = _num_or_nested(raw_args[0])
+            if not ok:
+                return (False, err)
+            ok2, err2 = _validate_shape_arg_value(raw_args[1], depth=depth)
+            if not ok2:
+                return (False, err2)
+            return _validate_shape_arg_value(raw_args[2], depth=depth)
         ok, err = _validate_shape_arg_value(raw_args[0], depth=depth)
         if not ok:
             return (False, err)
@@ -1045,8 +1163,6 @@ def _validate_paren_arg_list(cmd: str, raw_args: list[str], *, depth: int = 0) -
             if not ok:
                 return (False, "%s の引数が不正です" % c)
         return _validate_shape_arg_value(raw_args[1], depth=depth)
-    if c == "case":
-        return _validate_shape_arg_value(raw_args[0], depth=depth)
     return (True, "")
 
 
@@ -1062,7 +1178,7 @@ def _validate_shape_arg_value(raw: str, *, depth: int) -> tuple[bool, str]:
     # bare expression / word / pos()・len() など式用括弧
     if validate_shape_expr_syntax(s)[0]:
         return (True, "")
-    return (True, "")  # case upper 等
+    return (True, "")
 
 
 def _shape_error_tok_end_for_unknown(
@@ -1126,8 +1242,19 @@ def _compile_shape_script_tokens(
                 i += 1
             continue
         if cmd == "rep":
-            if i + 2 > n_tok:
+            # 回数付き 3 引数、または 2 引数
+            if i < n_tok and _parse_int(str(tokens[i]).strip()) is not None and i + 3 <= n_tok:
+                i += 3
+            elif i + 2 <= n_tok:
+                i += 2
+            else:
                 return (False, "rep の引数が不足しています", cmd_start, n_tok)
+        elif cmd == "tok":
+            if i + 2 > n_tok:
+                return (False, "tok の引数が不足しています", cmd_start, n_tok)
+            ok, err = _validate_shape_numeric_token(tokens[i + 1], cmd)
+            if not ok:
+                return (False, err, cmd_start, n_tok)
             i += 2
         elif cmd == "split":
             if i + 1 > n_tok:
@@ -1170,10 +1297,8 @@ def _compile_shape_script_tokens(
             if not ok:
                 return (False, err, cmd_start, n_tok)
             i += 2
-        elif cmd == "case":
-            if i + 1 > n_tok:
-                return (False, "case の引数が不足しています", cmd_start, n_tok)
-            i += 1
+        elif cmd in ("upr", "low", "lenstr", "trim", "wide", "date"):
+            pass
     return (True, "", 0, 0)
 
 
@@ -1260,7 +1385,7 @@ def shape_command_token_spans(tokens: list[str]) -> list[tuple[int, int]]:
                 i += 1
             spans.append((start, i))
             continue
-        if cmd in ("trim", "wide", "date"):
+        if cmd in ("trim", "wide", "date", "upr", "low", "lenstr"):
             spans.append((start, i))
             continue
         if cmd == "split":
@@ -1274,6 +1399,13 @@ def shape_command_token_spans(tokens: list[str]) -> list[tuple[int, int]]:
             spans.append((start, i))
             continue
         if cmd == "rep":
+            if i < n and _parse_int(str(tokens[i]).strip()) is not None and i + 2 < n:
+                i += 3
+            elif i + 1 < n:
+                i += 2
+            spans.append((start, i))
+            continue
+        if cmd == "tok":
             if i + 1 < n:
                 i += 2
             spans.append((start, i))
@@ -1291,11 +1423,6 @@ def shape_command_token_spans(tokens: list[str]) -> list[tuple[int, int]]:
         if cmd in ("padr", "pad_r", "padright", "padl", "pad_l", "padleft"):
             if i + 1 < n:
                 i += 2
-            spans.append((start, i))
-            continue
-        if cmd == "case":
-            if i < n:
-                i += 1
             spans.append((start, i))
             continue
         spans.append((start, i))

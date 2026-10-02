@@ -1507,19 +1507,100 @@ def _parse_cell_ref(cell_ref: str) -> tuple[Optional[int], Optional[int]]:
 
 def _split_plus_cell_refs(cell_spec: str) -> list[str]:
     """
-    連携キー用: 「D10+E10」を ['D10','E10'] に分割する。
-    空白はそのまま残してもよい（結合結果が空になるだけ）。空トークンは除く。
+    互換: 「D10+E10」をセル参照リストに分割する（リテラルは除く）。
+    クォート混在・検証付きの本処理は data_agg_plus_cell_spec / _eval_plus_parts_*。
     """
-    raw = str(cell_spec or "")
-    if "+" not in raw:
-        one = raw.strip()
-        return [one] if one else []
-    out: list[str] = []
-    for part in raw.split("+"):
-        t = str(part).strip()
-        if t:
-            out.append(t)
-    return out
+    from svc.data_agg_plus_cell_spec import cell_refs_from_plus_spec
+
+    return cell_refs_from_plus_spec(cell_spec)
+
+
+def _plus_parts_or_none(cell_spec: str):
+    """セル座標式をパート列へ。構文エラー・セル無しは None。"""
+    from svc.data_agg_plus_cell_spec import (
+        first_anchor_cell_ref,
+        parse_plus_cell_spec,
+        plus_spec_needs_concat,
+        validate_plus_cell_spec,
+    )
+
+    err = validate_plus_cell_spec(cell_spec, empty_ok=False)
+    if err:
+        return None
+    parts, perr = parse_plus_cell_spec(cell_spec)
+    if perr or not parts or first_anchor_cell_ref(parts) is None:
+        return None
+    return parts, plus_spec_needs_concat(parts)
+
+
+def _eval_plus_parts_at_offset(
+    file_path: str | Path,
+    sheet_name: Any,
+    parts: list[Any],
+    row_off: int,
+    col_off: int,
+) -> str:
+    """+ 各パートを同一オフセットで評価し連結（改行は後処理まで残す）。"""
+    from svc.data_agg_plus_cell_spec import PlusPart
+
+    chunks: list[str] = []
+    for p in parts:
+        if not isinstance(p, PlusPart):
+            continue
+        if p.kind == "literal":
+            chunks.append(p.value)
+            continue
+        cell_ref = _resolve_cell_with_offset(p.value, row_off, col_off)
+        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+        chunks.append(scalar_to_text(v))
+    return "".join(chunks)
+
+
+def _extract_primary_plus_series(
+    file_path: str | Path,
+    sheet_name: Any,
+    parts: list[Any],
+    *,
+    row_off: int,
+    col_off: int,
+    limit: int,
+    repeat_until_empty: bool,
+    skip_row_hidden: Any = None,
+    cancel_check: Optional[Callable[..., None]] = None,
+    rule_iters_out: Optional[list[int]] = None,
+    skip_trunc_peek: bool = False,
+) -> tuple[list[Any], Any]:
+    """
+    主キーの + 連結反復。段進み・空白停止・非表示除外は最初のセル座標のみ。
+    """
+    from svc.data_agg_plus_cell_spec import first_anchor_cell_ref
+
+    anchor = first_anchor_cell_ref(parts) or "A1"
+    vals: list[Any] = []
+    n = 0
+    max_n = max(limit * 50, 10000)
+    while len(vals) < limit and n < max_n:
+        _poll_cancel_check(cancel_check)
+        anchor_ref = _resolve_cell_with_offset(anchor, row_off * n, col_off * n)
+        _ac, ar = _parse_cell_ref(anchor_ref)
+        if skip_row_hidden is not None and ar is not None and skip_row_hidden(ar):
+            n += 1
+            continue
+        av = extract_cell(file_path, sheet_name=sheet_name, cell_ref=anchor_ref)
+        if repeat_until_empty and is_blank_primary_value(av):
+            break
+        vals.append(
+            _eval_plus_parts_at_offset(file_path, sheet_name, parts, row_off * n, col_off * n)
+        )
+        if rule_iters_out is not None:
+            rule_iters_out.append(n)
+        n += 1
+    peek_v = None
+    if not skip_trunc_peek:
+        peek_n = (int(rule_iters_out[-1]) + 1) if rule_iters_out else len(vals)
+        peek_ref = _resolve_cell_with_offset(anchor, row_off * peek_n, col_off * peek_n)
+        peek_v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=peek_ref)
+    return vals, peek_v
 
 
 def _get_excel_cell(
@@ -2699,8 +2780,11 @@ def extract_item_values(
             ui_blk = source_ui_block(src)
             ex_mode = str((ui_blk or {}).get("extract_mode") or "extract").strip().lower()
             if ex_mode == "fixed":
-                raw_f = src.get("length_value")
-                v_fix = "" if raw_f is None else str(raw_f).strip()
+                from svc.data_agg_plus_cell_spec import resolve_fixed_text_value
+
+                v_fix = resolve_fixed_text_value(
+                    src.get("length_value"), strip_unquoted=True
+                )
                 if v_fix:
                     results.append(
                         postprocess_name_extract_primary(
@@ -2782,15 +2866,41 @@ def extract_item_values(
             sheet_name = src.get("sheet_name")
             cell_ref = src.get("cell_ref") or "A1"
             anchor = src.get("anchor")
-            row_off = int(src.get("row_offset") or 0)
-            col_off = int(src.get("col_offset") or 0)
+            try:
+                row_off = int(src.get("row_offset") or 0)
+            except (TypeError, ValueError):
+                row_off = 0
+            try:
+                col_off = int(src.get("col_offset") or 0)
+            except (TypeError, ValueError):
+                col_off = 0
             if anchor and anchor in positions:
                 base_col, base_row = positions[anchor]
                 col = base_col + col_off
                 row = base_row + row_off
                 cell_ref = _col_row_to_cell_ref(col, row)
+            # N件=1 のとき進みは不要（UI無効と一致。基準セル確定後に適用）
+            from svc.data_agg_primary_end import effective_primary_step_offsets
+
+            row_off, col_off = effective_primary_step_offsets(src)
             ui_blk = source_ui_block(src)
             _blk = ui_blk if isinstance(ui_blk, dict) else None
+            plus_info = _plus_parts_or_none(str(cell_ref))
+            plus_parts = plus_info[0] if plus_info else None
+            use_plus_concat = bool(plus_info and plus_info[1])
+            if plus_parts is not None:
+                from svc.data_agg_plus_cell_spec import first_anchor_cell_ref as _first_anchor
+
+                _anch = _first_anchor(plus_parts)
+                if _anch:
+                    cell_ref = _anch
+            elif ("+" in str(cell_ref) or '"' in str(cell_ref)) and str(
+                src.get("cell_ref") or ""
+            ).strip():
+                # 入力異常の式は主値を出さない（UI 検証と一致）
+                if cell_source_spans_out is not None:
+                    cell_source_spans_out[si] = (cell_start, 0)
+                continue
             repeat_dir = (src.get("repeat_direction") or "").strip().lower()
             if repeat_dir in ("vertical", "horizontal"):
                 repeat_until_empty, repeat_until_last, repeat_max = _resolve_cell_source_repeat(src)
@@ -2806,6 +2916,58 @@ def extract_item_values(
                     repeat_until_last=repeat_until_last,
                 )
                 vals: list[Any] = []
+                if use_plus_concat and plus_parts is not None:
+                    from svc.data_agg_row_visibility import (  # noqa: WPS433
+                        make_row_hidden_predicate,
+                        source_wants_skip_hidden_rows,
+                    )
+
+                    skip_row_hidden = make_row_hidden_predicate(
+                        Path(file_path).resolve(),
+                        sheet_name,
+                        enabled=source_wants_skip_hidden_rows(src),
+                    )
+                    rule_iters_buf: list[int] = []
+                    rule_iters_arg: Optional[list[int]] = (
+                        rule_iters_buf if skip_row_hidden is not None else None
+                    )
+                    vals, peek_v = _extract_primary_plus_series(
+                        file_path,
+                        sheet_name,
+                        plus_parts,
+                        row_off=row_off if repeat_dir == "vertical" else 0,
+                        col_off=col_off if repeat_dir == "horizontal" else 0,
+                        limit=limit,
+                        repeat_until_empty=repeat_until_empty,
+                        skip_row_hidden=skip_row_hidden,
+                        cancel_check=cancel_check,
+                        rule_iters_out=rule_iters_arg,
+                        skip_trunc_peek=skip_trunc_peek,
+                    )
+                    _finish_repeated_cell_vals(
+                        vals=vals,
+                        results=results,
+                        cell_start=cell_start,
+                        cell_source_spans_out=cell_source_spans_out,
+                        si=si,
+                        limit=limit,
+                        repeat_until_empty=repeat_until_empty,
+                        file_path=file_path,
+                        item_label=item_label,
+                        item_id=item_id,
+                        positions=positions,
+                        cell_ref=cell_ref,
+                        row_off=row_off if repeat_dir == "vertical" else 0,
+                        col_off=col_off if repeat_dir == "horizontal" else 0,
+                        ui_blk=_blk,
+                        src=src,
+                        max_primary_rows=max_primary_rows,
+                        peek_v=peek_v,
+                        skip_trunc_peek=skip_trunc_peek,
+                        rule_iters=list(rule_iters_buf) if rule_iters_arg is not None else None,
+                        cell_source_rule_iters_out=cell_source_rule_iters_out,
+                    )
+                    continue
                 base_col, base_row = _parse_cell_ref(cell_ref)
                 if base_col is None or base_row is None:
                     base_col, base_row = _parse_cell_ref("A1")
@@ -3137,16 +3299,26 @@ def extract_item_values(
                         except Exception:
                             pass
             else:
-                v = extract_cell(
-                    file_path,
-                    sheet_name=sheet_name,
-                    cell_ref=cell_ref,
-                )
-                if v is not None and (v != "" or src.get("allow_empty")):
-                    results.append(postprocess_cell_primary(v, _blk))
-                    col, row = _parse_cell_ref(cell_ref)
-                    if col is not None and row is not None and item_id:
-                        positions[item_id] = (col, row)
+                if use_plus_concat and plus_parts is not None:
+                    joined = _eval_plus_parts_at_offset(
+                        file_path, sheet_name, plus_parts, 0, 0
+                    )
+                    if joined is not None and (joined != "" or src.get("allow_empty")):
+                        results.append(postprocess_cell_primary(joined, _blk))
+                        col, row = _parse_cell_ref(cell_ref)
+                        if col is not None and row is not None and item_id:
+                            positions[item_id] = (col, row)
+                else:
+                    v = extract_cell(
+                        file_path,
+                        sheet_name=sheet_name,
+                        cell_ref=cell_ref,
+                    )
+                    if v is not None and (v != "" or src.get("allow_empty")):
+                        results.append(postprocess_cell_primary(v, _blk))
+                        col, row = _parse_cell_ref(cell_ref)
+                        if col is not None and row is not None and item_id:
+                            positions[item_id] = (col, row)
                 if cell_source_spans_out is not None:
                     cell_source_spans_out[si] = (cell_start, len(results) - cell_start)
             if cell_source_spans_out is not None and si not in cell_source_spans_out:
@@ -3188,31 +3360,45 @@ def _extract_from_cell_rule(
 ) -> Any:
     """link_defs / join_defs の 1 ルールから値を抽出する。
 
-    allow_plus_concat: True のとき連携キー向けに「D10+E10」を順結合する（結合キーは False）。
+    allow_plus_concat: True のとき「D10+E10」「A1+\"-\"+B1」を順結合する（連携・結合）。
     """
     mode = str(rule.get("mode") or "セル座標").strip()
     rdict = rule if isinstance(rule, dict) else {}
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
-        return postprocess_link_rule_value(rule.get("cell"), rdict)
+        from svc.data_agg_plus_cell_spec import resolve_fixed_text_value
+
+        return postprocess_link_rule_value(
+            resolve_fixed_text_value(rule.get("cell")), rdict
+        )
     sheet_name = src.get("sheet_name")
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1")
-    parts = (
-        _split_plus_cell_refs(base_cell)
-        if allow_plus_concat
-        else ([base_cell.strip()] if str(base_cell).strip() else [])
+    if allow_plus_concat:
+        info = _plus_parts_or_none(base_cell)
+        if info is None:
+            # 不正式は空相当（検証は UI / validate_scenario）
+            return postprocess_link_rule_value("", rdict)
+        parts, needs = info
+        if not needs and len(parts) == 1 and parts[0].kind == "cell":
+            cell_ref = _resolve_cell_with_offset(
+                parts[0].value, rule.get("row"), rule.get("col")
+            )
+            v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+            return postprocess_link_rule_value(v, rdict)
+        try:
+            ro = int(rule.get("row") or 0)
+        except (TypeError, ValueError):
+            ro = 0
+        try:
+            co = int(rule.get("col") or 0)
+        except (TypeError, ValueError):
+            co = 0
+        joined = _eval_plus_parts_at_offset(file_path, sheet_name, parts, ro, co)
+        return postprocess_link_rule_value(joined, rdict)
+    cell_ref = _resolve_cell_with_offset(
+        base_cell.strip() or "A1", rule.get("row"), rule.get("col")
     )
-    if not parts:
-        parts = ["A1"]
-    if len(parts) == 1:
-        cell_ref = _resolve_cell_with_offset(parts[0], rule.get("row"), rule.get("col"))
-        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        return postprocess_link_rule_value(v, rdict)
-    chunks: list[str] = []
-    for part in parts:
-        cell_ref = _resolve_cell_with_offset(part, rule.get("row"), rule.get("col"))
-        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        chunks.append(scalar_to_text(v))
-    return postprocess_link_rule_value("".join(chunks), rdict)
+    v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+    return postprocess_link_rule_value(v, rdict)
 
 
 def _cell_ref_with_iteration(base_cell: str, repeat_direction: str, iter_index: int) -> str:
@@ -3242,12 +3428,16 @@ def _extract_from_cell_rule_with_context(
     シート上の段進みには rule_iter_index（ソース内 0 始まり）を使い、未指定時は iter_index
     （結合主値リスト上の行。後方互換）にフォールバックする。
 
-    allow_plus_concat: 連携キーのみ True。「AA+BB」の各起点に同じオフセットを掛けて結合する。
+    allow_plus_concat: 連携・結合で True。「AA+BB」「A1+\"-\"+B1」の各起点に同じオフセットを掛けて結合する。
     """
     mode = str(rule.get("mode") or "セル座標").strip()
     rdict = rule if isinstance(rule, dict) else {}
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
-        return postprocess_link_rule_value(rule.get("cell"), rdict)
+        from svc.data_agg_plus_cell_spec import resolve_fixed_text_value
+
+        return postprocess_link_rule_value(
+            resolve_fixed_text_value(rule.get("cell")), rdict
+        )
     sheet_name = src.get("sheet_name")
     try:
         rule_iter = int(iter_ctx.get("rule_iter_index", iter_ctx.get("iter_index", 0)))
@@ -3266,23 +3456,22 @@ def _extract_from_cell_rule_with_context(
     col_step = _to_int(rule.get("col"), 0)
     row_off = row_step * max(0, rule_iter)
     col_off = col_step * max(0, rule_iter)
-    parts = (
-        _split_plus_cell_refs(base_cell)
-        if allow_plus_concat
-        else ([base_cell.strip()] if str(base_cell).strip() else [])
-    )
-    if not parts:
-        parts = ["A1"]
-    if len(parts) == 1:
-        cell_ref = _resolve_cell_with_offset(parts[0], row_off, col_off)
-        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        return postprocess_link_rule_value(v, rdict)
-    chunks: list[str] = []
-    for part in parts:
-        cell_ref = _resolve_cell_with_offset(part, row_off, col_off)
-        v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
-        chunks.append(scalar_to_text(v))
-    return postprocess_link_rule_value("".join(chunks), rdict)
+    if allow_plus_concat:
+        info = _plus_parts_or_none(base_cell)
+        if info is None:
+            return postprocess_link_rule_value("", rdict)
+        parts, needs = info
+        if not needs and len(parts) == 1 and parts[0].kind == "cell":
+            cell_ref = _resolve_cell_with_offset(parts[0].value, row_off, col_off)
+            v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+            return postprocess_link_rule_value(v, rdict)
+        joined = _eval_plus_parts_at_offset(
+            file_path, sheet_name, parts, row_off, col_off
+        )
+        return postprocess_link_rule_value(joined, rdict)
+    cell_ref = _resolve_cell_with_offset(base_cell.strip() or "A1", row_off, col_off)
+    v = extract_cell(file_path, sheet_name=sheet_name, cell_ref=cell_ref)
+    return postprocess_link_rule_value(v, rdict)
 
 
 def _extract_cell_rule_series_fast(
@@ -3297,21 +3486,25 @@ def _extract_cell_rule_series_fast(
     """
     link/join ルールの反復値を高速取得する（OpenXML Excel / CSV の典型セル座標パターン）。
     非対応時は None を返し、呼び出し側で行列キャッシュ経由の 1 セルずつ取得へフォールバックする。
-    allow_plus_concat かつセルに「+」がある場合は複数セル結合のため None（逐次経路へ）。
+    allow_plus_concat かつセルに「+」または引用がある場合は複数セル結合のため None（逐次経路へ）。
     """
     if n_src < 1:
         return []
     mode = str(rule.get("mode") or "セル座標").strip()
     if "固定" in mode or mode.lower() in ("fixed", "literal"):
-        return [postprocess_link_rule_value(rule.get("cell"), rule)] * n_src
+        from svc.data_agg_plus_cell_spec import resolve_fixed_text_value
+
+        return [
+            postprocess_link_rule_value(resolve_fixed_text_value(rule.get("cell")), rule)
+        ] * n_src
     p_abs = Path(file_path).resolve()
     is_csv = p_abs.suffix.lower() == ".csv"
     is_xls = p_abs.suffix.lower() == ".xls"
     if not is_csv and not is_openxml_excel_suffix(p_abs.suffix) and not is_xls:
         return None
     base_cell = str(rule.get("cell") or src.get("cell_ref") or "A1").strip()
-    # 連携キーの複数セル結合は系列一括経路では扱わない（逐次で各パートに同一オフセット）
-    if allow_plus_concat and "+" in base_cell:
+    # 連携・結合の複数セル／リテラル混在は系列一括経路では扱わない
+    if allow_plus_concat and ("+" in base_cell or '"' in base_cell):
         return None
     c0, r0 = _parse_cell_ref(base_cell)
     if c0 is None or r0 is None:
@@ -3457,7 +3650,7 @@ def _extract_cell_rules_series_fast_map(
             continue
         base_cell = str(r.get("cell") or src.get("cell_ref") or "A1").strip()
         # 連携キーの D10+E10 はマップ対象外（呼び出し側の個別系列へ）
-        if allow_plus_concat and "+" in base_cell:
+        if allow_plus_concat and ("+" in base_cell or '"' in base_cell):
             continue
         c0, r0 = _parse_cell_ref(base_cell)
         if c0 is None or r0 is None:
@@ -3486,8 +3679,10 @@ def _extract_cell_rules_series_fast_map(
             continue
         non_fixed.append((i, c0, r0, r))
     out: dict[int, list[Any]] = {}
+    from svc.data_agg_plus_cell_spec import resolve_fixed_text_value
+
     for i, fv, r in fixed:
-        out[i] = [postprocess_link_rule_value(fv, r)] * n_src
+        out[i] = [postprocess_link_rule_value(resolve_fixed_text_value(fv), r)] * n_src
     if not non_fixed:
         return out
     step = int(row_step_ref or 1)
@@ -4187,14 +4382,9 @@ def _extract_item_bundle_impl(
                 if n_src < 1:
                     continue
             src_base = str(src.get("cell_ref") or "A1")
-            try:
-                row_step = int(src.get("row_offset") or 0)
-            except (TypeError, ValueError):
-                row_step = 0
-            try:
-                col_step = int(src.get("col_offset") or 0)
-            except (TypeError, ValueError):
-                col_step = 0
+            from svc.data_agg_primary_end import effective_primary_step_offsets
+
+            row_step, col_step = effective_primary_step_offsets(src)
             iter_contexts = _build_source_iter_contexts(
                 file_path=file_path,
                 src_base=src_base,
@@ -4242,7 +4432,7 @@ def _extract_item_bundle_impl(
                         iter_contexts=iter_contexts,
                         n_src=n_src,
                         cancel_check=cancel_check,
-                        allow_plus_concat=False,
+                        allow_plus_concat=True,
                     )
         if debug_step_scope == "link":
             _align_link_join_series_to_primary(bundle)
@@ -4330,14 +4520,9 @@ def _extract_item_bundle_impl(
             if n_src < 1:
                 continue
             src_base = str(src.get("cell_ref") or "A1")
-            try:
-                row_step = int(src.get("row_offset") or 0)
-            except (TypeError, ValueError):
-                row_step = 0
-            try:
-                col_step = int(src.get("col_offset") or 0)
-            except (TypeError, ValueError):
-                col_step = 0
+            from svc.data_agg_primary_end import effective_primary_step_offsets
+
+            row_step, col_step = effective_primary_step_offsets(src)
             iter_contexts = _build_source_iter_contexts(
                 file_path=file_path,
                 src_base=src_base,
@@ -4402,7 +4587,7 @@ def _extract_item_bundle_impl(
                         join_defs,
                         n_src=n_src,
                         cancel_check=cancel_check,
-                        allow_plus_concat=False,
+                        allow_plus_concat=True,
                     )
                     if contiguous
                     else None
@@ -4437,7 +4622,7 @@ def _extract_item_bundle_impl(
                             iter_contexts=iter_contexts,
                             n_src=n_src,
                             cancel_check=cancel_check,
-                            allow_plus_concat=False,
+                            allow_plus_concat=True,
                         )
         elif stype == "name_extract":
             if not name_extract_search_matches(file_path, src):

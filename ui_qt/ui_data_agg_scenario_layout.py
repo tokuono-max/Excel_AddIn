@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -235,8 +236,13 @@ def _compact_spin(sb: QSpinBox, max_width: int = 76) -> None:
 
 
 def ascii_upper_cell_ref(text: str) -> str:
-    """セル座標用: ASCII 小文字 a–z のみ大文字化する（他の文字はそのまま）。"""
-    return "".join(ch.upper() if "a" <= ch <= "z" else ch for ch in str(text))
+    """
+    セル座標用: ASCII 小文字 a–z のみ大文字化する。
+    CSV 引用符（\"...\"、内側は \"\"）の中は変換しない（固定文言の保護）。
+    """
+    from svc.data_agg_plus_cell_spec import ascii_upper_plus_cell_spec
+
+    return ascii_upper_plus_cell_spec(text)
 
 
 def bind_cell_ref_uppercase(
@@ -245,7 +251,7 @@ def bind_cell_ref_uppercase(
     enabled_when: Any | None = None,
 ) -> None:
     """
-    座標入力欄で英小文字を入力したら即座に大文字表示へ直す。
+    座標入力欄で英小文字を入力したら即座に大文字表示へ直す（引用符内を除く）。
     enabled_when が callable のときは True のときだけ変換（連携の固定値モード用）。
     """
 
@@ -260,6 +266,57 @@ def bind_cell_ref_uppercase(
         edit.setCursorPosition(min(pos, len(up)))
 
     edit.textChanged.connect(_on_text_changed)
+
+
+def bind_plus_cell_spec_focus_validate(
+    edit: QLineEdit,
+    *,
+    enabled_when: Any | None = None,
+    title: str = "入力異常",
+    field_label: Any = "セル座標",
+    key_kind: str = "",
+    key_index_fn: Any | None = None,
+) -> None:
+    """
+    フォーカス喪失時にセル座標式を検証する。
+    空欄は異常にしない（登録時に別途検証）。不正なら警告を出す。
+
+    field_label: 文字列、または呼び出し時にラベルを返す callable。
+    key_kind / key_index_fn: 連携・結合で「連携キー #N」等を付ける（任意）。
+    """
+
+    def _on_finished() -> None:
+        if callable(enabled_when) and not bool(enabled_when()):
+            return
+        text = str(edit.text() or "").strip()
+        if not text:
+            return
+        from svc.data_agg_plus_cell_spec import (
+            format_plus_cell_input_error,
+            validate_plus_cell_spec,
+        )
+
+        err = validate_plus_cell_spec(text, empty_ok=True)
+        if not err:
+            return
+        label = field_label() if callable(field_label) else field_label
+        kidx = None
+        if callable(key_index_fn):
+            try:
+                kidx = key_index_fn()
+            except Exception:
+                kidx = None
+        msg = format_plus_cell_input_error(
+            err,
+            field_label=str(label or "セル座標"),
+            value=text,
+            key_kind=str(key_kind or ""),
+            key_index=kidx,
+        )
+        parent = edit.window()
+        show_warning_notice(parent if parent is not None else None, title, msg)
+
+    edit.editingFinished.connect(_on_finished)
 
 
 def _tight_form(form: QFormLayout, cfg: dict[str, Any] | None = None) -> None:
@@ -634,31 +691,42 @@ def apply_scenario_detail_cell_tooltips(
         refs.get("cell_ref"),
         cfg,
         "TIP_CELL_REF",
-        "値を読み取る基準セル（Excel の A1 形式）です。",
+        "値を読み取る基準セル（Excel の A1 形式）です。\n"
+        "複数セルは「D10+D11」、固定文字は「A1+\"-\"+B1」のように + で左から順に結合"
+        "（区切りなし。空セルは空文字）。\n"
+        "反復・空白まで・非表示除外は、式の左から最初のセル座標を基準にします。\n"
+        "セル座標が1つも無い式は入力異常です。",
     )
     _apply_cfg_tip_force(
         refs.get("row_offset"),
         cfg,
         "TIP_ROW_OFFSET",
-        "基準セルからの行方向オフセットです。",
+        "次の主キーまでの行方向の進みです。\n"
+        "終結「N件」かつ取得件数=1 のときは無効（値は保持、実行時は進みません）。\n"
+        "空白まで／終端のときは行か列のどちらかを 0 以外にしてください。",
     )
     _apply_cfg_tip_force(
         refs.get("col_offset"),
         cfg,
         "TIP_COL_OFFSET",
-        "基準セルからの列方向オフセットです。",
+        "次の主キーまでの列方向の進みです。\n"
+        "終結「N件」かつ取得件数=1 のときは無効（値は保持、実行時は進みません）。\n"
+        "空白まで／終端のときは行か列のどちらかを 0 以外にしてください。",
     )
     _apply_cfg_tip_force(
         refs.get("end_mode"),
         cfg,
         "TIP_END_MODE",
-        "取得終了条件（N 件で打ち切り／空白まで等）です。",
+        "取得の終わり方です（N件／空白まで／終端）。\n"
+        "設定順は終結モード → 取得件数 → 行/列オフセットです。\n"
+        "空白まで／終端を選んだあと、オフセットを設定できます（ともに 0 のままでは登録できません）。",
     )
     _apply_cfg_tip_force(
         refs.get("n_count"),
         cfg,
         "TIP_N_COUNT",
-        "取得する値の最大件数です。",
+        "終結「N件」のときの最大取得数です（下限1。0は指定不可）。\n"
+        "件数=1 のとき行/列オフセットは無効になります。",
     )
     _apply_cfg_tip_force(
         refs.get("skip_empty_primary"),
@@ -1019,12 +1087,35 @@ def build_scenario_detail_cell_scroll(
     le_cell.setMinimumWidth(0)
     le_cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     bind_cell_ref_uppercase(le_cell)
+    bind_plus_cell_spec_focus_validate(
+        le_cell,
+        field_label=_dcp(cfg, "LABEL_CELL_REF", "セル座標(Excel方式)"),
+    )
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_CELL_REF", "セル座標")), le_cell)
     refs["cell_ref"] = le_cell
 
     w_row_col = int(_dc(cfg, "SPIN_WIDTH_ROW_COL", 96))
     w_n = int(_dc(cfg, "SPIN_WIDTH_N", 110))
     w_join = int(_dc(cfg, "SPIN_WIDTH_JOIN", 76))
+
+    end_items = _dc(cfg, "END_MODE_ITEMS", ["N件", "空白まで", "終端"])
+    if not isinstance(end_items, list) or len(end_items) < 2:
+        end_items = ["N件", "空白まで", "終端"]
+    end_items = [_normalize_message_newlines(str(x).strip()) for x in end_items]
+    cb_end = FocusWheelComboBox()
+    cb_end.addItems(end_items)
+    _combo_fit_viewport(cb_end)
+    f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_END_MODE", "終結モード")), cb_end)
+    refs["end_mode"] = cb_end
+    refs["end_mode_labels"] = end_items
+
+    sp_n = FocusWheelSpinBox()
+    # 取得件数 0 は許可しない（意味が曖昧なため下限 1）
+    sp_n.setRange(1, 999999)
+    sp_n.setValue(int(_dc(cfg, "DEFAULT_N_COUNT", 1) or 1))
+    _compact_spin(sp_n, w_n)
+    f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_N_COUNT", "取得件数")), sp_n)
+    refs["n_count"] = sp_n
 
     sp_row = FocusWheelSpinBox()
     sp_row.setRange(-999, 999)
@@ -1040,23 +1131,19 @@ def build_scenario_detail_cell_scroll(
     f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_COL_OFFSET", "列移動オフセット")), sp_col)
     refs["col_offset"] = sp_col
 
-    end_items = _dc(cfg, "END_MODE_ITEMS", ["N件", "空白まで", "終端"])
-    if not isinstance(end_items, list) or len(end_items) < 2:
-        end_items = ["N件", "空白まで", "終端"]
-    end_items = [_normalize_message_newlines(str(x).strip()) for x in end_items]
-    cb_end = FocusWheelComboBox()
-    cb_end.addItems(end_items)
-    _combo_fit_viewport(cb_end)
-    f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_END_MODE", "終結モード")), cb_end)
-    refs["end_mode"] = cb_end
-    refs["end_mode_labels"] = end_items
-
-    sp_n = FocusWheelSpinBox()
-    sp_n.setRange(1, 999999)
-    sp_n.setValue(int(_dc(cfg, "DEFAULT_N_COUNT", 1) or 1))
-    _compact_spin(sp_n, w_n)
-    f3v.addRow(_field_lbl(_dcp(cfg, "LABEL_N_COUNT", "取得件数")), sp_n)
-    refs["n_count"] = sp_n
+    scan_frame = QFrame()
+    scan_frame.setObjectName("primary_scan_opts_frame")
+    scan_frame.setFrameShape(QFrame.Shape.StyledPanel)
+    scan_frame.setStyleSheet(
+        "QFrame#primary_scan_opts_frame {"
+        " border: 1px solid #b0b0b0; border-radius: 3px;"
+        " margin-top: 2px; background: transparent;"
+        "}"
+    )
+    scan_form = QFormLayout(scan_frame)
+    scan_form.setContentsMargins(6, 4, 6, 4)
+    scan_form.setHorizontalSpacing(8)
+    scan_form.setVerticalSpacing(3)
 
     cb_skip_empty = QCheckBox("")
     cb_skip_empty.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_EMPTY_PRIMARY", False)))
@@ -1072,7 +1159,7 @@ def build_scenario_detail_cell_scroll(
     skip_lay.setSpacing(6)
     skip_lay.addWidget(cb_skip_empty, 0)
     skip_lay.addWidget(ed_skip_match, 1)
-    f3v.addRow(
+    scan_form.addRow(
         _field_lbl(_dcp(cfg, "LABEL_SKIP_EMPTY_PRIMARY", "主キーをスキップ")),
         skip_row,
     )
@@ -1081,7 +1168,7 @@ def build_scenario_detail_cell_scroll(
 
     cb_skip_carry_seed = QCheckBox("")
     cb_skip_carry_seed.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_CARRY_SEED", False)))
-    f3v.addRow(
+    scan_form.addRow(
         _field_lbl(_dcp(cfg, "LABEL_SKIP_CARRY_SEED", "スキップ行を前置に使う")),
         cb_skip_carry_seed,
     )
@@ -1089,11 +1176,14 @@ def build_scenario_detail_cell_scroll(
 
     cb_skip_hidden = QCheckBox("")
     cb_skip_hidden.setChecked(bool(_dc(cfg, "DEFAULT_SKIP_HIDDEN_ROWS", False)))
-    f3v.addRow(
+    scan_form.addRow(
         _field_lbl(_dcp(cfg, "LABEL_SKIP_HIDDEN_ROWS", "非表示・フィルタ行を除く")),
         cb_skip_hidden,
     )
     refs["skip_hidden_rows"] = cb_skip_hidden
+    f3v.addRow(scan_frame)
+
+    from svc.data_agg_primary_end import primary_offsets_ui_enabled
 
     def _end_mode_label(kind: str) -> str:
         # kind: n | blank | last
@@ -1110,48 +1200,46 @@ def build_scenario_detail_cell_scroll(
         if not on:
             cb_skip_carry_seed.setChecked(False)
 
-    def _sync_n_count_for_end(_: int = 0) -> None:
+    def _sync_primary_end_and_offsets(_: int = 0) -> None:
+        """
+        終結モード／取得件数／オフセットの連動（設定順: 終結→件数→オフセット）。
+        ・終結モードの選択肢は常にすべて有効（オフセット 0/0 でも空白まで／終端を選べる）
+        ・N件のときだけ取得件数を有効
+        ・N件かつ件数=1 のとき行/列オフセットを無効（値は保持）
+        ・空白まで／終端＋オフセット 0/0 の組合せは登録／保存時に検証（無限反復防止）
+        """
         blank_lbl = _end_mode_label("blank")
         last_lbl = _end_mode_label("last")
         cur = cb_end.currentText()
         is_n_mode = cur not in (blank_lbl, last_lbl)
         sp_n.setEnabled(is_n_mode)
-        _sync_skip_match_enabled()
-
-    def _sync_offset_blank_guard(_: int = 0) -> None:
-        """行・列オフセットがともに 0 のとき「空白まで／終端」は無効（同一セル無限反復の防止）。"""
-        ro = sp_row.value()
-        co = sp_col.value()
-        both_zero = ro == 0 and co == 0
-        blank_lbl = _end_mode_label("blank")
-        last_lbl = _end_mode_label("last")
-        n_lbl = _end_mode_label("n")
+        offsets_on = primary_offsets_ui_enabled(
+            is_n_mode=is_n_mode, n_count=int(sp_n.value())
+        )
+        sp_row.setEnabled(offsets_on)
+        sp_col.setEnabled(offsets_on)
+        # 空白まで／終端の項目は常に選択可（オフセットは後から設定する想定）
         mod = cb_end.model()
         if isinstance(mod, QStandardItemModel):
             for ix in range(cb_end.count()):
                 it = mod.item(ix)
-                if it is None:
-                    continue
-                lab = cb_end.itemText(ix)
-                if lab in (blank_lbl, last_lbl):
-                    it.setEnabled(not both_zero)
-        if both_zero and cb_end.currentText() in (blank_lbl, last_lbl):
-            ix_n = next((ii for ii, t in enumerate(end_items) if t == n_lbl), 0)
-            cb_end.blockSignals(True)
-            try:
-                cb_end.setCurrentIndex(ix_n)
-            finally:
-                cb_end.blockSignals(False)
-        _sync_n_count_for_end()
+                if it is not None:
+                    it.setEnabled(True)
+        _sync_skip_match_enabled()
+
+    # 互換エイリアス（読込側が旧名で呼ぶ）
+    _sync_n_count_for_end = _sync_primary_end_and_offsets
+    _sync_offset_blank_guard = _sync_primary_end_and_offsets
 
     refs["sync_n_count_for_end"] = _sync_n_count_for_end
     refs["sync_offset_blank_guard"] = _sync_offset_blank_guard
     refs["sync_skip_match_enabled"] = _sync_skip_match_enabled
-    cb_end.currentIndexChanged.connect(_sync_n_count_for_end)
+    cb_end.currentIndexChanged.connect(_sync_primary_end_and_offsets)
+    sp_n.valueChanged.connect(_sync_primary_end_and_offsets)
     cb_skip_empty.toggled.connect(_sync_skip_match_enabled)
-    sp_row.valueChanged.connect(_sync_offset_blank_guard)
-    sp_col.valueChanged.connect(_sync_offset_blank_guard)
-    _sync_offset_blank_guard()
+    sp_row.valueChanged.connect(_sync_primary_end_and_offsets)
+    sp_col.valueChanged.connect(_sync_primary_end_and_offsets)
+    _sync_primary_end_and_offsets()
     _sync_skip_match_enabled()
 
     chk_labels = _dc(cfg, "CHECK_LABELS", ["トリム", "全角→半角", "年月日変換"])
@@ -1366,6 +1454,15 @@ def build_scenario_detail_cell_scroll(
             "btn_insert": btn_ins_l,
             "btn_remove": btn_rm_l,
         }
+        bind_plus_cell_spec_focus_validate(
+            le_lc,
+            enabled_when=lambda: bool(rad_link_cell.isChecked()),
+            field_label=_dcp(cfg, "LABEL_LINK_CELL", "セル座標/固定値"),
+            key_kind="連携キー",
+            key_index_fn=lambda L=ld: (
+                (link_defs.index(L) + 1) if L in link_defs else None
+            ),
+        )
         def _sync_link_mode_state(*_args: Any, force_fixed: bool | None = None) -> None:
             # toggled(bool) が第1引数に来る。セル座標がオンならオフセットを有効にする
             # （信号ブロック中に両方 checked が残っても、画面のセル座標に合わせる）。
@@ -1422,7 +1519,7 @@ def build_scenario_detail_cell_scroll(
             le_lc,
             cfg,
             "TIP_LINK_CELL_OR_FIXED",
-            "セル参照は A1 形式。複数セルは「D10+D11」のように + で左から順に結合（区切り文字なし）。空セルは空文字。行・列オフセットは各セルに同じだけ適用。固定値モード時はその文字列。",
+            "セル参照は A1 形式。複数セルは「D10+D11」、固定文字は「A1+\"-\"+B1」のように + で左から順に結合（区切りなし）。空セルは空文字。行・列オフセットは各セルに同じだけ適用。固定値モード時は欄全体が定数（+ 分割しない）。全体を \"…\" で囲むとその中身だけが値（\" 自体は \"\"）。未引用はそのまま。",
         )
         _apply_cfg_tip_force(
             sj,
@@ -1697,6 +1794,14 @@ def build_scenario_detail_cell_scroll(
             "btn_insert": btn_ins_j,
             "btn_remove": btn_rm_j,
         }
+        bind_plus_cell_spec_focus_validate(
+            le_kc,
+            field_label=_dcp(cfg, "LABEL_JOIN_CELL", "セル座標"),
+            key_kind="結合キー",
+            key_index_fn=lambda J=jd: (
+                (join_defs.index(J) + 1) if J in join_defs else None
+            ),
+        )
         btn_ins_j.clicked.connect(lambda _=False, J=jd: insert_join_group_after(J))
         btn_rm_j.clicked.connect(lambda _=False, J=jd: remove_join_group(J))
         row_jbtn.addWidget(btn_ins_j)
@@ -1718,7 +1823,10 @@ def build_scenario_detail_cell_scroll(
             le_kc,
             cfg,
             "TIP_LABEL_JOIN_CELL",
-            "照合値を読むセル座標（A1形式）です。",
+            "照合値を読むセル座標（A1形式）です。\n"
+            "複数セルは「D10+D11」、固定文字は「A1+\"-\"+B1」のように + で左から順に結合"
+            "（連携キーと同じ。区切りなし。空セルは空文字）。\n"
+            "行・列オフセットは各セルに同じだけ適用します。",
         )
         _apply_cfg_tip_force(
             sj,

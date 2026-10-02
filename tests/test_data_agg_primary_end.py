@@ -14,8 +14,10 @@ from svc.data_agg_primary_end import (  # noqa: E402
     END_MODE_UNTIL_EMPTY,
     END_MODE_UNTIL_LAST,
     apply_until_last_trim,
+    effective_primary_step_offsets,
     effective_skip_primary_tokens,
     parse_skip_primary_match,
+    primary_offsets_ui_enabled,
     primary_value_matches_skip_tokens,
     source_end_mode,
     source_keep_empty_primary_slots,
@@ -101,3 +103,36 @@ def test_trim_until_last() -> None:
     assert apply_until_last_trim(["a", None, "b", "", ""], until_last=True) == ["a", None, "b"]
     assert apply_until_last_trim(["", ""], until_last=True) == []
     assert apply_until_last_trim(["a", None], until_last=False) == ["a", None]
+
+
+def test_primary_offsets_ui_enabled_matrix() -> None:
+    assert not primary_offsets_ui_enabled(is_n_mode=True, n_count=1)
+    assert primary_offsets_ui_enabled(is_n_mode=True, n_count=2)
+    assert primary_offsets_ui_enabled(is_n_mode=False, n_count=1)
+    assert primary_offsets_ui_enabled(is_n_mode=False, n_count=10)
+
+
+def test_effective_primary_step_offsets_n1_forces_zero() -> None:
+    assert effective_primary_step_offsets(
+        {
+            "repeat_until_empty": False,
+            "repeat_max": 1,
+            "row_offset": 3,
+            "col_offset": 2,
+        }
+    ) == (0, 0)
+    assert effective_primary_step_offsets(
+        {
+            "repeat_until_empty": False,
+            "repeat_max": 2,
+            "row_offset": 3,
+            "col_offset": 2,
+        }
+    ) == (3, 2)
+    assert effective_primary_step_offsets(
+        {
+            "repeat_until_empty": True,
+            "row_offset": 1,
+            "col_offset": 0,
+        }
+    ) == (1, 0)

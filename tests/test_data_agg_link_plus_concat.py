@@ -98,8 +98,27 @@ def test_extract_link_plus_preserves_newlines_for_split() -> None:
         assert "ABXY" in str(v_empty)
 
 
-def test_extract_join_does_not_split_plus() -> None:
-    """結合キーは allow_plus_concat=False のため D10+E10 を分割せず 1 参照として解決する。"""
+def test_extract_join_splits_plus_when_allowed() -> None:
+    """結合キーも allow_plus_concat=True なら D10+E10 を分割して結合する。"""
+    seen: list[str] = []
+
+    def _fake_extract(_path, sheet_name=None, cell_ref=None):  # noqa: ARG001
+        seen.append(str(cell_ref or "").upper())
+        return "X"
+
+    with patch("svc.svc_data_agg_extract.extract_cell", side_effect=_fake_extract):
+        v = _extract_from_cell_rule(
+            "dummy.xlsx",
+            {"sheet_name": "S"},
+            {"cell": "D10+E10", "mode": "セル座標"},
+            allow_plus_concat=True,
+        )
+    assert seen == ["D10", "E10"]
+    assert "XX" in str(v)
+
+
+def test_extract_join_does_not_split_plus_when_disabled() -> None:
+    """allow_plus_concat=False のときは D10+E10 を分割せず 1 参照として解決する。"""
     seen: list[str] = []
 
     def _fake_extract(_path, sheet_name=None, cell_ref=None):  # noqa: ARG001
