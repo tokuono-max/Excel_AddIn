@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-ãã¹ã¿ãããã°ç¨ãã¬ãã¥ã¼: ã·ããªãªã®çµã¿ç«ã¦ã¨ compute_batch_table_rows å®è¡ã1ãæã«éç´ããã
+マスタデバッグ用プレビュー: シナリオの組み立てと compute_batch_table_rows 実行を1か所に集約する。
 
-- ä¸æ¬OFFï¼é²è¡ï¼: é ç®ã»ã½ã¼ã¹ããã¹ã¿ä½ç½®ã»ã¹ãããã§åãè©°ãã__debug_diag ã§ãã¹çµãè¾¼ã¿ã
-- ä¸æ¬OFFï¼unlockï¼/ åç­ãã«: å¨ã½ã¼ã¹ã®ã¾ã¾åä¸ diag ã§çµãè¾¼ã¿ï¼æ¬çªèµ°æ»ä»¶æ°ã«å¼ã£å¼µãããªãï¼ã
-- ä¸æ¬ON: é²æããã¯ã»diag æå¹ãã©ã°ä»ãã§åãçµè·¯ãã computeã
+- 一括OFF（進行）: 項目・ソースをマスタ位置・ステップで切り詰め、__debug_diag でパス絞り込み。
+- 一括OFF（unlock）/ 同等フル: 全ソースのまま同一 diag で絞り込み（本番走査件数に引っ張られない）。
+- 一括ON: 進捗フック・diag 有効フラグ付きで同じ経路から compute。
 
-ui_qt/ui_data_agg_debug ã¯ã­ã£ãã·ã¥ã­ã¼ã¨ã¿ã¤ãã³ã°ã®ã¿æå½ããä¸­èº«ã¯ããã«å¯ããã
+ui_qt/ui_data_agg_debug はキャッシュキーとタイミングのみ担当し、中身はここに寄せる。
 """
 from __future__ import annotations
 
@@ -325,10 +325,10 @@ def master_preview_one_shot_eligible(
     active_slot_indices: list[int],
 ) -> bool:
     """
-    åä¸ãã¹ã¿é ç®åã®è¤æ°ã·ããªãªããå°éåãã¨ã®æ®µé compute ã§ã¯ãªã
-    å¨ active ã½ã¼ã¹ä¸æ¬ compute + ã¹ãããå¥ã­ã£ãã·ã¥ã§è³ãããã
+    同一マスタ項目内の複数シナリオを、到達分ごとの段階 compute ではなく
+    全 active ソース一括 compute + ステップ別キャッシュで賄えるか。
 
-    çµåã­ã¼æ¢ç´¢ããã·ããªãªã¯æ®µéãã¼ã«ãå¤ãããã Falseï¼å¾æ¥ã©ããæ®µé computeï¼ã
+    結合キー探索ありシナリオは段階プールが変わるため False（従来どおり段階 compute）。
     """
     active = [int(x) for x in active_slot_indices if isinstance(x, int)]
     if len(active) < 2:
@@ -358,8 +358,8 @@ def master_preview_one_shot_eligible(
 
 def scenario_for_full_preview(scenario_base: dict[str, Any]) -> dict[str, Any]:
     """
-    ãã«ã½ã¼ã¹ã»cell æ¡ä»¶ã«ãããã¡ã¤ã«çµãè¾¼ã¿ã®ã¿æå¹ãªãã¬ãã¥ã¼ç¨ã·ããªãªã
-    ï¼ä¸æ¬OFF unlock æã® batch è¡¨ç¤ºãªã©ï¼
+    フルソース・cell 条件によるファイル絞り込みのみ有効なプレビュー用シナリオ。
+    （一括OFF unlock 時の batch 表示など）
     """
     s = copy.deepcopy(scenario_base or {})
     prev = s.get("__debug_diag")
@@ -388,7 +388,7 @@ def build_master_preview_frozen_snapshot(
     through_mi: int,
     file_paths: list[str],
 ) -> None:
-    """join ãã¼ã«è¡ï¼__norm_path + __iter_indexï¼ããåçµã¹ãããã·ã§ããã out ã«æ¸ãè¾¼ãã"""
+    """join プール行（__norm_path + __iter_index）から凍結スナップショットを out に書き込む。"""
     from svc.svc_data_agg import _row_iter_index, normalize_source_path  # noqa: WPS433
 
     paths = [str(p) for p in file_paths]
@@ -422,7 +422,7 @@ def preview_compute_file_paths(
     scenario_base: dict[str, Any],
     scan_paths: list[str],
 ) -> list[str]:
-    """compute_batch ã¨åã cell æ¡ä»¶ã«ãããã¡ã¤ã«çµãè¾¼ã¿å¾ã®ãã¹ä¸è¦§ã"""
+    """compute_batch と同じ cell 条件によるファイル絞り込み後のパス一覧。"""
     from svc.svc_data_agg import filter_file_paths_for_master_preview  # noqa: WPS433
 
     items = list((scenario_base or {}).get("items") or [])
@@ -440,9 +440,9 @@ def frozen_snapshot_invalid_reason(
     expected_through_mi: int,
     relax_paths: bool = False,
 ) -> str | None:
-    """æå¹ãªã Noneãç¡å¹ãªãã­ã°ç¨ reason ã³ã¼ãã
+    """有効なら None。無効ならログ用 reason コード。
 
-    relax_paths: é ç®ã¹ã­ããã® carry-forward ç¨ãpaths_head ã®ã¿ç·©åï¼paths_count ã¯å¸¸ã«ä¸è´å¿é ï¼ã
+    relax_paths: 項目スキップの carry-forward 用。paths_head のみ緩和（paths_count は常に一致必須）。
     """
     if not isinstance(snapshot, dict):
         return "no_snapshot"
@@ -478,8 +478,8 @@ def best_frozen_snapshot_for_mi(
     file_paths: list[str],
 ) -> tuple[dict[str, Any] | None, int | None]:
     """
-    through_mi < mi_idx ã®ãã¡æå¤§ã®æå¹ã¹ãããã·ã§ãããè¿ãã
-    ç´åé ç® (mi_idx-1) ã¯ paths å³å¯ãããããå¤ã carry-forward ã¯ paths_head ã®ã¿ç·©åã
+    through_mi < mi_idx のうち最大の有効スナップショットを返す。
+    直前項目 (mi_idx-1) は paths 厳密。それより古い carry-forward は paths_head のみ緩和。
     """
     if int(mi_idx) <= 0:
         return None, None
@@ -557,19 +557,19 @@ def scenario_for_stepped_preview(
     frozen_capture_acc: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    ä¸æ¬OFF: j < mi ã¯ãã«ã½ã¼ã¹ãj == mi ã¯å®è¡æ¸ã¿ã·ããªãªåã ããj > mi ã¯ã½ã¼ã¹ç©ºï¼ã»ã«åå¾ã¨åæ§ï¼ã
-    ç§ååã¯åã·ããªãªããè§£ãã path_col_hint ã __debug_diag ã«è¼ããcompute å´ã§ join_path ç­ã«è£ãã
+    一括OFF: j < mi はフルソース、j == mi は実行済みシナリオ分だけ、j > mi はソース空（セル取得と同様）。
+    照合列は元シナリオから解いた path_col_hint を __debug_diag に載せ、compute 側で join_path 等に補う。
 
-    ç¾å¨é ç® j==mi ã¯ picked ã®ã¿ï¼æªããã¯ã®ã½ã¼ã¹ã¯ä»ããªãï¼â ã¹ã­ãããé ã«è¸ãã¾ã§å½è©²åãåããªãã
+    現在項目 j==mi は picked のみ（未ピックのソースは付けない）— スロットを順に踏むまで当該列を埋めない。
 
-    use_max_sources_for_current_item ã True ã®ã¨ããç¾å¨é ç®ã¯å¸¸ã« active åã®å¨ã½ã¼ã¹ãåãè¾¼ã
-    ï¼çµåã­ã¼æ¢ç´¢ãç¡ãã·ããªãªåãã® 1 åè¨ç®ï¼ã¹ãããåå©ç¨ç¨ãcaller ãã¬ã¼ãããï¼ã
-    carry_forward_completed_items ã True ã®ã¨ããj < mi ã¯åæ®µ table_rows seed ãä½¿ãåæã§åæ½åºããªãã
+    use_max_sources_for_current_item が True のとき、現在項目は常に active 内の全ソースを取り込む
+    （結合キー探索が無いシナリオ向けの 1 回計算＋ステップ再利用用。caller がガードする）。
+    carry_forward_completed_items が True のとき、j < mi は前段 table_rows seed を使う前提で再抽出しない。
     """
     scen = copy.deepcopy(scenario_base or {})
     items_orig = list(scen.get("items") or [])
     headers_full = [
-        it.get("name") or it.get("id") or ("é ç®_%s" % i)
+        it.get("name") or it.get("id") or ("項目_%s" % i)
         for i, it in enumerate(items_orig)
     ]
     path_col_hint = resolve_path_column_for_merge(items_orig, headers_full) or ""
@@ -577,8 +577,8 @@ def scenario_for_stepped_preview(
     if frozen_through_mi is not None and isinstance(frozen_prior, dict):
         from svc.svc_data_agg import _anchor_headers_for_table_output  # noqa: WPS433
 
-        # carry-forwardï¼through ãç´åã§ãªãï¼ã§ã¯é¨å emit ãç·©ããªãã
-        # ãã¹æ°ä¸ä¸è´ã®å¤ãåçµï¼é¨ override ã ã¨çµåè¡ãå¨é¤å¤ããè¡¨ãç©ºã«ãªãã
+        # carry-forward（through が直前でない）では錨列 emit を緩めない。
+        # パス数不一致の古い凍結＋錨 override だと結合行が全除外され表が空になる。
         if int(mi_idx) - int(frozen_through_mi) <= 1:
             frozen_anchor_headers = _anchor_headers_for_table_output(
                 items_orig, headers_full
@@ -640,7 +640,7 @@ def scenario_for_master_batch_on(
     mi_idx: int,
     diag_enabled: bool,
 ) -> dict[str, Any]:
-    """ä¸æ¬ON: é²æè¡¨ç¤ºæã¯ diag.enabled ã True ã«ã§ããã"""
+    """一括ON: 進捗表示時は diag.enabled を True にできる。"""
     s = copy.deepcopy(scenario_base or {})
     s["__debug_diag"] = {
         "enabled": bool(diag_enabled),
@@ -656,8 +656,8 @@ def scenario_for_production_parity_preview(
     diag_enabled: bool = False,
 ) -> dict[str, Any]:
     """
-    æ¬çªä¸æ¬ã¨åã table_rows çµç«ï¼å¨é ç®ã½ã¼ã¹æå¹ã»match_keys çµè·¯ï¼ç¨ã·ããªãªã
-    æ®µéãã¬ãã¥ã¼ï¼scenario_for_stepped_previewï¼ã¨ã¯å¥ã
+    本番一括と同じ table_rows 組立（全項目ソース有効・match_keys 経路）用シナリオ。
+    段階プレビュー（scenario_for_stepped_preview）とは別。
     """
     scen = copy.deepcopy(scenario_base or {})
     scen["__debug_diag"] = {
@@ -764,7 +764,7 @@ def run_production_parity_preview_compute(
     progress_hook: Optional[Callable[..., None]] = None,
     probe_caller: Optional[str] = None,
 ) -> tuple[list[str], list[list[Any]], list[list[Any]], int]:
-    """å®äºæè¡¨ç¤º: æ¬çªä¸æ¬ã¨åãè¡é ã»çµç«ã§ãã¬ãã¥ã¼è¡¨ãå¾ãã"""
+    """完了時表示: 本番一括と同じ行順・組立でプレビュー表を得る。"""
     scen = scenario_for_production_parity_preview(scenario_base)
     paths = preview_compute_file_paths(scen, file_paths)
     return run_preview_compute(
