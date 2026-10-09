@@ -741,7 +741,7 @@ def extract_from_name(
 
     【概要】
       source_type で file_name / dir_name を選択。
-      search_condition と search_text で抽出前のフィルタ（含む/含まない）を適用。
+      search_condition と search_text（名前パターン）で抽出前のフィルタを適用。
       start_mode: head（先頭）→ length_mode で抽出長さを指定。
       start_mode: delimiter → 区切記号＋part_index で分割し、該当部分を取得（抽出長さは不要）。
       start_mode: position → start_value を開始位置として length_mode で抽出。
@@ -750,8 +750,8 @@ def extract_from_name(
     【引数】
       file_path: 対象ファイルのパス。
       source_type: "file_name" | "dir_name"
-      search_condition: "include"（含む）| "exclude"（含まない）| None（フィルタなし）
-      search_text: 検索文字列。空の場合はフィルタなし。
+      search_condition: "include"（含む）| "exclude"（含まない）| "exact"（完全一致）| None（フィルタなし）
+      search_text: 検索パターン（セルのファイル名条件と同型）。空の場合はフィルタなし。
       search_keywords: 互換用（未使用）。
       keyword_logic: 互換用（未使用）。
       start_mode: "head" | "delimiter" | "position"
@@ -773,21 +773,20 @@ def extract_from_name(
     st = str(source_type or "file_name").strip().lower()
     text = _name_extract_text_for_match_and_extract(p, st)
 
-    # 検索条件フィルタ（単一文字列）: 条件を満たさない場合は空文字を返す（name_extract_search_matches と整合）
+    # 検索条件フィルタ（セルのファイル名条件と同型の名前パターン）: 不一致は空文字
+    # name_extract_search_matches と整合。空または条件未設定はフィルタ無し。
     kw = (search_text or "").strip()
     if kw and search_condition:
-        t_l = text.lower()
-        k_l = kw.lower()
-        sc = str(search_condition).strip().lower()
-        if sc in ("exclude", "含まない"):
-            if k_l in t_l:
-                return ""
-        elif sc in ("exact", "equals", "完全一致"):
-            if k_l != t_l:
-                return ""
-        else:
-            if k_l not in t_l:
-                return ""
+        from svc.data_agg_sheet_resolve import match_text_by_name_pattern
+
+        ok = match_text_by_name_pattern(
+            text,
+            str(search_condition),
+            search_text,
+            case_sensitive=False,
+        )
+        if ok is False:
+            return ""
 
     def _apply_regex(t: str) -> str:
         if pattern:
@@ -863,23 +862,28 @@ def _name_extract_text_for_match_and_extract(path: Path, source_type: str) -> st
 def name_extract_search_matches(file_path: str | Path, src: dict[str, Any]) -> bool:
     """
     extract_from_name と同じ対象文字列（dir: 親フォルダ名 / file: stem）で
-    search_text・search_condition を評価する。キーワード空または条件未設定はフィルタ無し。
+    search_text・search_condition を評価する。
+
+    search_text はセルのファイル名条件と同じ名前パターン（\"A\"|\"B\" / \"A\"&\"B\" 等）。
+    キーワード空または条件未設定はフィルタ無し。実行時は legacy（囲みなし）も解釈する。
     """
     kw = (src.get("search_text") or "").strip()
     if not kw or not src.get("search_condition"):
         return True
+    from svc.data_agg_sheet_resolve import match_text_by_name_pattern
+
     p = Path(file_path).resolve()
     st = str(src.get("source_type") or "file_name").strip().lower()
-    text = _name_extract_text_for_match_and_extract(p, st).lower()
-    kw_l = kw.lower()
-    hit_sub = kw_l in text
-    hit_eq = kw_l == text
-    sc = str(src.get("search_condition") or "include").strip().lower()
-    if sc in ("exclude", "含まない"):
-        return not hit_sub
-    if sc in ("exact", "equals", "完全一致"):
-        return hit_eq
-    return hit_sub
+    text = _name_extract_text_for_match_and_extract(p, st)
+    ok = match_text_by_name_pattern(
+        text,
+        str(src.get("search_condition") or "include"),
+        src.get("search_text"),
+        case_sensitive=False,
+    )
+    if ok is None:
+        return True
+    return bool(ok)
 
 
 def name_extract_join_comparison_key(file_path: str | Path, src: dict[str, Any]) -> str:

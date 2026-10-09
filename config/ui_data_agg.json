@@ -159,8 +159,8 @@
       "MSG_SCENARIO_LOAD_VALIDATE_PREFIX": "シナリオの検証エラー:",
       "MSG_SCENARIO_LOAD_CELL_SPEC_WARN_PREFIX": "セル座標に問題があります（読込は続行します。シナリオ編集で修正してください）:",
       "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM": "旧い記述表現が含まれています。\n新フォーマット表現に修正しますか？\n（メモリ上のみ。シナリオ保存は操作者の判断です。保存しない場合、次回読込時にも確認します）",
-      "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM_WITH_NAME_FORCE": "旧い記述表現が含まれています。\n新フォーマット表現に修正しますか？\n（メモリ上のみ。シナリオ保存は操作者の判断です。保存しない場合、次回読込時にも確認します）\n\nなお、ファイル名／シート名の旧形式は常に新方式へ自動変換します。",
-      "MSG_SCENARIO_LOAD_NAME_PATTERN_FORCE_INFO": "ファイル名／シート名の旧形式を新方式へ自動変換します。\n（メモリ上のみ。シナリオ保存は操作者の判断です）",
+      "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM_WITH_NAME_FORCE": "旧い記述表現が含まれています。\n新フォーマット表現に修正しますか？\n（メモリ上のみ。シナリオ保存は操作者の判断です。保存しない場合、次回読込時にも確認します）\n\nなお、ファイル名／シート名／名前から取得の検索文字の旧形式は常に新方式へ自動変換します。",
+      "MSG_SCENARIO_LOAD_NAME_PATTERN_FORCE_INFO": "ファイル名／シート名／名前から取得の検索文字の旧形式を新方式へ自動変換します。\n（メモリ上のみ。シナリオ保存は操作者の判断です）",
       "MSG_SCENARIO_LOAD_MODERNIZE_PARTIAL": "一部の表現は自動修正できませんでした（旧表記のままです）:",
       "MSG_SCENARIO_LOAD_DONE_FMT": "シナリオを読込みました。\n項目数: %d\n対象ファイル数: %d",
       "MSG_SCENARIO_LOAD_FAILED_FMT": "読込に失敗しました: %s",
@@ -810,7 +810,7 @@
         "BTN_WIDTH": 50
       },
       "NAME_PATTERN_HELP": {
-        "_doc": "ファイル名／シート名パターンの構文ヘルプ（ui_qt/ui_data_agg_name_pattern_help.py）。入力下側優先・見切れ時は上側。",
+        "_doc": "ファイル名／シート名／名前から取得の検索文字パターンの構文ヘルプ（ui_qt/ui_data_agg_name_pattern_help.py）。入力下側優先・見切れ時は上側。",
         "TITLE": "名前パターンの書き方",
         "TIP_BTN": "名前パターンの書き方を表示します",
         "BTN_SIZE": 18,
@@ -821,7 +821,8 @@
         "POSITION_OFFSET_Y_ABOVE": 4,
         "LABEL_FILE": "ファイル名",
         "LABEL_SHEET": "シート名",
-        "BODY_HTML": "<b>書き方（新方式）</b><br>・要素は半角 <code>\"…\"</code> で囲む（必須）<br>・OR は <code>|</code>、AND は <code>&amp;</code>（半角のみ）<br>・同じ段で &amp; と | を混ぜるときは <code>()</code> 必須（括弧は内側から）<br><br><b>例</b><br>・単一: <code>\"光特性\"</code><br>・OR: <code>\"光特性\"|\"紐づけ\"</code><br>・AND: <code>\"光\"&amp;\"履歴\"</code><br>・括弧: <code>(\"A\"|\"B\")&amp;\"C\"</code><br><br><b>よくある誤り</b><br>・囲み忘れ（<code>光特性</code> → <code>\"光特性\"</code>）<br>・閉じ忘れ・全角の ” ＆ ｜（）<br><br>・空欄可。旧カンマ区切りはシナリオ読込時のみ自動で新方式へ変換"
+        "LABEL_SEARCH": "検索文字",
+        "BODY_HTML": "<b>書き方（新方式）</b><br>・ファイル名／シート名／名前から取得の検索文字で共通<br>・要素は半角 <code>\"…\"</code> で囲む（必須）<br>・OR は <code>|</code>、AND は <code>&amp;</code>（半角のみ）<br>・同じ段で &amp; と | を混ぜるときは <code>()</code> 必須（括弧は内側から）<br><br><b>例</b><br>・単一: <code>\"光特性\"</code><br>・OR: <code>\"光特性\"|\"紐づけ\"</code><br>・AND: <code>\"光\"&amp;\"履歴\"</code><br>・括弧: <code>(\"A\"|\"B\")&amp;\"C\"</code><br><br><b>よくある誤り</b><br>・囲み忘れ（<code>光特性</code> → <code>\"光特性\"</code>）<br>・閉じ忘れ・全角の ” ＆ ｜（）<br><br>・空欄可。旧カンマ区切りはシナリオ読込時のみ自動で新方式へ変換"
       },
       "DETAIL_CELL": {
         "DETAIL_ALLOW_HSCROLL_FALLBACK": true,
@@ -1034,7 +1035,9 @@
           "含まない"
         ],
         "LABEL_SEARCH_TEXT": "検索文字",
-        "DEFAULT_SEARCH_TEXT": "2024",
+        "DEFAULT_SEARCH_TEXT": "\"2024\"",
+        "SEARCH_TEXT_PLACEHOLDER": "例: \"2024\"|\"出荷\"  （空欄でフィルタなし）",
+        "TOOLTIP_SEARCH_TEXT": "フォルダ名／ファイル名のパターンです。AND（&）／OR（|）が使えます。記述構文は右の？へ。",
         "SEC_EXTRACT_TITLE": "2. 抜取り条件",
         "LABEL_EXTRACT_MODE": "抜取り/固定値",
         "EXTRACT_MODE_ITEMS": [

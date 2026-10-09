@@ -169,6 +169,48 @@ def test_name_pattern_single_token_force() -> None:
     assert not scenario_needs_name_pattern_force(data)
 
 
+def test_name_extract_search_text_force_modernize() -> None:
+    data = {
+        "items": [
+            {
+                "name": "項目",
+                "sources": [
+                    {
+                        "type": "name_extract",
+                        "source_type": "file_name",
+                        "search_condition": "include",
+                        "search_text": "2024,出荷",
+                    }
+                ],
+            }
+        ]
+    }
+    assert scenario_needs_name_pattern_force(data)
+    fres = force_modernize_scenario_name_patterns(data, inplace=True)
+    assert fres.changed
+    assert data["items"][0]["sources"][0]["search_text"] == '"2024"|"出荷"'
+    assert not scenario_needs_name_pattern_force(data)
+
+
+def test_name_extract_does_not_force_cell_patterns() -> None:
+    """名前取得ソースに残った file_pattern は強制変換対象外（検索文字のみ）。"""
+    data = {
+        "items": [
+            {
+                "name": "項目",
+                "sources": [
+                    {
+                        "type": "name_extract",
+                        "search_text": '"OK"',
+                        "ui_scenario_source_v1": {"file_pattern": "旧のまま"},
+                    }
+                ],
+            }
+        ]
+    }
+    assert not scenario_needs_name_pattern_force(data)
+
+
 def test_fixed_link_mode_cell_not_touched() -> None:
     data = {
         "items": [

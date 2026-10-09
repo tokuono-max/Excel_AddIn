@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ファイル名／シート名パターンの構文ヘルプ（非モーダル）。"""
+"""ファイル名／シート名／名前から取得の検索文字パターンの構文ヘルプ（非モーダル）。"""
 from __future__ import annotations
 
 from typing import Any, Callable

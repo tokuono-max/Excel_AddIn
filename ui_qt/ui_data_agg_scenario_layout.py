@@ -832,14 +832,14 @@ def apply_scenario_detail_name_tooltips(
     _apply_cfg_tip_force(
         refs.get("search_text"),
         cfg,
-        "TIP_SEARCH_TEXT",
-        "パス上で探す文字列です。",
+        "TOOLTIP_SEARCH_TEXT",
+        "フォルダ名／ファイル名のパターンです。AND（&）／OR（|）が使えます。記述構文は右の？へ。",
     )
     _apply_cfg_tip_force(
         refs.get("search_cond"),
         cfg,
         "TIP_SEARCH_COND",
-        "検索文字列の一致条件です。",
+        "検索文字の一致条件です（含む／含まない／完全一致）。",
     )
     _apply_cfg_tip_force(
         refs.get("extract_mode_extract"),
@@ -2047,10 +2047,13 @@ def build_scenario_detail_name_scroll(
     *,
     dsl_test_opener: Callable[[QLineEdit], None] | None = None,
     dsl_test_cfg: dict[str, Any] | None = None,
+    name_pattern_help_opener: Callable[[QLineEdit, str], None] | None = None,
+    name_pattern_help_cfg: dict[str, Any] | None = None,
 ) -> tuple[QScrollArea, dict[str, Any]]:
     """名前・パス系。detail_cfg は SCREENS.SCENARIO_EDIT.DETAIL_NAME。"""
     cfg = detail_cfg or {}
     refs: dict[str, Any] = {}
+    _np_help_cfg = name_pattern_help_cfg or {}
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -2098,10 +2101,24 @@ def build_scenario_detail_name_scroll(
     btn_pick_search = QPushButton(_dcp(cfg, "BTN_PICK_SEARCH_TEXT", "選択"))
     row_search_target_lay.addWidget(btn_pick_search, 0)
     f1.addRow(_field_lbl(_dcp(cfg, "LABEL_SEARCH_TARGET", "検索対象")), row_search_target)
-    le_search = QLineEdit(str(_dc(cfg, "DEFAULT_SEARCH_TEXT", "2024")))
+    le_search = QLineEdit(str(_dc(cfg, "DEFAULT_SEARCH_TEXT", '"2024"')))
     le_search.setMinimumWidth(0)
     le_search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    f1.addRow(_field_lbl(_dcp(cfg, "LABEL_SEARCH_TEXT", "検索文字")), le_search)
+    ph_search = _dcp(cfg, "SEARCH_TEXT_PLACEHOLDER", "")
+    if ph_search:
+        le_search.setPlaceholderText(ph_search)
+    tip_search = _dcp(cfg, "TOOLTIP_SEARCH_TEXT", "")
+    if tip_search:
+        set_widget_tooltip(le_search, tip_search)
+    f1.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_SEARCH_TEXT", "検索文字")),
+        _wrap_line_edit_with_help_btn(
+            le_search,
+            help_opener=name_pattern_help_opener,
+            field_key="search",
+            help_cfg=_np_help_cfg,
+        ),
+    )
     cb_search_cond = _add_form_row_combo(
         f1,
         _dcp(cfg, "LABEL_SEARCH_COND", "検索条件"),

@@ -10,7 +10,8 @@
       ・旧形（left,3 / rep,旧,新）および () 内 `;` 区切りも上記へ寄せる
   - 主キースキップ: 区切り `;`、各トークンを CSV 方式 `""` 囲み
   - セル座標式（主キー／連携セル／結合）: 非 A1 パートを `""` リテラル化
-  - ファイル名／シート名条件は本モジュールの任意現代化対象外。
+  - ファイル名／シート名条件、および名前から取得の検索文字は
+    本モジュールの任意現代化対象外。
     読込時は ``force_modernize_scenario_name_patterns`` で常に強制変換する。
 
 固定値モードの連携欄は + 分割しないため対象外（実行時は全体が CSV \"…\" なら中身だけを値とする）。
@@ -307,7 +308,7 @@ def _source_needs_modernize(src: dict[str, Any]) -> bool:
     )
     if is_name:
         return False
-    # ファイル名／シート名は任意現代化対象外（読込時に強制変換）
+    # ファイル名／シート名／検索文字は任意現代化対象外（読込時に強制変換）
     if plus_cell_spec_needs_modernize(src.get("cell_ref")):
         return True
     if src.get("skip_primary_match") is not None and skip_primary_needs_modernize(
@@ -451,15 +452,19 @@ def modernize_scenario_expressions(
     return result
 
 
-def _source_needs_name_pattern_force(src: dict[str, Any]) -> bool:
-    st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
-    if st in (
+def _is_name_extract_source_type(st: str) -> bool:
+    return st in (
         SOURCE_TYPE_NAME_EXTRACT,
         "metadata",
         "meta",
         "filename",
-    ):
-        return False
+    )
+
+
+def _source_needs_name_pattern_force(src: dict[str, Any]) -> bool:
+    st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
+    if _is_name_extract_source_type(st):
+        return name_pattern_needs_modernize(src.get("search_text"))
     pb = source_ui_block(src)
     if not isinstance(pb, dict):
         pb = {}
@@ -471,7 +476,7 @@ def _source_needs_name_pattern_force(src: dict[str, Any]) -> bool:
 
 
 def scenario_needs_name_pattern_force(data: dict[str, Any]) -> bool:
-    """ファイル名／シート名の旧形式が1つでもあれば True（読込時強制変換対象）。"""
+    """ファイル名／シート名／名前取得の検索文字の旧形式が1つでもあれば True。"""
     items = data.get(KEY_ITEMS) if isinstance(data, dict) else None
     if not isinstance(items, list):
         return False
@@ -489,7 +494,7 @@ def force_modernize_scenario_name_patterns(
     *,
     inplace: bool = True,
 ) -> ModernizeResult:
-    """読込時: ファイル名／シート名の旧形式を新方式へ強制変換（問い合わせなし）。"""
+    """読込時: ファイル名／シート名／名前取得の検索文字の旧形式を新方式へ強制変換。"""
     target: dict[str, Any] = data if inplace else copy.deepcopy(data)
     result = ModernizeResult()
     items = target.get(KEY_ITEMS)
@@ -521,15 +526,11 @@ def force_modernize_scenario_name_patterns(
             if not isinstance(src, dict):
                 continue
             st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
-            if st in (
-                SOURCE_TYPE_NAME_EXTRACT,
-                "metadata",
-                "meta",
-                "filename",
-            ):
-                continue
             sn = str(src.get("scenario_name") or ("シナリオ%d" % (jj + 1)))
             base = "「%s」/「%s」" % (iname, sn)
+            if _is_name_extract_source_type(st):
+                _apply(src, "search_text", "%s 検索文字" % base)
+                continue
             pb = source_ui_block(src)
             if not isinstance(pb, dict):
                 continue

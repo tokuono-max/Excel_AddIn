@@ -5031,7 +5031,7 @@ class _DataAggMainWindow(QDialog):
                         "新フォーマット表現に修正しますか？\n"
                         "（メモリ上のみ。シナリオ保存は操作者の判断です。"
                         "保存しない場合、次回読込時にも確認します）\n\n"
-                        "なお、ファイル名／シート名の旧形式は常に新方式へ自動変換します。",
+                        "なお、ファイル名／シート名／名前から取得の検索文字の旧形式は常に新方式へ自動変換します。",
                     )
                 else:
                     q_msg = _ui_disp_str(
@@ -5068,12 +5068,12 @@ class _DataAggMainWindow(QDialog):
                 info_msg = _ui_disp_str(
                     self._ui or {},
                     "MSG_SCENARIO_LOAD_NAME_PATTERN_FORCE_INFO",
-                    "ファイル名／シート名の旧形式を新方式へ自動変換します。\n"
+                    "ファイル名／シート名／名前から取得の検索文字の旧形式を新方式へ自動変換します。\n"
                     "（メモリ上のみ。シナリオ保存は操作者の判断です）",
                 )
                 show_info_notice(self, title_ld, info_msg)
 
-            # ファイル名／シート名は常に強制変換（DSL の可否に依存しない）
+            # 名前パターン（ファイル／シート／検索文字）は常に強制変換（DSL の可否に依存しない）
             if needs_name_force:
                 fres = force_modernize_scenario_name_patterns(data, inplace=True)
                 if fres.notes:
@@ -6716,6 +6716,8 @@ class _ScenarioEditDialog(QDialog):
             detail_name,
             dsl_test_opener=self._open_dsl_test,
             dsl_test_cfg=self._dsl_test_cfg,
+            name_pattern_help_opener=self._open_name_pattern_help,
+            name_pattern_help_cfg=self._name_pattern_help_cfg,
         )
         self._detail_scroll_cell = scroll_cell
         self._detail_scroll_name = scroll_name
@@ -7601,12 +7603,17 @@ class _ScenarioEditDialog(QDialog):
             return "file"
         if w is cr.get("sheet_name"):
             return "sheet"
+        nr = getattr(self, "_name_refs", None) or {}
+        if w is nr.get("search_text"):
+            return "search"
         return None
 
     def _name_pattern_label_for_key(self, key: str | None) -> str:
         hc = self._name_pattern_help_cfg or {}
         if key == "sheet":
             return str(hc.get("LABEL_SHEET") or "シート名")
+        if key == "search":
+            return str(hc.get("LABEL_SEARCH") or "検索文字")
         return str(hc.get("LABEL_FILE") or "ファイル名")
 
     def _ensure_name_pattern_help_dialog(self) -> NamePatternHelpDialog:
@@ -7718,18 +7725,30 @@ class _ScenarioEditDialog(QDialog):
         self._show_name_pattern_error_help(w, key, raw)
         QTimer.singleShot(0, self._refocus_name_pattern_lock)
 
+    def _current_form_source_type(self) -> str:
+        """詳細フォームの種別（cell / name_extract）。"""
+        d = self._form_combo_type.currentData()
+        t = str(d or "cell").strip().lower()
+        return "name_extract" if t == "name_extract" else "cell"
+
     def _name_patterns_blocking_register(self) -> bool:
-        """登録前ガード。NG ならヘルプ表示して True。"""
+        """登録前ガード。NG ならヘルプ表示して True。現在種別の欄のみ検査。"""
         if self._loading_source_form:
             return False
         from svc.data_agg_sheet_resolve import validate_name_pattern
 
-        cr = getattr(self, "_cell_refs", None) or {}
-        for key, wkey in (("file", "file_pattern"), ("sheet", "sheet_name")):
-            w = cr.get(wkey)
-            if not isinstance(w, QLineEdit):
-                continue
-            if not w.isEnabled():
+        checks: list[tuple[str, QLineEdit | None]] = []
+        if self._current_form_source_type() == "name_extract":
+            nr = getattr(self, "_name_refs", None) or {}
+            w = nr.get("search_text")
+            checks.append(("search", w if isinstance(w, QLineEdit) else None))
+        else:
+            cr = getattr(self, "_cell_refs", None) or {}
+            for key, wkey in (("file", "file_pattern"), ("sheet", "sheet_name")):
+                w = cr.get(wkey)
+                checks.append((key, w if isinstance(w, QLineEdit) else None))
+        for key, w in checks:
+            if w is None or not w.isEnabled():
                 continue
             raw = w.text()
             err = validate_name_pattern(raw)
@@ -7738,9 +7757,18 @@ class _ScenarioEditDialog(QDialog):
                 self._show_name_pattern_error_help(w, key, raw)
                 self._refocus_name_pattern_lock()
                 return True
-        if self._name_pattern_lock_widget is not None:
-            self._refocus_name_pattern_lock()
-            return True
+        lock = self._name_pattern_lock_widget
+        if lock is not None:
+            # 他種別のロックが残っている場合は解除（フォーム切替後）
+            if self._name_pattern_field_key_for_widget(lock) is None:
+                self._clear_name_pattern_lock()
+            else:
+                active_keys = {k for k, _ in checks}
+                if self._name_pattern_lock_key not in active_keys:
+                    self._clear_name_pattern_lock()
+                else:
+                    self._refocus_name_pattern_lock()
+                    return True
         return False
 
     def _wire_detail_form_signals(self) -> None:
@@ -7807,6 +7835,7 @@ class _ScenarioEditDialog(QDialog):
         nr["search_target"].currentIndexChanged.connect(self._on_form_changed)
         nr["search_cond"].currentIndexChanged.connect(self._on_form_changed)
         nr["search_text"].textChanged.connect(self._on_form_changed)
+        nr["search_text"].editingFinished.connect(self._on_name_pattern_editing_finished)
         nr["pick_search_text"].clicked.connect(self._on_pick_name_extract_search_text)
 
         def _sm_nm() -> None:
@@ -7844,7 +7873,7 @@ class _ScenarioEditDialog(QDialog):
         nr["delimiter"].setEnabled((not is_fixed) and m == 2)
 
     def _on_pick_name_extract_search_text(self) -> None:
-        """検索対象に応じて選択ダイアログを開き、検索文字へ反映する。"""
+        """検索対象に応じて選択ダイアログを開き、検索文字へ新方式で反映する。"""
         nr = self._name_refs
         try:
             init_dir = ""
@@ -7859,6 +7888,9 @@ class _ScenarioEditDialog(QDialog):
                     "フォルダを選択",
                     init_dir,
                 )
+                if not picked:
+                    return
+                token = Path(picked).name.strip() or str(picked).strip()
             else:
                 picked, _ = QFileDialog.getOpenFileName(
                     self,
@@ -7866,10 +7898,16 @@ class _ScenarioEditDialog(QDialog):
                     init_dir,
                     "すべてのファイル (*.*)",
                 )
-            if not picked:
+                if not picked:
+                    return
+                # 照合は stem（拡張子なし）
+                token = (Path(picked).stem or Path(picked).name).strip()
+            if not token:
                 return
-            name = Path(picked).name.strip() or str(picked).strip()
-            nr["search_text"].setText(name)
+            # 新方式: CSV 風 "" 囲み（内側の " は ""）
+            nr["search_text"].setText('"' + token.replace('"', '""') + '"')
+            # 選択直後に検証を走らせる（引用付きなので通常は OK）
+            nr["search_text"].editingFinished.emit()
         except Exception:
             pass
 
@@ -8461,6 +8499,8 @@ class _ScenarioEditDialog(QDialog):
                 return
         t = new_t
         idx = {"cell": 0, "name_extract": 1}.get(t, 0)
+        self._clear_name_pattern_lock()
+        self._close_name_pattern_help()
         self._form_stack.setCurrentIndex(idx)
         self._sources_data[self._current_source_index]["type"] = t
         if t == "cell":
