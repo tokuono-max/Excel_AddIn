@@ -126,24 +126,22 @@ def _apply_dsl_test_button_style(btn: QPushButton, cfg: dict[str, Any]) -> None:
 
 
 def _dsl_test_mini_button(
-    cfg: dict[str, Any], *, tooltip: str, on_click: Callable[[], None]
+    cfg: dict[str, Any],
+    *,
+    tooltip: str,
+    on_click: Callable[[], None],
+    text: str = "",
 ) -> QPushButton:
-    """シナリオ編集の灰色 DSL テスト起動ボタンと同外形の小ボタン。"""
-    btn_sz = max(4, _cfg_int(cfg, "BTN_OPEN_SIZE", 8))
-    btn = QPushButton("")
-    btn.setFixedSize(btn_sz, btn_sz)
-    set_widget_tooltip(btn, tooltip)
-    btn.setStyleSheet(
-        "QPushButton { background-color: #888888; border: 1px solid #666666; "
-        "border-radius: 1px; min-width: %dpx; max-width: %dpx; "
-        "min-height: %dpx; max-height: %dpx; padding: 0px; margin: 0px; }"
-        "QPushButton:hover { background-color: #777777; }"
-        % (btn_sz, btn_sz, btn_sz, btn_sz)
+    """シナリオ編集の灰色小ボタンと同外形（テスト画面内の補助ボタン用）。"""
+    from ui_qt.ui_data_agg_name_pattern_help import make_mini_square_button
+
+    btn_sz = max(14, _cfg_int(cfg, "BTN_OPEN_SIZE", 18))
+    return make_mini_square_button(
+        text=text,
+        size=btn_sz,
+        tip=tooltip,
+        on_click=lambda _=False: on_click(),
     )
-    btn.clicked.connect(on_click)
-    return btn
-
-
 def _dialog_bg_color_name(widget: QWidget) -> str:
     return widget.palette().color(widget.backgroundRole()).name()
 

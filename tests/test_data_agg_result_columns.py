@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""結果付加列（パス・ファイル）の一覧組立。"""
+"""結果付加列（パス・ファイル・シート名）の一覧組立。"""
 from __future__ import annotations
 
 import sys
@@ -12,6 +12,7 @@ if str(_root) not in sys.path:
 from svc.svc_data_agg import (  # noqa: E402
     _merged_dict_rows_to_table_rows,
     _prepend_result_columns_to_master_table_rows,
+    _result_column_folder_path,
     compute_batch_table_rows,
 )
 from svc.data_agg_path_norm import normalize_source_path  # noqa: E402
@@ -24,13 +25,21 @@ from svc.svc_data_agg_scenario import (  # noqa: E402
 
 def test_result_column_header_names_default_off() -> None:
     assert result_column_header_names(None) == []
-    assert result_column_header_names({"include_path": False, "include_file": False}) == []
+    assert result_column_header_names(
+        {"include_path": False, "include_file": False, "include_sheet": False}
+    ) == []
 
 
 def test_result_column_header_names_both_on() -> None:
     assert result_column_header_names(
         {"include_path": True, "include_file": True}
     ) == ["パス", "ファイル"]
+
+
+def test_result_column_header_names_with_sheet() -> None:
+    assert result_column_header_names(
+        {"include_path": True, "include_file": True, "include_sheet": True}
+    ) == ["パス", "ファイル", "シート名"]
 
 
 def test_merged_dict_rows_prepends_path_and_file() -> None:
@@ -45,10 +54,12 @@ def test_merged_dict_rows_prepends_path_and_file() -> None:
     headers = ["品番", "値"]
     rc = {"include_path": True, "include_file": True}
     out = _merged_dict_rows_to_table_rows(rows, headers, result_columns=rc)
-    assert out == [[normalize_source_path(fp), "光特性履歴_test.xlsx", "A001", 1]]
+    assert out == [
+        [_result_column_folder_path(fp), "光特性履歴_test.xlsx", "A001", 1]
+    ]
 
 
-def test_merged_dict_rows_path_only() -> None:
+def test_merged_dict_rows_path_only_is_folder() -> None:
     fp = r"D:\work\sub\紐づけ履歴_test.xlsx"
     rows = [{"__file_path": fp, "key": "x"}]
     out = _merged_dict_rows_to_table_rows(
@@ -56,8 +67,64 @@ def test_merged_dict_rows_path_only() -> None:
         ["key"],
         result_columns={"include_path": True, "include_file": False},
     )
-    assert out[0][0] == normalize_source_path(fp)
+    assert out[0][0] == _result_column_folder_path(fp)
+    assert out[0][0] != normalize_source_path(fp)
     assert len(out[0]) == 2
+
+
+def test_merged_dict_rows_sheet_name() -> None:
+    fp = r"C:\a\one.xlsx"
+    rows = [
+        {
+            "__file_path": fp,
+            "__sheet_name": "Sheet1",
+            "品番": "A",
+        }
+    ]
+    out = _merged_dict_rows_to_table_rows(
+        rows,
+        ["品番"],
+        result_columns={
+            "include_path": False,
+            "include_file": False,
+            "include_sheet": True,
+        },
+    )
+    assert out == [["Sheet1", "A"]]
+
+
+def test_primary_item_rows_with_origin_sets_sheet_name() -> None:
+    from svc.svc_data_agg import _primary_item_rows_with_origin  # noqa: WPS433
+
+    rows = _primary_item_rows_with_origin(
+        ["A", "B"],
+        col_name="品番",
+        row_file_path=r"C:\a\one.xlsx",
+        skip_prefill_join_primary=False,
+        iteration_contexts=[
+            {"sheet_name": "Sheet1"},
+            {"sheet_name": "Sheet2"},
+        ],
+    )
+    assert rows[0]["__sheet_name"] == "Sheet1"
+    assert rows[1]["__sheet_name"] == "Sheet2"
+    assert rows[0]["品番"] == "A"
+
+
+def test_seed_pool_preserves_sheet_name_column() -> None:
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+
+    headers = ["シート名", "品番"]
+    rows = [["R_Data", "A001"], ["", "A002"]]
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        stacked_join=True,
+        row_file_paths=[r"C:\a\one.xlsx", r"C:\a\one.xlsx"],
+        sheet_header="シート名",
+    )
+    assert pool[0]["__sheet_name"] == "R_Data"
+    assert "__sheet_name" not in pool[1]
 
 
 def test_prepend_for_joined_master_rows() -> None:
@@ -117,9 +184,9 @@ def test_merged_dict_rows_keeps_per_row_paths() -> None:
         result_columns={"include_path": True, "include_file": True},
         fallback_file_path=r"C:\fallback\x.xlsx",
     )
-    assert out[0][0] == normalize_source_path(r"C:\a\one.xlsx")
+    assert out[0][0] == _result_column_folder_path(r"C:\a\one.xlsx")
     assert out[0][1] == "one.xlsx"
-    assert out[1][0] == normalize_source_path(r"C:\b\two.xlsx")
+    assert out[1][0] == _result_column_folder_path(r"C:\b\two.xlsx")
     assert out[1][1] == "two.xlsx"
 
 

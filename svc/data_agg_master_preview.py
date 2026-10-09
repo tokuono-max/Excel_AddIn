@@ -84,6 +84,31 @@ def _index_of_origin_file_header(
     return -1
 
 
+def _origin_sheet_header_candidates(*, sheet_header: str | None = None) -> list[str]:
+    """
+    結果付加「シート名」列の見出し候補。
+
+    sheet_header 明示時のみ（マスタ項目名「シート名」の誤認を避ける）。
+    """
+    out: list[str] = []
+    sh = str(sheet_header or "").strip()
+    if sh:
+        out.append(sh)
+    return out
+
+
+def _index_of_origin_sheet_header(
+    headers: Sequence[Any],
+    *,
+    sheet_header: str | None = None,
+) -> int:
+    hdrs = [str(h) for h in headers]
+    for name in _origin_sheet_header_candidates(sheet_header=sheet_header):
+        if name in hdrs:
+            return hdrs.index(name)
+    return -1
+
+
 def _scan_paths_by_basename(scan_paths: Sequence[str]) -> dict[str, str]:
     """scan_paths をファイル名（大小無視）→フルパスへ。同一名は先勝ち。"""
     from pathlib import Path  # noqa: WPS433
@@ -231,13 +256,38 @@ def table_row_file_paths_for_stacked_seed(
 
     path_ix = _index_of_origin_path_header(headers, path_header=path_header)
     if path_ix >= 0:
+        from pathlib import Path as _Path  # noqa: WPS433
+
+        file_ix = _index_of_origin_file_header(headers, file_header=file_header)
         from_path: list[str] = []
         for row in rows:
             fp = ""
             if isinstance(row, (list, tuple)) and path_ix < len(row):
                 fp = _norm_fp(row[path_ix])
+                # パス列がフォルダのみのとき、ファイル列と結合してフルパスに戻す
+                if fp and file_ix >= 0 and file_ix < len(row):
+                    bn = _norm_fp(row[file_ix])
+                    if bn and not _Path(fp).suffix:
+                        try:
+                            joined = str(_Path(fp) / _Path(bn).name)
+                            if joined:
+                                fp = joined
+                        except Exception:
+                            pass
             from_path.append(fp)
         if any(from_path):
+            # フォルダのみで結合できなかった行はファイル列照合へ任せる
+            if from_file is not None and any(from_file):
+                merged_pf: list[str] = []
+                for i, fp in enumerate(from_path):
+                    if fp and _Path(fp).suffix:
+                        merged_pf.append(fp)
+                    elif i < len(from_file) and from_file[i]:
+                        merged_pf.append(from_file[i])
+                    else:
+                        merged_pf.append(fp)
+                if any(merged_pf):
+                    return _fill_empty_from_scan(merged_pf)
             return _fill_empty_from_scan(from_path)
 
     if from_file is not None and any(from_file):
@@ -282,6 +332,7 @@ def table_rows_to_join_search_seed_pool(
     stacked_join: bool = False,
     path_header: str | None = None,
     file_header: str | None = None,
+    sheet_header: str | None = None,
 ) -> list[dict[str, Any]]:
     """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。"""
     if not headers or not rows:
@@ -289,6 +340,7 @@ def table_rows_to_join_search_seed_pool(
     _ = file_header  # 由来フルパスは呼び出し側の row_file_paths で解決済み
     path_ix = _index_of_origin_path_header(headers, path_header=path_header)
     path_h = str(headers[path_ix]) if path_ix >= 0 else None
+    sheet_ix = _index_of_origin_sheet_header(headers, sheet_header=sheet_header)
     anchor_fp = str(anchor_file_path or "").strip()
     # 行 index 対応を崩さない（空文字も位置を保つ）
     row_fps = [
@@ -315,6 +367,10 @@ def table_rows_to_join_search_seed_pool(
             fp = "mpv_table_seed://%d" % int(i)
         d["__file_path"] = fp
         d["__norm_path"] = fp
+        if sheet_ix >= 0 and sheet_ix < len(row):
+            sn = str(row[sheet_ix] or "").strip()
+            if sn:
+                d["__sheet_name"] = sn
         out.append(d)
     return out
 

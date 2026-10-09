@@ -6665,6 +6665,21 @@ class DataAggDebugDialog(QDialog):
         fh = str(rc.get("file_header") or "").strip()
         return fh or None
 
+    def _mpv_result_sheet_header(self) -> str | None:
+        """結果付加シート名列の見出し（include_sheet 時のみ）。"""
+        from svc.svc_data_agg_scenario import (  # noqa: WPS433
+            KEY_RESULT_COLUMNS,
+            normalize_result_columns,
+        )
+
+        rc = normalize_result_columns(
+            (self._scenario_for_dry_run or {}).get(KEY_RESULT_COLUMNS)
+        )
+        if not rc.get("include_sheet"):
+            return None
+        sh = str(rc.get("sheet_header") or "").strip()
+        return sh or None
+
     def _debug_carry_empty_target_names(self) -> set[str]:
         """
         前置保持(carry_empty)対象項目名。
@@ -7257,6 +7272,7 @@ class DataAggDebugDialog(QDialog):
                     stacked_join=True,
                     path_header=self._mpv_result_path_header(),
                     file_header=self._mpv_result_file_header(),
+                    sheet_header=self._mpv_result_sheet_header(),
                 )
                 from svc.data_agg_master_preview_perf import (  # noqa: WPS433
                     master_preview_stacked_seed_usable,

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from svc.data_agg_sheet_resolve import parse_comma_separated_patterns
+from svc.data_agg_sheet_resolve import pattern_leaf_tokens
 
 # 現行キー（保存の正）
 SCENARIO_SOURCE_UI_KEY = "ui_scenario_source_v1"
@@ -38,7 +38,7 @@ def item_source_file_patterns(item: dict[str, Any]) -> list[str]:
     """
     セル系 sources の file_pattern トークン（小文字）を重複なく列挙。
 
-    カンマ区切りは parse_comma_separated_patterns（抽出フィルタと同じ）で分割する。
+    旧カンマ／新式式の葉は pattern_leaf_tokens（抽出フィルタと同じ）で列挙する。
     横断判定のトークン比較・デバッグ表示用。厳密なファイル一致は item_file_filter_specs。
     """
     patterns: list[str] = []
@@ -50,7 +50,7 @@ def item_source_file_patterns(item: dict[str, Any]) -> list[str]:
         block = source_ui_block(src)
         if not isinstance(block, dict):
             continue
-        for tok in parse_comma_separated_patterns(block.get("file_pattern")):
+        for tok in pattern_leaf_tokens(block.get("file_pattern")):
             p = tok.lower()
             if p and p not in patterns:
                 patterns.append(p)
@@ -73,7 +73,12 @@ def item_file_filter_specs(item: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(block, dict):
             continue
         raw_pat = str(block.get("file_pattern") or "")
-        if not parse_comma_separated_patterns(raw_pat):
+        if not raw_pat.strip():
+            continue
+        from svc.data_agg_sheet_resolve import parse_name_pattern
+
+        kind, _ast, _leaves, _err = parse_name_pattern(raw_pat)
+        if kind == "empty":
             continue
         rule = str(block.get("file_name_rule") or "含む").strip() or "含む"
         specs.append({"file_pattern": raw_pat, "file_name_rule": rule})
@@ -194,7 +199,7 @@ def join_comparison_side_file_patterns(
     specs = join_comparison_side_file_filter_specs(host_item, items, headers)
     patterns: list[str] = []
     for spec in specs:
-        for tok in parse_comma_separated_patterns(spec.get("file_pattern")):
+        for tok in pattern_leaf_tokens(spec.get("file_pattern")):
             p = tok.lower()
             if p and p not in patterns:
                 patterns.append(p)

@@ -40,7 +40,7 @@ from svc.data_agg_path_norm import (  # noqa: E402
     normalize_source_path_literal,
     path_is_under_directory,
 )
-from svc.data_agg_sheet_resolve import parse_comma_separated_patterns  # noqa: E402
+from svc.data_agg_sheet_resolve import pattern_leaf_tokens  # noqa: E402
 from svc.data_agg_source_ui import (  # noqa: E402
     item_file_filter_specs as _item_file_filter_specs,
     item_source_file_patterns as _item_source_file_patterns,
@@ -683,6 +683,7 @@ _ROW_ORIGIN_PATH_KEYS: tuple[str, ...] = (
     "__file_path",
     "__norm_path",
     "__iter_index",
+    "__sheet_name",
 )
 
 
@@ -1314,24 +1315,77 @@ def _index_pool_rows_by_host_file(
 
 
 
+def _result_column_folder_path(file_path: str) -> str:
+    """結果付加「パス」列用: ファイル名を除いたフォルダパス。"""
+    fp = str(file_path or "").strip()
+    if not fp:
+        return ""
+    try:
+        parent = Path(fp).parent
+        s = str(parent)
+        if s in (".", ""):
+            return ""
+        return normalize_source_path_literal(s)
+    except Exception:
+        return ""
+
+
+def _primary_item_rows_with_origin(
+    prim_vals: Sequence[Any],
+    *,
+    col_name: str,
+    row_file_path: str,
+    skip_prefill_join_primary: bool,
+    iteration_contexts: Sequence[Any] | None,
+) -> list[dict[str, Any]]:
+    """
+    主キー値から行 dict を組み立て、iteration_contexts のシート名を __sheet_name に載せる。
+    並列 (_batch_file_extract_and_merge) と逐次経路で共通。
+    """
+    ictx_list = list(iteration_contexts or [])
+    item_rows: list[dict[str, Any]] = []
+    for iter_i, v in enumerate(prim_vals):
+        row_d: dict[str, Any] = {
+            **({} if skip_prefill_join_primary else {col_name: v}),
+            "__file_path": row_file_path,
+            "__iter_index": int(iter_i),
+        }
+        if iter_i < len(ictx_list) and isinstance(ictx_list[iter_i], dict):
+            _sn = str(ictx_list[iter_i].get("sheet_name") or "").strip()
+            if _sn:
+                row_d["__sheet_name"] = _sn
+        item_rows.append(row_d)
+    return item_rows
+
+
 def _result_column_values_from_row(
     row: dict[str, Any],
     result_columns: dict[str, Any] | None,
     *,
     fallback_file_path: str = "",
 ) -> list[Any]:
-    """結果付加列（パス・ファイル）のセル値。行追加時の `__file_path` を優先し、無ければ fallback。"""
+    """
+    結果付加列（パス・ファイル・シート名）のセル値。
+    行追加時の `__file_path` / `__sheet_name` を優先し、無ければ fallback。
+    パス列はフォルダのみ（ファイル名なし）。
+    """
     from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
 
     opts = normalize_result_columns(result_columns)
-    if not opts["include_path"] and not opts["include_file"]:
+    if (
+        not opts["include_path"]
+        and not opts["include_file"]
+        and not opts["include_sheet"]
+    ):
         return []
     fp = str(row.get("__file_path") or fallback_file_path or "").strip()
     vals: list[Any] = []
     if opts["include_path"]:
-        vals.append(normalize_source_path_literal(fp) if fp else "")
+        vals.append(_result_column_folder_path(fp) if fp else "")
     if opts["include_file"]:
         vals.append(Path(fp).name if fp else "")
+    if opts["include_sheet"]:
+        vals.append(str(row.get("__sheet_name") or "").strip())
     return vals
 
 
@@ -1349,7 +1403,9 @@ def _merged_dict_rows_to_table_rows(
     from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
 
     rc = normalize_result_columns(result_columns)
-    use_rc = bool(rc["include_path"] or rc["include_file"])
+    use_rc = bool(
+        rc["include_path"] or rc["include_file"] or rc["include_sheet"]
+    )
     out: list[list[Any]] = []
     append = out.append
     get = dict.get
@@ -3098,7 +3154,11 @@ def _prepend_result_columns_to_master_table_rows(
     from svc.svc_data_agg_scenario import normalize_result_columns  # noqa: WPS433
 
     rc = normalize_result_columns(result_columns)
-    if not rc["include_path"] and not rc["include_file"]:
+    if (
+        not rc["include_path"]
+        and not rc["include_file"]
+        and not rc["include_sheet"]
+    ):
         return [list(r) for r in rows]
     prefix = _result_column_values_from_row(
         {}, rc, fallback_file_path=fallback_file_path
@@ -3808,10 +3868,12 @@ def filter_file_paths_by_item_file_patterns(
                 continue
             block = source_ui_block(src)
             # トークン化後に空ならフィルタなし（,,, 等）。抽出側と同じ判定。
-            if isinstance(block, dict) and parse_comma_separated_patterns(
-                block.get("file_pattern")
-            ):
-                restrictive.append(src)
+            if isinstance(block, dict):
+                from svc.data_agg_sheet_resolve import parse_name_pattern
+
+                _k, _, _leaves, _e = parse_name_pattern(block.get("file_pattern"))
+                if _k != "empty":
+                    restrictive.append(src)
     if not restrictive:
         return [str(p) for p in file_paths]
     if len(restrictive) == 1:
@@ -3881,7 +3943,7 @@ def _master_preview_stacked_host_file_patterns(
     return [
         tok.lower()
         for spec in _master_preview_stacked_host_file_filter_specs(items, debug_diag)
-        for tok in parse_comma_separated_patterns(spec.get("file_pattern"))
+        for tok in pattern_leaf_tokens(spec.get("file_pattern"))
         if tok
     ]
 
@@ -4375,14 +4437,13 @@ def _batch_file_extract_and_merge(
             if not _name_extract_item_emits_own_rows(it):
                 continue
             skip_prefill_join_primary = use_join_search_merge and bool(_item_join_defs_list(it_eff))
-            item_rows: list[dict[str, Any]] = [
-                {
-                    **({} if skip_prefill_join_primary else {col_name: v}),
-                    "__file_path": row_fp_str,
-                    "__iter_index": int(iter_i),
-                }
-                for iter_i, v in enumerate(prim_vals)
-            ]
+            item_rows = _primary_item_rows_with_origin(
+                prim_vals,
+                col_name=col_name,
+                row_file_path=row_fp_str,
+                skip_prefill_join_primary=skip_prefill_join_primary,
+                iteration_contexts=b.get("iteration_contexts"),
+            )
             for tgt, vals in (b.get("link_values") or {}).items():
                 if tgt in header_set:
                     wm_link = column_modes[i] if i < len(column_modes) else "fill_in"
@@ -5592,14 +5653,13 @@ def compute_batch_table_rows(
                                 pass
                             continue
                         skip_prefill_join_primary = use_join_search_merge and bool(_item_join_defs_list(it_eff))
-                        item_rows: list[dict[str, Any]] = [
-                            {
-                                **({} if skip_prefill_join_primary else {col_name: v}),
-                                "__file_path": row_path,
-                                "__iter_index": int(iter_i),
-                            }
-                            for iter_i, v in enumerate(prim_vals)
-                        ]
+                        item_rows = _primary_item_rows_with_origin(
+                            prim_vals,
+                            col_name=col_name,
+                            row_file_path=row_path,
+                            skip_prefill_join_primary=skip_prefill_join_primary,
+                            iteration_contexts=b.get("iteration_contexts"),
+                        )
                         for tgt, vals in (b.get("link_values") or {}).items():
                             if tgt in header_set:
                                 wm_link = (
@@ -5921,6 +5981,7 @@ def compute_batch_table_rows(
                         lambda r, gi: {
                             "file_path": str(row_path),
                             "iter_index": int(gi),
+                            "sheet_name": str(r.get("__sheet_name") or "").strip(),
                             "base_cell": None,
                             "base_row": None,
                             "base_col": None,
@@ -6076,10 +6137,17 @@ def compute_batch_table_rows(
                     )
             if iteration_contexts_out is not None:
                 for iter_i, _ in enumerate(rows_to_add):
+                    src = (
+                        joined_records[iter_i]
+                        if iter_i < len(joined_records)
+                        and isinstance(joined_records[iter_i], dict)
+                        else {}
+                    )
                     iteration_contexts_out.append(
                         {
                             "file_path": str(row_path),
                             "iter_index": int(iter_i),
+                            "sheet_name": str(src.get("__sheet_name") or "").strip(),
                             "base_cell": None,
                             "base_row": None,
                             "base_col": None,
@@ -6231,10 +6299,17 @@ def compute_batch_table_rows(
             table_rows.extend(rows_to_add)
             if iteration_contexts_out is not None:
                 for iter_i, _ in enumerate(rows_to_add):
+                    src = (
+                        joined_records[iter_i]
+                        if iter_i < len(joined_records)
+                        and isinstance(joined_records[iter_i], dict)
+                        else {}
+                    )
                     iteration_contexts_out.append(
                         {
                             "file_path": file_path,
                             "iter_index": int(iter_i),
+                            "sheet_name": str(src.get("__sheet_name") or "").strip(),
                             "base_cell": None,
                             "base_row": None,
                             "base_col": None,
@@ -6327,6 +6402,7 @@ def compute_batch_table_rows(
                 lambda r, _gi: {
                     "file_path": str(r.get("__file_path") or ""),
                     "iter_index": _row_iter_index(r),
+                    "sheet_name": str(r.get("__sheet_name") or "").strip(),
                     "base_cell": None,
                     "base_row": None,
                     "base_col": None,

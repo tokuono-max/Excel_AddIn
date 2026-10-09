@@ -58,7 +58,6 @@ from svc.data_agg_sheet_resolve import (  # noqa: E402
     DataAggSheetMissingError,
     EXTRACT_READ_ERROR_MARK,
     list_workbook_sheet_names,
-    parse_comma_separated_patterns,
     patch_item_sheet_exact,
     resolve_all_sheet_names_by_rule,
     source_skips_sheet_extract,
@@ -443,12 +442,13 @@ def _xlsx_workbook_from_cache(path: Path) -> Optional[Any]:
 def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -> bool:
     """
     セル系ソースの UI 保存ブロック（`ui_scenario_source_v1`、レガシーキーは source_ui_block で吸収）内の file_pattern / file_name_rule を評価する。
-    file_pattern が空（トークンなし）ならフィルタなし（True）。大小文字は区別しない（§10.3.3）。
+    file_pattern が空ならフィルタなし（True）。大小文字は区別しない（§10.3.3）。
 
-    複数パターンはカンマ区切り（``parse_comma_separated_patterns``。シート名条件と同じ）。
-    - 完全一致／含む: いずれかのトークンに該当（OR）
-    - 含まない: いずれのトークンも含まない（AND of exclusions）
+    パターンはシート名条件と同じ（旧カンマ OR／新式 \"A\"&\"B\"・\"A\"|\"B\"・括弧）。
+    式不正は不一致（False）。
     """
+    from svc.data_agg_sheet_resolve import match_text_by_name_pattern
+
     stype = (src.get("type") or "cell").strip().lower()
     if stype != "cell":
         return True
@@ -467,16 +467,13 @@ def source_passes_file_name_filter(file_path: str | Path, src: dict[str, Any]) -
         }
         if norm_exts and ext_l not in norm_exts:
             return False
-    tokens = parse_comma_separated_patterns(block.get("file_pattern"))
-    if not tokens:
-        return True
     rule = str(block.get("file_name_rule") or "含む").strip()
-    toks_l = [t.lower() for t in tokens]
-    if "完全一致" in rule or rule.lower() in ("exact", "equals"):
-        return stem_l in set(toks_l)
-    if "含まない" in rule or rule.lower() in ("exclude", "not_contains"):
-        return all(t not in stem_l for t in toks_l)
-    return any(t in stem_l for t in toks_l)
+    ok = match_text_by_name_pattern(
+        stem_l, rule, block.get("file_pattern"), case_sensitive=False
+    )
+    if ok is None:
+        return True
+    return bool(ok)
 
 
 def matching_sheets_for_item(
@@ -4142,7 +4139,7 @@ def extract_item_bundle(
     if not sheets:
         return _empty_item_bundle()
     if len(sheets) == 1:
-        return _extract_item_bundle_impl(
+        b1 = _extract_item_bundle_impl(
             file_path,
             patch_item_sheet_exact(
                 item_config, sheets[0], workbook_sheet_names=wb_names
@@ -4155,6 +4152,13 @@ def extract_item_bundle(
             max_primary_rows=max_primary_rows,
             cancel_check=cancel_check,
         )
+        # 単一シートでも結果付加「シート名」列用に解決後名を刻む
+        _sh0 = str(sheets[0] or "").strip()
+        if _sh0:
+            for _ctx in b1.get("iteration_contexts") or []:
+                if isinstance(_ctx, dict) and not str(_ctx.get("sheet_name") or "").strip():
+                    _ctx["sheet_name"] = _sh0
+        return b1
     parts: list[tuple[str, dict[str, Any]]] = []
     remain = max_primary_rows
     for sh in sheets:

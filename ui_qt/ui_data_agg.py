@@ -3,15 +3,15 @@
 Python: 3.12+
 Module: ui_qt/ui_data_agg.py
 Created: 2026-03-18
-Updated: 2026-09-07
-Version: 0.4.53
+Updated: 2026-10-08
+Version: 0.4.54
 Purpose:
   データ集約ツールの UI。メイン画面・対象ファイル一覧（別画面）・シナリオ編集・デバッグ（ui_data_agg_debug）・ステップ実行ポップ・進捗・完了を担当する。
   設定は config/ui_data_agg.json。create_dialog は ui_server から呼ばれる。
 History (latest 3):
+  - 0.4.54 (2026-10-08) シナリオタブ／編集: 複数選択削除・上下追加基準・スクロール維持・Undo（追加系含む）を整備。
   - 0.4.53 (2026-09-07) 閉じ時未保存確認（×／閉じる共通）。起動シート消失でメインも閉じる。一括中閉じは cancel で出力抑止。
   - 0.4.52 (2026-09-03) 本番一括は読取上限で止めず警告ダイアログも出さない。上限の確認はマスタデバッグで行う。
-  - 0.4.51 (2026-08-10) 一括完了: 読取上限打ち切り時に継続／中止を選択。継続なら HC_DATA_AGG_EXTRACT_TRUNC_POLICY=warn で再実行。
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import (
     QEventLoop,
+    QItemSelection,
     QItemSelectionModel,
     QObject,
     QPoint,
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -96,6 +98,7 @@ from ui_qt.ui_common import (
     show_warning_notice,
 )
 from ui_qt.ui_dsl_test_dialog import DslTestDialog, find_dsl_test_open_button
+from ui_qt.ui_data_agg_name_pattern_help import NamePatternHelpDialog
 from ui_qt.ui_data_agg_scenario_layout import (
     apply_link_def_mode_widgets,
     ascii_upper_cell_ref,
@@ -517,6 +520,450 @@ def _data_agg_warn_debug_open_failed(
         pass
 
 
+def _clear_removed_master_item_refs(
+    items: list[Any],
+    removed_names: set[str],
+    removed_ids: set[str],
+) -> None:
+    """
+    削除済みマスタ項目への参照を items 内から外す（破壊的）。
+    - 連携キー／結合キー: 削除項目を指す定義ごと除去
+    - path_item／join_path_item_id: 参照をクリア
+    （削除したマスタ項目本体とその sources＝シナリオは呼び出し側で items から除去済み）
+    """
+    names = {str(n or "").strip() for n in (removed_names or set()) if str(n or "").strip()}
+    ids = {str(i or "").strip() for i in (removed_ids or set()) if str(i or "").strip()}
+    if not names and not ids:
+        return
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        jpid = str(it.get("join_path_item_id") or "").strip()
+        if jpid and (jpid in ids or jpid in names):
+            it.pop("join_path_item_id", None)
+        for src in (it.get("sources") or []):
+            if not isinstance(src, dict):
+                continue
+            p = ensure_source_ui_block(src)
+            ldefs = p.get("link_defs")
+            if isinstance(ldefs, list):
+                p["link_defs"] = [
+                    ld
+                    for ld in ldefs
+                    if not (
+                        isinstance(ld, dict)
+                        and str(ld.get("item") or "").strip() in names
+                    )
+                ]
+            jdefs = p.get("join_defs")
+            if isinstance(jdefs, list):
+                p["join_defs"] = [
+                    jd
+                    for jd in jdefs
+                    if not (
+                        isinstance(jd, dict)
+                        and str(jd.get("item") or "").strip() in names
+                    )
+                ]
+            pi = str(p.get("path_item") or "").strip()
+            if pi in names and not pi.startswith("（主キー"):
+                p["path_item"] = ""
+
+
+def _context_menu_resolve_selection(
+    selected: list[int], click_row: int
+) -> list[int] | None:
+    """
+    右クリック前の選択付け替え結果。
+    None=選択維持。list=その行だけに付け替え。
+    空白（click_row<0）や選択内クリックは維持。選択外は当該1行。
+    """
+    if click_row < 0:
+        return None
+    if click_row in selected:
+        return None
+    return [click_row]
+
+
+def _table_row_at_context_pos(table: QTableWidget, pos: QPoint) -> int:
+    """
+    customContextMenuRequested の pos から行番号を得る。
+    テーブル本体に CustomContextMenu を付けた場合、pos は indexAt と整合する。
+    取れないときは itemAt → カーソル位置の順で補う
+    （失敗して current/末尾行に落ちると「常に最終行へ追加」になる）。
+    """
+    idx = table.indexAt(pos)
+    if idx.isValid():
+        return int(idx.row())
+    it = table.itemAt(pos)
+    if it is not None:
+        return int(it.row())
+    try:
+        from PySide6.QtGui import QCursor
+
+        vp = table.viewport()
+        if vp is not None:
+            local = vp.mapFromGlobal(QCursor.pos())
+            idx2 = table.indexAt(local)
+            if idx2.isValid():
+                return int(idx2.row())
+            it2 = table.itemAt(local)
+            if it2 is not None:
+                return int(it2.row())
+    except Exception:
+        pass
+    return -1
+
+
+def _context_insert_at(click_row: int, n: int, *, below: bool) -> int:
+    """
+    右クリック行基準の挿入位置（0..n）。
+    click_row<0 のときは上追加=0・下追加=n（従来互換）だが、
+    呼び出し側で可能な限り click_row を解決してから渡すこと。
+    """
+    n = max(0, int(n))
+    if below:
+        if click_row < 0:
+            return n
+        return max(0, min(int(click_row) + 1, n))
+    if click_row < 0:
+        return 0
+    return max(0, min(int(click_row), n))
+
+
+def _install_table_context_menu(
+    table: QTableWidget, handler: Callable[[QPoint], None]
+) -> None:
+    """
+    テーブル本体に CustomContextMenu を付ける。
+    ※ viewport に付けると信号が来ずメニューが出ない（QAbstractItemView の仕様）。
+    """
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.customContextMenuRequested.connect(handler)
+
+
+def _table_context_menu_global_pos(table: QTableWidget, pos: QPoint) -> QPoint:
+    """右クリックメニュー表示用のグローバル座標。"""
+    vp = table.viewport()
+    if vp is not None:
+        return vp.mapToGlobal(pos)
+    return table.mapToGlobal(pos)
+
+
+def _table_vscroll_value(table: QTableWidget) -> int:
+    sb = table.verticalScrollBar()
+    return int(sb.value()) if sb is not None else 0
+
+
+def _table_set_vscroll(table: QTableWidget, value: int) -> None:
+    sb = table.verticalScrollBar()
+    if sb is not None:
+        sb.setValue(int(value))
+
+
+def _table_row_in_viewport(table: QTableWidget, row: int) -> bool:
+    if row < 0 or row >= table.rowCount():
+        return True
+    model = table.model()
+    if model is None:
+        return True
+    rect = table.visualRect(model.index(row, 0))
+    if not rect.isValid():
+        return False
+    vh = table.viewport().height()
+    return rect.top() >= 0 and rect.bottom() <= vh
+
+
+def _table_row_height_px(table: QTableWidget, row: int = 0) -> int:
+    h = 0
+    try:
+        if 0 <= int(row) < table.rowCount():
+            h = int(table.rowHeight(int(row)))
+    except Exception:
+        h = 0
+    if h <= 0:
+        try:
+            h = int(table.verticalHeader().defaultSectionSize() or 24)
+        except Exception:
+            h = 24
+    return max(1, h)
+
+
+def _table_vscroll_row_step(table: QTableWidget, row: int = 0) -> int:
+    """
+    縦スクロール「1行分」のバー値差分。
+    ScrollPerItem は 1、ScrollPerPixel は行高(px)。
+    （行高を PerItem のバーに足すと数十行分飛んで最終行付近へ行く。）
+    """
+    try:
+        if table.verticalScrollMode() == QAbstractItemView.ScrollMode.ScrollPerItem:
+            sb = table.verticalScrollBar()
+            step = int(sb.singleStep()) if sb is not None else 1
+            return max(1, step)
+    except Exception:
+        pass
+    return _table_row_height_px(table, row)
+
+
+def _table_viewport_top_bottom_rows(table: QTableWidget) -> tuple[int, int]:
+    """
+    ビューポート内の先頭／末尾行。
+    下端座標が行の外（最終行下の余白）だと indexAt が -1 になるため、
+    上方向へ探して最終可視行を返す（でないと下端＋下追加の +1 スクロールが欠ける）。
+    """
+    vp = table.viewport()
+    vh = int(vp.height()) if vp is not None else 0
+    if vh <= 0:
+        return -1, -1
+    top_i = -1
+    for y in (1, 2, 4, 8):
+        top_i = int(table.indexAt(QPoint(0, y)).row())
+        if top_i >= 0:
+            break
+    bot_i = int(table.indexAt(QPoint(0, max(0, vh - 2))).row())
+    if bot_i < 0:
+        for y in range(max(0, vh - 2), -1, -1):
+            bot_i = int(table.indexAt(QPoint(0, y)).row())
+            if bot_i >= 0:
+                break
+    return top_i, bot_i
+
+
+def _table_viewport_edge_flags(table: QTableWidget, row: int) -> tuple[bool, bool]:
+    """行がビュー上端／下端付近か（切りきり行判定）。"""
+    if row < 0:
+        return False, False
+    top_i, bot_i = _table_viewport_top_bottom_rows(table)
+    near_top = top_i >= 0 and row <= top_i + 1
+    near_bot = bot_i >= 0 and row >= max(0, bot_i - 1)
+    return near_top, near_bot
+
+
+def _table_ensure_row_min_scroll(
+    table: QTableWidget, row: int, *, max_rows: int = 1
+) -> None:
+    """
+    表示外／欠けている行が見える方向へスクロールする（中央寄せしない）。
+    max_rows>0 のとき移動量を最大 max_rows 行分に制限（端での1行スクロール用）。
+    """
+    if row < 0 or row >= table.rowCount():
+        return
+    sb = table.verticalScrollBar()
+    model = table.model()
+    if sb is None or model is None:
+        return
+    vh = int(table.viewport().height())
+    if vh <= 0:
+        return
+    rect = table.visualRect(model.index(row, 0))
+    if not rect.isValid():
+        return
+    step = _table_vscroll_row_step(table, row)
+    ncap = max(1, int(max_rows))
+    per_item = False
+    try:
+        per_item = (
+            table.verticalScrollMode() == QAbstractItemView.ScrollMode.ScrollPerItem
+        )
+    except Exception:
+        per_item = False
+    delta = 0
+    if rect.bottom() > vh:
+        if per_item:
+            delta = step * ncap
+        else:
+            needed = int(rect.bottom() - vh)
+            delta = min(needed, step * ncap)
+    elif rect.top() < 0:
+        if per_item:
+            delta = -(step * ncap)
+        else:
+            needed = int(-rect.top())
+            delta = -min(needed, step * ncap)
+    if delta:
+        sb.setValue(int(sb.value()) + int(delta))
+
+
+class _VScrollPin:
+    """valueChanged を監視し、指定値以外への縦スクロールを即座に戻す（Qt scrollTo 抑止用）。"""
+
+    def __init__(self, table: QTableWidget, value: int) -> None:
+        self._table = table
+        self._value = int(value)
+        self._sb = table.verticalScrollBar()
+        self._active = False
+        if self._sb is not None:
+            self._sb.valueChanged.connect(self._on_changed)
+            self._active = True
+            _table_set_vscroll(table, self._value)
+
+    @property
+    def value(self) -> int:
+        return self._value
+
+    def update(self, value: int) -> None:
+        self._value = int(value)
+        _table_set_vscroll(self._table, self._value)
+
+    def _on_changed(self, v: int) -> None:
+        if not self._active or self._sb is None:
+            return
+        if int(v) == self._value:
+            return
+        self._sb.blockSignals(True)
+        try:
+            self._sb.setValue(self._value)
+        finally:
+            self._sb.blockSignals(False)
+
+    def release(self) -> None:
+        if not self._active:
+            return
+        self._active = False
+        if self._sb is not None:
+            try:
+                self._sb.valueChanged.disconnect(self._on_changed)
+            except Exception:
+                pass
+
+    def release_later(self, ms: int = 150) -> None:
+        QTimer.singleShot(max(0, int(ms)), self.release)
+
+
+def _table_reassert_vscroll(table: QTableWidget, value: int) -> None:
+    """縦スクロールを即時＋短時間ピン留め（選択後の Qt scrollTo／中央寄せを抑止）。"""
+    pin = _VScrollPin(table, value)
+    pin.release_later(150)
+
+
+def _table_select_rows_only(table: QTableWidget, rows: list[int]) -> None:
+    """行選択のみ（カレント変更なし＝scrollTo を誘発しない）。"""
+    sm = table.selectionModel()
+    model = table.model()
+    if sm is None or model is None:
+        return
+    sel = QItemSelection()
+    last_col = max(0, table.columnCount() - 1)
+    for r in rows:
+        ri = int(r)
+        if 0 <= ri < table.rowCount():
+            sel.select(model.index(ri, 0), model.index(ri, last_col))
+    sm.select(
+        sel,
+        QItemSelectionModel.SelectionFlag.ClearAndSelect
+        | QItemSelectionModel.SelectionFlag.Rows,
+    )
+
+
+def _table_set_current_row_pinned(
+    table: QTableWidget, row: int, pin: _VScrollPin
+) -> None:
+    """ピン留め中にカレント行だけ付ける（scrollTo が来てもピンが戻す）。"""
+    sm = table.selectionModel()
+    model = table.model()
+    if sm is None or model is None:
+        return
+    if not (0 <= int(row) < table.rowCount()):
+        return
+    sm.setCurrentIndex(
+        model.index(int(row), 0),
+        QItemSelectionModel.SelectionFlag.NoUpdate,
+    )
+    pin.update(pin.value)
+
+
+def _table_scroll_target_for_nudge(
+    table: QTableWidget, row: int, base_scroll: int, scroll_nudge: str
+) -> int:
+    """
+    scroll_nudge 規約: down=+1行 / up=-1行 / keep=維持 / その他(auto)=見せるための±1行。
+    呼び出し側の「いつ down/up/keep にするか」は画面ごとに異なる。
+    """
+    v0 = int(base_scroll)
+    step = _table_vscroll_row_step(table, row)
+    nudge = (scroll_nudge or "auto").strip().lower()
+    if nudge == "down":
+        return v0 + step
+    if nudge == "up":
+        return max(0, v0 - step)
+    if nudge == "keep":
+        return v0
+    return _table_one_row_scroll_target(table, row, v0)
+
+
+def _table_one_row_scroll_target(
+    table: QTableWidget, row: int, base_scroll: int
+) -> int:
+    """
+    base_scroll を基準に、row を見せるための目標スクロール（最大±1行分のバー値）。
+    visualRect が未確定でも indexAt で下端／上端判定する。
+    """
+    base = int(base_scroll)
+    _table_set_vscroll(table, base)
+    try:
+        table.updateGeometries()
+    except Exception:
+        pass
+    if row < 0 or row >= table.rowCount():
+        return base
+    vh = int(table.viewport().height())
+    if vh <= 0:
+        return base
+    step = _table_vscroll_row_step(table, row)
+    top_i, bot_i = _table_viewport_top_bottom_rows(table)
+    if top_i >= 0 and int(row) < top_i:
+        return max(0, base - step)
+    if bot_i >= 0 and int(row) > bot_i:
+        return base + step
+    if _table_row_in_viewport(table, int(row)):
+        return base
+    model = table.model()
+    per_item = False
+    try:
+        per_item = (
+            table.verticalScrollMode() == QAbstractItemView.ScrollMode.ScrollPerItem
+        )
+    except Exception:
+        per_item = False
+    if model is not None and not per_item:
+        rect = table.visualRect(model.index(int(row), 0))
+        if rect.isValid():
+            if rect.bottom() > vh:
+                return base + min(step, int(rect.bottom() - vh))
+            if rect.top() < 0:
+                return max(0, base - min(step, int(-rect.top())))
+    # 幾何未確定時: 下方向追加を想定して +1 行
+    if bot_i < 0 or int(row) >= max(0, bot_i):
+        return base + step
+    return base
+
+
+def _table_select_rows_keep_scroll(table: QTableWidget, rows: list[int]) -> None:
+    """選択を付け替えつつ縦スクロール位置を維持する（カレント変更時の scrollTo をピンで抑止）。"""
+    v = _table_vscroll_value(table)
+    _table_select_rows_only(table, rows)
+    _table_set_vscroll(table, v)
+    pin = _VScrollPin(table, v)
+    try:
+        if rows:
+            _table_set_current_row_pinned(table, int(rows[-1]), pin)
+    finally:
+        pin.release_later(150)
+
+
+def _table_clear_selection_keep_scroll(table: QTableWidget) -> None:
+    """選択を解除しつつ縦スクロール位置を維持する。"""
+    v = _table_vscroll_value(table)
+    sm = table.selectionModel()
+    if sm is not None:
+        sm.clearSelection()
+    try:
+        table.setCurrentIndex(table.model().index(-1, -1))  # type: ignore[union-attr]
+    except Exception:
+        pass
+    _table_set_vscroll(table, v)
+
+
 class _DataAggMainWindow(QDialog):
     """
     データ集約ツールのメイン画面。
@@ -546,6 +993,11 @@ class _DataAggMainWindow(QDialog):
         self._scenario_dirty: bool = False
         self._suppress_scenario_dirty: bool = False
         self._scenario_save_empty_filename: bool = False
+        # 改版判定用（ロード／保存直後の内容指紋）
+        self._revision_baseline_fp: str = ""
+        self._tab_widget_main: QTabWidget | None = None
+        self._item_undo_snapshot: dict[str, Any] | None = None
+        self._btn_item_undo: QPushButton | None = None
         self._closing_confirmed: bool = False
         self._close_force_workbook_gone: bool = False
         self._workbook_watch_timer: QTimer | None = None
@@ -734,10 +1186,7 @@ class _DataAggMainWindow(QDialog):
         )
         items_row.addWidget(self._item_table, 1)
         self._item_table.cellDoubleClicked.connect(self._on_item_table_double_clicked)
-        self._item_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._item_table.customContextMenuRequested.connect(
-            self._on_item_table_context_menu
-        )
+        _install_table_context_menu(self._item_table, self._on_item_table_context_menu)
         self._main_set_tip(
             self._item_table,
             "TOOLTIP_ITEM_TABLE",
@@ -762,8 +1211,21 @@ class _DataAggMainWindow(QDialog):
         btn_down = QPushButton(_u("BTN_MOVE_DOWN", "▼ 下へ"))
         set_widget_tooltip(btn_down, _u("TOOLTIP_MOVE_DOWN", "選択行を1行下に移動（連続・歯抜け選択可）"))
         btn_down.clicked.connect(self._on_move_items_down)
+        self._btn_item_undo = QPushButton(_u("BTN_UNDO_ITEM_ROWS", "Undo"))
+        set_widget_tooltip(
+            self._btn_item_undo,
+            _u(
+                "TOOLTIP_UNDO_ITEM_ROWS",
+                "直近の項目行の追加または削除を元に戻します。（1回のみ）",
+            ),
+        )
+        self._btn_item_undo.setEnabled(False)
+        self._btn_item_undo.setAutoDefault(False)
+        self._btn_item_undo.setDefault(False)
+        self._btn_item_undo.clicked.connect(self._on_item_table_undo)
         move_row.addWidget(btn_up)
         move_row.addWidget(btn_down)
+        move_row.addWidget(self._btn_item_undo)
         move_row.addStretch(1)
         tab_items_layout.addLayout(move_row)
         self._lbl_item_total = QLabel()
@@ -919,20 +1381,40 @@ class _DataAggMainWindow(QDialog):
             "検出ファイル件数の表示です。",
         )
         tab_scan_layout.addWidget(grp_files)
+        tab_props = self._create_properties_tab(_u)
+        self._tab_widget_main = tab_widget
+        tab_widget.addTab(tab_props, _u("TAB_PROPERTIES", "プロパティ"))
         tab_widget.addTab(tab_scan, _u("TAB_SCAN", "基準フォルダ"))
         tab_widget.addTab(tab_items, _u("TAB_ITEMS", "シナリオ"))
         tab_widget.addTab(
             self._create_excel_options_tab(_u, ref_tab=tab_items),
             _u("TAB_EXCEL", "Excel"),
         )
+        tab_widget.setCurrentIndex(0)
+        # 選択中タブ名を太字
+        _tab_ss = (tab_widget.styleSheet() or "").strip()
+        _sel_bold = "QTabBar::tab:selected { font-weight: bold; }"
+        if "tab:selected" not in _tab_ss:
+            tab_widget.setStyleSheet(
+                (_tab_ss + "\n" + _sel_bold).strip() if _tab_ss else _sel_bold
+            )
         self._main_set_tip(
             tab_widget,
             "TOOLTIP_TAB_WIDGET_MAIN",
-            "基準フォルダ・シナリオ一覧・Excel 設定のタブです。",
+            "プロパティ・基準フォルダ・シナリオ一覧・Excel 設定のタブです。",
         )
         try:
             tab_widget.setTabToolTip(
                 0,
+                _normalize_tooltip_text(
+                    _u(
+                        "TOOLTIP_TAB_PROPERTIES",
+                        "シナリオの改版・実行数・項目数・概要などのプロパティです。",
+                    )
+                ),
+            )
+            tab_widget.setTabToolTip(
+                1,
                 _normalize_tooltip_text(
                     _u(
                         "TOOLTIP_TAB_SCAN",
@@ -941,7 +1423,7 @@ class _DataAggMainWindow(QDialog):
                 ),
             )
             tab_widget.setTabToolTip(
-                1,
+                2,
                 _normalize_tooltip_text(
                     _u(
                         "TOOLTIP_TAB_ITEMS",
@@ -950,7 +1432,7 @@ class _DataAggMainWindow(QDialog):
                 ),
             )
             tab_widget.setTabToolTip(
-                2,
+                3,
                 _normalize_tooltip_text(
                     _u(
                         "TOOLTIP_TAB_EXCEL",
@@ -960,6 +1442,11 @@ class _DataAggMainWindow(QDialog):
             )
         except Exception:
             pass
+        self._main_set_tip(
+            tab_props,
+            "TOOLTIP_TAB_PROPERTIES",
+            "シナリオの改版・実行数・項目数・概要などのプロパティです。",
+        )
         self._main_set_tip(
             tab_scan,
             "TOOLTIP_TAB_SCAN",
@@ -999,7 +1486,7 @@ class _DataAggMainWindow(QDialog):
         self._main_set_tip(
             self._chk_result_path,
             "TOOLTIP_CHK_RESULT_PATH",
-            "取得元のフルパスを結果の先頭列に追加します。",
+            "主キーが行追加で新規行を立てたときの由来フォルダ（ファイル名なし）を結果の先頭列に追加します。",
         )
         self._chk_result_path.setChecked(False)
         self._chk_result_file = QCheckBox(_u("CHK_RESULT_FILE", "ファイル"))
@@ -1009,9 +1496,17 @@ class _DataAggMainWindow(QDialog):
             "取得元のファイル名（拡張子付き）を結果の先頭列に追加します。",
         )
         self._chk_result_file.setChecked(False)
+        self._chk_result_sheet = QCheckBox(_u("CHK_RESULT_SHEET", "シート名"))
+        self._main_set_tip(
+            self._chk_result_sheet,
+            "TOOLTIP_CHK_RESULT_SHEET",
+            "主キーが行追加／複写追加で新規行を立てたとき、主キーを取得したシート名を列に追加します。",
+        )
+        self._chk_result_sheet.setChecked(False)
         row_result_cols.addWidget(lbl_result_cols)
         row_result_cols.addWidget(self._chk_result_path)
         row_result_cols.addWidget(self._chk_result_file)
+        row_result_cols.addWidget(self._chk_result_sheet)
         row_result_cols.addStretch(1)
         layout.addLayout(row_result_cols)
         # 制御用ボタン（シナリオ読込/保存、一括実行・キャンセル）
@@ -1095,6 +1590,14 @@ class _DataAggMainWindow(QDialog):
                     self._edit_start_path.setText(lf)
         self._wire_auto_scan_signals()
         self._wire_scenario_dirty_signals()
+        if not self._scenario:
+            from svc import svc_data_agg_scenario as scenario_mod
+
+            self._scenario = scenario_mod.create_empty_scenario()
+            self._revision_baseline_fp = scenario_mod.scenario_content_fingerprint(
+                self._scenario
+            )
+        self._apply_properties_to_ui(self._scenario)
         self._update_item_count_label()
         self._update_detected_file_count_label()
         # 基準フォルダが空のときは一覧も空。パスありは showEvent 後に非同期走査（UI 表示を先に返す）。
@@ -1696,6 +2199,375 @@ class _DataAggMainWindow(QDialog):
         QTimer.singleShot(0, _front)
         QTimer.singleShot(120, _front)
 
+    @staticmethod
+    def _windows_user_name() -> str:
+        """Windows ログオン名（取得失敗時は空）。"""
+        for key in ("USERNAME", "USER", "LOGNAME"):
+            v = (os.environ.get(key) or "").strip()
+            if v:
+                return v
+        try:
+            import getpass
+
+            return str(getpass.getuser() or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _prop_bold_label(text: str) -> QLabel:
+        """プロパティ項目名（太字・末尾に全角コロン）。"""
+        t = (text or "").strip()
+        if t and not t.endswith("：") and not t.endswith(":"):
+            t = t + "："
+        lab = QLabel(t)
+        f = lab.font()
+        f.setBold(True)
+        lab.setFont(f)
+        return lab
+
+    @staticmethod
+    def _prop_grid_add(
+        grid: QGridLayout,
+        row: int,
+        col: int,
+        lab: QWidget | None,
+        val: QWidget | None,
+    ) -> None:
+        """グループ1用: 列 col（0..1）に ラベル＋値 を配置（全行で列位置を揃える）。"""
+        base = int(col) * 2
+        if lab is not None:
+            lab.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            grid.addWidget(lab, row, base, Qt.AlignmentFlag.AlignRight)
+        if val is not None:
+            grid.addWidget(val, row, base + 1)
+
+    def _create_properties_tab(self, _u: Any) -> QWidget:
+        """プロパティタブ（グループ1: シナリオ名・改版・日時・作成者・件数／グループ2: 概要）。"""
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+
+        grp1 = QGroupBox("")
+        g1 = QGridLayout(grp1)
+        g1.setContentsMargins(8, 8, 8, 8)
+        g1.setHorizontalSpacing(10)
+        g1.setVerticalSpacing(6)
+        # 2列×(ラベル|値) = 4カラム。値列だけ伸長して列位置を揃える
+        for c in (0, 2):
+            g1.setColumnStretch(c, 0)
+        for c in (1, 3):
+            g1.setColumnStretch(c, 1)
+
+        self._lbl_prop_file_name = QLabel("—")
+        self._lbl_prop_revision = QLabel("0")
+        self._lbl_prop_created_at = QLabel("—")
+        self._lbl_prop_updated_at = QLabel("—")
+        self._lbl_prop_item_count = QLabel("0")
+        self._lbl_prop_scenario_count = QLabel("0")
+        self._lbl_prop_run_count = QLabel("0")
+        for w in (
+            self._lbl_prop_file_name,
+            self._lbl_prop_revision,
+            self._lbl_prop_created_at,
+            self._lbl_prop_updated_at,
+            self._lbl_prop_item_count,
+            self._lbl_prop_scenario_count,
+            self._lbl_prop_run_count,
+        ):
+            w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self._edit_prop_author = QLineEdit()
+        self._edit_prop_author.setPlaceholderText(
+            _u("PLACEHOLDER_PROP_AUTHOR", "作成者名")
+        )
+        self._edit_prop_author.textChanged.connect(self._on_prop_author_changed)
+
+        # 行0: シナリオ名 | 改版番号
+        self._prop_grid_add(
+            g1,
+            0,
+            0,
+            self._prop_bold_label(_u("LABEL_PROP_FILE_NAME", "シナリオ名")),
+            self._lbl_prop_file_name,
+        )
+        self._prop_grid_add(
+            g1,
+            0,
+            1,
+            self._prop_bold_label(_u("LABEL_PROP_REVISION", "改版番号")),
+            self._lbl_prop_revision,
+        )
+        # 行1: 作成日 | 更新日
+        self._prop_grid_add(
+            g1,
+            1,
+            0,
+            self._prop_bold_label(_u("LABEL_PROP_CREATED_AT", "作成日")),
+            self._lbl_prop_created_at,
+        )
+        self._prop_grid_add(
+            g1,
+            1,
+            1,
+            self._prop_bold_label(_u("LABEL_PROP_UPDATED_AT", "更新日")),
+            self._lbl_prop_updated_at,
+        )
+        # 行2: 作成者（値は2列分まで伸ばして見切れ防止）
+        lab_author = self._prop_bold_label(_u("LABEL_PROP_AUTHOR", "作成者"))
+        lab_author.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        g1.addWidget(lab_author, 2, 0, Qt.AlignmentFlag.AlignRight)
+        g1.addWidget(self._edit_prop_author, 2, 1, 1, 3)
+        # 行3: 項目総数 | シナリオ総数
+        self._prop_grid_add(
+            g1,
+            3,
+            0,
+            self._prop_bold_label(_u("LABEL_PROP_ITEM_COUNT", "項目総数")),
+            self._lbl_prop_item_count,
+        )
+        self._prop_grid_add(
+            g1,
+            3,
+            1,
+            self._prop_bold_label(_u("LABEL_PROP_SCENARIO_COUNT", "シナリオ総数")),
+            self._lbl_prop_scenario_count,
+        )
+        # 行4: データ集約実行数
+        self._prop_grid_add(
+            g1,
+            4,
+            0,
+            self._prop_bold_label(_u("LABEL_PROP_RUN_COUNT", "データ集約実行数")),
+            self._lbl_prop_run_count,
+        )
+        lay.addWidget(grp1)
+
+        grp2 = QGroupBox("")
+        g2_lay = QVBoxLayout(grp2)
+        g2_lay.setContentsMargins(8, 8, 8, 8)
+        g2_lay.setSpacing(6)
+        lbl_sum = QLabel(_u("LABEL_PROP_SUMMARY", "【概 要】").strip() or "【概 要】")
+        _sf = lbl_sum.font()
+        _sf.setBold(True)
+        lbl_sum.setFont(_sf)
+        g2_lay.addWidget(lbl_sum)
+        self._edit_prop_summary = QTextEdit()
+        self._edit_prop_summary.setAcceptRichText(False)
+        self._edit_prop_summary.setMinimumHeight(120)
+        self._edit_prop_summary.setPlaceholderText(
+            _u("PLACEHOLDER_PROP_SUMMARY", "シナリオの概要を入力できます。")
+        )
+        self._main_set_tip(
+            self._edit_prop_summary,
+            "TOOLTIP_PROP_SUMMARY",
+            "シナリオの概要です。シナリオ保存時にファイルへ書き出します。",
+        )
+        self._edit_prop_summary.textChanged.connect(self._on_prop_summary_changed)
+        g2_lay.addWidget(self._edit_prop_summary, 1)
+        lay.addWidget(grp2, 1)
+
+        self._main_set_tip(
+            self._lbl_prop_file_name,
+            "TOOLTIP_PROP_FILE_NAME",
+            "シナリオファイル名（拡張子含む）です。保存時に記録されます（表示専用）。",
+        )
+        self._main_set_tip(
+            self._lbl_prop_revision,
+            "TOOLTIP_PROP_REVISION",
+            "内容に変化がありシナリオ保存したときに付与される改版番号です（表示専用）。",
+        )
+        self._main_set_tip(
+            self._lbl_prop_created_at,
+            "TOOLTIP_PROP_CREATED_AT",
+            "初めてシナリオを保存した日時です（表示専用）。",
+        )
+        self._main_set_tip(
+            self._lbl_prop_updated_at,
+            "TOOLTIP_PROP_UPDATED_AT",
+            "直近でシナリオを保存した日時です（表示専用）。",
+        )
+        self._main_set_tip(
+            self._lbl_prop_run_count,
+            "TOOLTIP_PROP_RUN_COUNT",
+            "本番一括実行が成功した回数です（表示専用。成功時にシナリオファイルへ即反映）。",
+        )
+        self._main_set_tip(
+            self._edit_prop_author,
+            "TOOLTIP_PROP_AUTHOR",
+            "シナリオの作成者です。未設定時は Windows ユーザー名を初期表示します（編集可）。",
+        )
+        return tab
+
+    def _on_prop_summary_changed(self) -> None:
+        if self._suppress_scenario_dirty:
+            return
+        self._mark_scenario_dirty()
+
+    def _on_prop_author_changed(self) -> None:
+        if self._suppress_scenario_dirty:
+            return
+        self._mark_scenario_dirty()
+
+    def _properties_from_ui(self) -> dict[str, Any]:
+        """プロパティタブの表示値＋作成者・概要入力を dict にする。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        props = scenario_mod.normalize_properties(
+            (self._scenario or {}).get(scenario_mod.KEY_PROPERTIES)
+        )
+        try:
+            props[scenario_mod.KEY_PROP_REVISION] = int(
+                (self._lbl_prop_revision.text() or "0").strip() or 0
+            )
+        except ValueError:
+            pass
+        try:
+            props[scenario_mod.KEY_PROP_RUN_COUNT] = int(
+                (self._lbl_prop_run_count.text() or "0").strip() or 0
+            )
+        except ValueError:
+            pass
+        props[scenario_mod.KEY_PROP_AUTHOR] = (
+            self._edit_prop_author.text().strip()
+            if isinstance(getattr(self, "_edit_prop_author", None), QLineEdit)
+            else ""
+        )
+        # ファイル名・作成日・更新日は表示専用。既存値を維持（保存時 stamp で更新）
+        props[scenario_mod.KEY_PROP_SUMMARY] = (
+            self._edit_prop_summary.toPlainText()
+            if isinstance(getattr(self, "_edit_prop_summary", None), QTextEdit)
+            else ""
+        )
+        return props
+
+    def _apply_properties_to_ui(self, data: dict[str, Any] | None = None) -> None:
+        """シナリオ dict の properties をプロパティタブへ反映する。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        src = data if isinstance(data, dict) else (self._scenario or {})
+        if not isinstance(src, dict):
+            src = {}
+        props = scenario_mod.normalize_properties(src.get(scenario_mod.KEY_PROPERTIES))
+        props[scenario_mod.KEY_PROP_ITEM_COUNT] = scenario_mod.count_master_items(src)
+        props[scenario_mod.KEY_PROP_SCENARIO_COUNT] = (
+            scenario_mod.count_registered_scenarios(src)
+        )
+        if isinstance(self._scenario, dict):
+            self._scenario[scenario_mod.KEY_PROPERTIES] = props
+        if data is self._scenario or data is None:
+            pass
+        elif isinstance(data, dict):
+            data[scenario_mod.KEY_PROPERTIES] = props
+        prev = self._suppress_scenario_dirty
+        self._suppress_scenario_dirty = True
+        try:
+            def _disp(v: Any, empty: str = "—") -> str:
+                s = str(v or "").strip()
+                return s if s else empty
+
+            if isinstance(getattr(self, "_lbl_prop_file_name", None), QLabel):
+                fn = _disp(props.get(scenario_mod.KEY_PROP_FILE_NAME))
+                if fn == "—":
+                    path_now = (self._scenario_path or "").strip()
+                    if path_now:
+                        fn = Path(path_now).name or "—"
+                self._lbl_prop_file_name.setText(fn)
+            if isinstance(getattr(self, "_lbl_prop_revision", None), QLabel):
+                self._lbl_prop_revision.setText(str(props.get(scenario_mod.KEY_PROP_REVISION) or 0))
+            if isinstance(getattr(self, "_lbl_prop_created_at", None), QLabel):
+                self._lbl_prop_created_at.setText(
+                    _disp(props.get(scenario_mod.KEY_PROP_CREATED_AT))
+                )
+            if isinstance(getattr(self, "_lbl_prop_updated_at", None), QLabel):
+                self._lbl_prop_updated_at.setText(
+                    _disp(props.get(scenario_mod.KEY_PROP_UPDATED_AT))
+                )
+            if isinstance(getattr(self, "_lbl_prop_run_count", None), QLabel):
+                self._lbl_prop_run_count.setText(str(props.get(scenario_mod.KEY_PROP_RUN_COUNT) or 0))
+            if isinstance(getattr(self, "_lbl_prop_item_count", None), QLabel):
+                self._lbl_prop_item_count.setText(str(props.get(scenario_mod.KEY_PROP_ITEM_COUNT) or 0))
+            if isinstance(getattr(self, "_lbl_prop_scenario_count", None), QLabel):
+                self._lbl_prop_scenario_count.setText(
+                    str(props.get(scenario_mod.KEY_PROP_SCENARIO_COUNT) or 0)
+                )
+            author = str(props.get(scenario_mod.KEY_PROP_AUTHOR) or "").strip()
+            if not author:
+                # 表示用に Windows ユーザー名を入れる。シナリオ dict へは書かない
+                # （読込直後の改版指紋とズレて、未編集保存で改版が上がるのを防ぐ）
+                author = self._windows_user_name()
+            if isinstance(getattr(self, "_edit_prop_author", None), QLineEdit):
+                self._edit_prop_author.setText(author)
+            if isinstance(getattr(self, "_edit_prop_summary", None), QTextEdit):
+                self._edit_prop_summary.setPlainText(
+                    str(props.get(scenario_mod.KEY_PROP_SUMMARY) or "")
+                )
+        finally:
+            self._suppress_scenario_dirty = prev
+
+    def _refresh_property_counts_ui(self) -> None:
+        """項目／シナリオ数の表示だけ即時更新する。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        try:
+            n_items = int(self._item_table.rowCount()) if self._item_table else 0
+            n_scen = scenario_mod.count_registered_scenarios(self._scenario or {})
+            if isinstance(self._scenario, dict):
+                cur = scenario_mod.normalize_properties(
+                    self._scenario.get(scenario_mod.KEY_PROPERTIES)
+                )
+                cur[scenario_mod.KEY_PROP_ITEM_COUNT] = n_items
+                cur[scenario_mod.KEY_PROP_SCENARIO_COUNT] = n_scen
+                self._scenario[scenario_mod.KEY_PROPERTIES] = cur
+            if isinstance(getattr(self, "_lbl_prop_item_count", None), QLabel):
+                self._lbl_prop_item_count.setText(str(n_items))
+            if isinstance(getattr(self, "_lbl_prop_scenario_count", None), QLabel):
+                self._lbl_prop_scenario_count.setText(str(n_scen))
+        except Exception:
+            pass
+
+    def _persist_run_count_only(self, new_count: int) -> None:
+        """実行数だけをシナリオファイルへ即保存（改版は上げない）。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        path = (self._scenario_path or "").strip()
+        if not path:
+            return
+        try:
+            data = scenario_mod.load_scenario(path)
+            props = scenario_mod.normalize_properties(data.get(scenario_mod.KEY_PROPERTIES))
+            props[scenario_mod.KEY_PROP_RUN_COUNT] = max(0, int(new_count))
+            data[scenario_mod.KEY_PROPERTIES] = props
+            scenario_mod.save_scenario(path, data)
+        except Exception:
+            try:
+                _data_agg_ui_diag.info(
+                    "[DATA_AGG_MAIN] persist_run_count_failed path=%s", path
+                )
+            except Exception:
+                pass
+
+    def _bump_run_count_on_batch_success(self) -> None:
+        """本番一括成功時: 実行数 +1（メモリ＋可能ならファイルのその箇所のみ）。"""
+        from svc import svc_data_agg_scenario as scenario_mod
+
+        if not isinstance(self._scenario, dict):
+            self._scenario = scenario_mod.create_empty_scenario()
+        props = scenario_mod.normalize_properties(
+            self._scenario.get(scenario_mod.KEY_PROPERTIES)
+        )
+        props[scenario_mod.KEY_PROP_RUN_COUNT] = int(
+            props.get(scenario_mod.KEY_PROP_RUN_COUNT) or 0
+        ) + 1
+        self._scenario[scenario_mod.KEY_PROPERTIES] = props
+        if isinstance(getattr(self, "_lbl_prop_run_count", None), QLabel):
+            self._lbl_prop_run_count.setText(str(props[scenario_mod.KEY_PROP_RUN_COUNT]))
+        self._persist_run_count_only(int(props[scenario_mod.KEY_PROP_RUN_COUNT]))
+
     def _create_excel_options_tab(
         self,
         _u: Any,
@@ -2140,7 +3012,7 @@ class _DataAggMainWindow(QDialog):
         self._mark_scenario_dirty()
 
     def _result_columns_from_ui(self) -> dict[str, Any]:
-        """結果付加列（パス／ファイル）の実行時オプション。シナリオ JSON には保存しない。"""
+        """結果付加列（パス／ファイル／シート名）の実行時オプション。シナリオ JSON には保存しない。"""
         from svc import svc_data_agg_scenario as scenario_mod
 
         _u = lambda k, d: _ui_disp_str(self._ui or {}, k, d)
@@ -2148,8 +3020,10 @@ class _DataAggMainWindow(QDialog):
             {
                 "include_path": self._chk_result_path.isChecked(),
                 "include_file": self._chk_result_file.isChecked(),
+                "include_sheet": self._chk_result_sheet.isChecked(),
                 "path_header": _u("RESULT_COL_PATH_HEADER", "パス"),
                 "file_header": _u("RESULT_COL_FILE_HEADER", "ファイル"),
+                "sheet_header": _u("RESULT_COL_SHEET_HEADER", "シート名"),
             }
         )
 
@@ -2393,6 +3267,10 @@ class _DataAggMainWindow(QDialog):
             self._item_table.blockSignals(False)
         self._scenario = scenario_mod.create_empty_scenario()
         self._scenario_path = ""
+        self._revision_baseline_fp = scenario_mod.scenario_content_fingerprint(
+            self._scenario
+        )
+        self._apply_properties_to_ui(self._scenario)
         self._edit_start_path.clear()
         self._file_list_items = []
         self._file_list.clear()
@@ -2406,6 +3284,7 @@ class _DataAggMainWindow(QDialog):
         self._fit_item_table_columns()
         self._clear_scenario_dirty()
         self._scenario_save_empty_filename = False
+        self._clear_item_table_undo()
 
     def _on_scenario_clear_sources_only(self) -> None:
         """項目行は残し、各マスタの取得シナリオ（sources）のみ空にする。"""
@@ -2451,6 +3330,7 @@ class _DataAggMainWindow(QDialog):
         n = self._item_table.rowCount()
         fmt = str(self._ui.get("LABEL_ITEM_TOTAL_FMT") or "項目総数：%d件").strip()
         self._lbl_item_total.setText(fmt % n)
+        self._refresh_property_counts_ui()
 
     def _update_detected_file_count_label(self) -> None:
         if getattr(self, "_scan_busy", False):
@@ -2816,6 +3696,16 @@ class _DataAggMainWindow(QDialog):
                 if pi == old and not pi.startswith("（主キー"):
                     p["path_item"] = new
 
+    def _clear_removed_master_item_refs_in_scenario(
+        self, removed_names: set[str], removed_ids: set[str]
+    ) -> None:
+        """削除済みマスタ項目への参照を残項目から外す（Undo スナップショット取得後に呼ぶ）。"""
+        _clear_removed_master_item_refs(
+            list((self._scenario or {}).get("items") or []),
+            removed_names,
+            removed_ids,
+        )
+
     def _refresh_item_summaries_and_link_state(self) -> None:
         """テーブルと self._scenario.items を突き合わせて要約列を全行再生成し参照行の外観を更新する。"""
         items = (self._scenario or {}).get("items") or []
@@ -2997,6 +3887,7 @@ class _DataAggMainWindow(QDialog):
         self._mark_scenario_dirty()
         self._fit_item_table_columns()
         self._refresh_excel_sort_item_combos()
+        self._clear_item_table_undo()
 
     def _collect_link_target_names(self) -> set[str]:
         """シナリオ内のセル座標連携（link_defs）で参照される項目名を集約する。"""
@@ -3147,12 +4038,102 @@ class _DataAggMainWindow(QDialog):
                 return cand
             k += 1
 
-    def _insert_master_item_row_at(self, insert_at: int) -> None:
-        """マスタ項目行を insert_at に挿入（シナリオは空ソース）。"""
+    def _clear_item_table_undo(self) -> None:
+        self._item_undo_snapshot = None
+        btn = getattr(self, "_btn_item_undo", None)
+        if isinstance(btn, QPushButton):
+            btn.setEnabled(False)
+
+    def _capture_item_table_undo(self) -> None:
+        """追加／削除直前の項目一覧と選択を1段だけ保存する。"""
+        self._scenario = self._build_scenario_from_ui()
+        self._item_undo_snapshot = {
+            "items": copy.deepcopy(list(self._scenario.get("items") or [])),
+            "selection": list(self._get_selected_row_indices()),
+        }
+        btn = getattr(self, "_btn_item_undo", None)
+        if isinstance(btn, QPushButton):
+            btn.setEnabled(True)
+
+    def _reload_item_table_from_items(self, items: list[dict[str, Any]]) -> None:
+        """items を項目表へ反映（Undo 復元用）。"""
+        self._item_table.blockSignals(True)
+        try:
+            self._item_table.setRowCount(len(items))
+            for i, it in enumerate(items):
+                if not isinstance(it, dict):
+                    it = {}
+                name = str(it.get("name") or it.get("id") or ("項目_%s" % (i + 1)))
+                summary = self._format_item_summary(it)
+                self._item_table.setItem(i, 0, QTableWidgetItem(name))
+                self._item_table.setCellWidget(
+                    i, 1, self._create_scenario_edit_button(i)
+                )
+                self._item_table.setItem(i, 2, self._create_summary_item(summary))
+            self._apply_linked_item_state()
+        finally:
+            self._item_table.blockSignals(False)
+        self._sync_item_table_master_name_roles()
+        self._fit_item_table_columns()
+        self._refresh_excel_sort_item_combos()
+        self._update_item_count_label()
+
+    def _on_item_table_undo(self) -> None:
+        """直近の項目行追加／削除を1回だけ元に戻す。"""
+        snap = self._item_undo_snapshot
+        if not isinstance(snap, dict):
+            return
+        items = snap.get("items")
+        if not isinstance(items, list):
+            return
+        sel_raw = snap.get("selection") or []
+        sel = [int(r) for r in sel_raw if isinstance(r, (int, float))]
+        v = _table_vscroll_value(self._item_table)
+        self._scenario = self._build_scenario_from_ui()
+        self._scenario["items"] = copy.deepcopy(items)
+        self._reload_item_table_from_items(list(self._scenario["items"]))
+        self._clear_item_table_undo()
+        self._mark_scenario_dirty()
+        prev_auto = self._item_table.hasAutoScroll()
+        self._item_table.setAutoScroll(False)
+        pin: _VScrollPin | None = None
+        try:
+            _table_set_vscroll(self._item_table, v)
+            valid = [r for r in sel if 0 <= r < self._item_table.rowCount()]
+            if valid:
+                _table_select_rows_only(self._item_table, valid)
+                target = _table_one_row_scroll_target(self._item_table, valid[0], v)
+                if valid[-1] != valid[0]:
+                    target = _table_one_row_scroll_target(
+                        self._item_table, valid[-1], target
+                    )
+                pin = _VScrollPin(self._item_table, target)
+                _table_set_current_row_pinned(self._item_table, valid[-1], pin)
+                pin.update(target)
+                pin.release_later(180)
+                pin = None
+            else:
+                _table_clear_selection_keep_scroll(self._item_table)
+                _table_reassert_vscroll(self._item_table, v)
+        finally:
+            if pin is not None:
+                pin.release()
+            self._item_table.setAutoScroll(prev_auto)
+
+    def _insert_master_item_row_at(
+        self, insert_at: int, *, scroll_nudge: str = "auto"
+    ) -> None:
+        """
+        マスタ項目行を insert_at に挿入（シナリオは空ソース）。
+        scroll_nudge の意味は _table_scroll_target_for_nudge と共通。
+        いつ up/down/keep/auto にするかはコンテキスト側（ソース表とは既定が異なる）。
+        流れ: v0 記録 → 挿入・fit → target 決定 → 選択 → setValue → 短ピンで current。
+        """
         from svc import svc_data_agg_scenario as scenario_mod
 
         if not self._scenario:
             self._scenario = scenario_mod.create_empty_scenario()
+        self._capture_item_table_undo()
         self._scenario = self._build_scenario_from_ui()
         items = list(self._scenario.get("items") or [])
         n = len(items)
@@ -3168,49 +4149,90 @@ class _DataAggMainWindow(QDialog):
         }
         items.insert(insert_at, new_item)
         self._scenario["items"] = items
-        self._item_table.insertRow(insert_at)
-        self._item_table.setItem(insert_at, 0, QTableWidgetItem(nm))
-        self._item_table.setCellWidget(
-            insert_at, 1, self._create_scenario_edit_button(insert_at)
-        )
-        self._item_table.setItem(insert_at, 2, self._create_summary_item(""))
-        self._apply_linked_item_state()
-        self._sync_item_table_master_name_roles()
-        self._mark_scenario_dirty()
-        self._fit_item_table_columns()
-        self._refresh_excel_sort_item_combos()
-        self._update_item_count_label()
-        self._item_table.selectRow(insert_at)
+        v0 = _table_vscroll_value(self._item_table)
+        prev_auto = self._item_table.hasAutoScroll()
+        self._item_table.setAutoScroll(False)
+        pin: _VScrollPin | None = None
+        try:
+            self._item_table.insertRow(insert_at)
+            self._item_table.setItem(insert_at, 0, QTableWidgetItem(nm))
+            self._item_table.setCellWidget(
+                insert_at, 1, self._create_scenario_edit_button(insert_at)
+            )
+            self._item_table.setItem(insert_at, 2, self._create_summary_item(""))
+            self._apply_linked_item_state()
+            self._sync_item_table_master_name_roles()
+            self._mark_scenario_dirty()
+            self._fit_item_table_columns()
+            self._refresh_excel_sort_item_combos()
+            self._update_item_count_label()
+            target = _table_scroll_target_for_nudge(
+                self._item_table, insert_at, v0, scroll_nudge
+            )
+            _table_select_rows_only(self._item_table, [insert_at])
+            _table_set_vscroll(self._item_table, target)
+            pin = _VScrollPin(self._item_table, target)
+            _table_set_current_row_pinned(self._item_table, insert_at, pin)
+            pin.release_later(150)
+            pin = None
+        finally:
+            if pin is not None:
+                pin.release()
+            self._item_table.setAutoScroll(prev_auto)
 
     def _remove_selected_master_item_rows(self) -> None:
-        """選択中のマスタ項目行を削除。"""
+        """選択中のマスタ項目行を削除（連続・歯抜け）。削除後は選択なし・スクロール維持。"""
         indices = self._get_selected_row_indices()
         if not indices:
             return
+        self._capture_item_table_undo()
         self._scenario = self._build_scenario_from_ui()
         items = list(self._scenario.get("items") or [])
+        removed_names: set[str] = set()
+        removed_ids: set[str] = set()
+        for r in indices:
+            if 0 <= r < len(items) and isinstance(items[r], dict):
+                nm = str(items[r].get("name") or "").strip()
+                iid = str(items[r].get("id") or "").strip()
+                if nm:
+                    removed_names.add(nm)
+                if iid:
+                    removed_ids.add(iid)
+            c0 = self._item_table.item(r, 0)
+            tnm = (c0.text() if c0 else "").strip()
+            if tnm:
+                removed_names.add(tnm)
+        v = _table_vscroll_value(self._item_table)
         for r in reversed(indices):
             if 0 <= r < len(items):
                 del items[r]
             self._item_table.removeRow(r)
         self._scenario["items"] = items
-        self._apply_linked_item_state()
+        self._clear_removed_master_item_refs_in_scenario(removed_names, removed_ids)
+        self._refresh_item_summaries_and_link_state()
         self._sync_item_table_master_name_roles()
         self._mark_scenario_dirty()
         self._fit_item_table_columns()
         self._refresh_excel_sort_item_combos()
         self._update_item_count_label()
-        if self._item_table.rowCount() > 0:
-            first = int(indices[0])
-            sel = min(first, self._item_table.rowCount() - 1)
-            self._item_table.selectRow(max(0, sel))
+        _table_set_vscroll(self._item_table, v)
+        _table_clear_selection_keep_scroll(self._item_table)
+        _table_reassert_vscroll(self._item_table, v)
 
     def _on_item_table_context_menu(self, pos: QPoint) -> None:
         """メインのマスタ項目表: 行の挿入・削除。"""
-        idx = self._item_table.indexAt(pos)
-        r = int(idx.row())
-        if r >= 0:
-            self._item_table.selectRow(r)
+        r = _table_row_at_context_pos(self._item_table, pos)
+        selected = self._get_selected_row_indices()
+        if r < 0 and selected:
+            r = int(selected[-1])
+        resolved = _context_menu_resolve_selection(selected, r)
+        if resolved is not None:
+            _table_select_rows_keep_scroll(self._item_table, resolved)
+        near_top, near_bot = _table_viewport_edge_flags(self._item_table, r)
+        n_before = self._item_table.rowCount()
+        anchor = int(r)
+        nudge_up = "keep" if near_top else "auto"
+        nudge_dn = "down" if near_bot else "auto"
         menu = QMenu(self)
         ui = self._ui or {}
         a_up = menu.addAction(
@@ -3223,15 +4245,20 @@ class _DataAggMainWindow(QDialog):
         a_del = menu.addAction(
             _ui_disp_str(ui, "CTX_REMOVE_ITEM_ROW", "削除")
         )
-        chosen = menu.exec(self._item_table.viewport().mapToGlobal(pos))
-        if chosen == a_up:
-            ins = r if r >= 0 else 0
-            self._insert_master_item_row_at(ins)
-        elif chosen == a_dn:
-            ins = (r + 1) if r >= 0 else self._item_table.rowCount()
-            self._insert_master_item_row_at(ins)
-        elif chosen == a_del:
-            self._remove_selected_master_item_rows()
+        a_up.triggered.connect(
+            lambda *_: self._insert_master_item_row_at(
+                _context_insert_at(anchor, n_before, below=False),
+                scroll_nudge=nudge_up,
+            )
+        )
+        a_dn.triggered.connect(
+            lambda *_: self._insert_master_item_row_at(
+                _context_insert_at(anchor, n_before, below=True),
+                scroll_nudge=nudge_dn,
+            )
+        )
+        a_del.triggered.connect(lambda *_: self._remove_selected_master_item_rows())
+        menu.exec(_table_context_menu_global_pos(self._item_table, pos))
 
     def _on_move_items_up(self) -> None:
         """選択行を上に移動する。連続・歯抜け選択に対応。"""
@@ -3362,51 +4389,42 @@ class _DataAggMainWindow(QDialog):
     def _finish_move_selection(
         self, insert_at: int, count: int, delta: int
     ) -> None:
-        """移動後の選択とスクロールを行う（ブロック移動用）。"""
-        sm = self._item_table.selectionModel()
-        if sm:
-            sm.clearSelection()
-            for r in range(insert_at, insert_at + count):
-                idx = self._item_table.model().index(r, 0)
-                sm.select(
-                    idx,
-                    QItemSelectionModel.SelectionFlag.Select
-                    | QItemSelectionModel.SelectionFlag.Rows,
-                )
+        """移動後の選択とスクロール（表示端では最大1行分だけ）。"""
+        rows = list(range(insert_at, insert_at + count))
         scroll_row = insert_at if delta < 0 else insert_at + count - 1
-        hint = (
-            QAbstractItemView.ScrollHint.EnsureVisible
-            if delta < 0
-            else QAbstractItemView.ScrollHint.PositionAtBottom
-        )
-        self._item_table.scrollTo(
-            self._item_table.model().index(scroll_row, 0), hint
-        )
+        self._finish_item_move_selection_scroll(rows, scroll_row)
 
     def _finish_move_selection_gap(
         self, new_indices: list[int], delta: int
     ) -> None:
-        """移動後の選択とスクロールを行う（歯抜け移動用）。"""
-        sm = self._item_table.selectionModel()
-        if sm:
-            sm.clearSelection()
-            for r in new_indices:
-                idx = self._item_table.model().index(r, 0)
-                sm.select(
-                    idx,
-                    QItemSelectionModel.SelectionFlag.Select
-                    | QItemSelectionModel.SelectionFlag.Rows,
-                )
-        if new_indices:
-            scroll_row = new_indices[0] if delta < 0 else new_indices[-1]
-            hint = (
-                QAbstractItemView.ScrollHint.EnsureVisible
-                if delta < 0
-                else QAbstractItemView.ScrollHint.PositionAtBottom
-            )
-            self._item_table.scrollTo(
-                self._item_table.model().index(scroll_row, 0), hint
-            )
+        """移動後の選択とスクロール（歯抜け・表示端では最大1行分だけ）。"""
+        if not new_indices:
+            return
+        scroll_row = new_indices[0] if delta < 0 else new_indices[-1]
+        self._finish_item_move_selection_scroll(list(new_indices), scroll_row)
+
+    def _finish_item_move_selection_scroll(
+        self, rows: list[int], scroll_row: int
+    ) -> None:
+        """選択を付け替え、端で欠けていれば行高1行分だけスクロールする。"""
+        prev_auto = self._item_table.hasAutoScroll()
+        self._item_table.setAutoScroll(False)
+        pin: _VScrollPin | None = None
+        try:
+            v0 = _table_vscroll_value(self._item_table)
+            _table_select_rows_only(self._item_table, rows)
+            _table_set_vscroll(self._item_table, v0)
+            target = _table_one_row_scroll_target(self._item_table, scroll_row, v0)
+            pin = _VScrollPin(self._item_table, target)
+            if rows:
+                _table_set_current_row_pinned(self._item_table, int(rows[-1]), pin)
+            pin.update(target)
+            pin.release_later(180)
+            pin = None
+        finally:
+            if pin is not None:
+                pin.release()
+            self._item_table.setAutoScroll(prev_auto)
 
     def _on_scenario_edit_button_clicked(self) -> None:
         """編集ボタンから行番号を解決してシナリオ編集を開く（行移動後もずれない）。"""
@@ -3777,6 +4795,7 @@ class _DataAggMainWindow(QDialog):
         self._refresh_item_summaries_and_link_state()
         self._sync_item_table_master_name_roles()
         self._mark_scenario_dirty()
+        self._refresh_property_counts_ui()
 
     def _on_scenario_edit(self, row: int) -> None:
         """シナリオ編集画面を開く（項目単位）。OK 時にシナリオ更新・要約再描画。"""
@@ -3992,22 +5011,37 @@ class _DataAggMainWindow(QDialog):
                 return
 
             from svc.data_agg_scenario_expr_modernize import (
+                force_modernize_scenario_name_patterns,
                 modernize_scenario_expressions,
                 scenario_needs_expr_modernize,
+                scenario_needs_name_pattern_force,
             )
 
             modernized = False
             modernize_notes: list[str] = []
-            if scenario_needs_expr_modernize(data):
-                title_ld = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込")
-                q_msg = _ui_disp_str(
-                    self._ui or {},
-                    "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM",
-                    "旧い記述表現が含まれています。\n"
-                    "新フォーマット表現に修正しますか？\n"
-                    "（メモリ上のみ。シナリオ保存は操作者の判断です。"
-                    "保存しない場合、次回読込時にも確認します）",
-                )
+            needs_dsl = scenario_needs_expr_modernize(data)
+            needs_name_force = scenario_needs_name_pattern_force(data)
+            title_ld = _ui_disp_str(self._ui or {}, "BTN_SCENARIO_LOAD", "シナリオ読込")
+            if needs_dsl:
+                if needs_name_force:
+                    q_msg = _ui_disp_str(
+                        self._ui or {},
+                        "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM_WITH_NAME_FORCE",
+                        "旧い記述表現が含まれています。\n"
+                        "新フォーマット表現に修正しますか？\n"
+                        "（メモリ上のみ。シナリオ保存は操作者の判断です。"
+                        "保存しない場合、次回読込時にも確認します）\n\n"
+                        "なお、ファイル名／シート名の旧形式は常に新方式へ自動変換します。",
+                    )
+                else:
+                    q_msg = _ui_disp_str(
+                        self._ui or {},
+                        "MSG_SCENARIO_LOAD_MODERNIZE_CONFIRM",
+                        "旧い記述表現が含まれています。\n"
+                        "新フォーマット表現に修正しますか？\n"
+                        "（メモリ上のみ。シナリオ保存は操作者の判断です。"
+                        "保存しない場合、次回読込時にも確認します）",
+                    )
                 yn = QMessageBox.question(
                     self,
                     title_ld,
@@ -4030,6 +5064,29 @@ class _DataAggMainWindow(QDialog):
                             title_ld,
                             note_pre + "\n" + "\n".join(modernize_notes[:24]),
                         )
+            elif needs_name_force:
+                info_msg = _ui_disp_str(
+                    self._ui or {},
+                    "MSG_SCENARIO_LOAD_NAME_PATTERN_FORCE_INFO",
+                    "ファイル名／シート名の旧形式を新方式へ自動変換します。\n"
+                    "（メモリ上のみ。シナリオ保存は操作者の判断です）",
+                )
+                show_info_notice(self, title_ld, info_msg)
+
+            # ファイル名／シート名は常に強制変換（DSL の可否に依存しない）
+            if needs_name_force:
+                fres = force_modernize_scenario_name_patterns(data, inplace=True)
+                if fres.notes:
+                    note_pre = _ui_disp_str(
+                        self._ui or {},
+                        "MSG_SCENARIO_LOAD_MODERNIZE_PARTIAL",
+                        "一部の表現は自動修正できませんでした（旧表記のままです）:",
+                    )
+                    show_warning_notice(
+                        self,
+                        title_ld,
+                        note_pre + "\n" + "\n".join(fres.notes[:24]),
+                    )
 
             # 現代化「はい」で変更した場合は座標ソフト警告を出さない（合意）。
             # いいえ／未変更時のみ従来どおり警告。部分失敗は上の notes で通知済み。
@@ -4055,6 +5112,9 @@ class _DataAggMainWindow(QDialog):
             self._scenario = data
             self._scenario_path = path
             self._scenario_save_empty_filename = False
+            from svc import svc_data_agg_scenario as _scen_fp
+
+            self._revision_baseline_fp = _scen_fp.scenario_content_fingerprint(data)
             set_last_folder(str(Path(path).parent))
             self._suppress_scenario_dirty = True
             self._item_table.blockSignals(True)
@@ -4095,6 +5155,7 @@ class _DataAggMainWindow(QDialog):
                 self._file_list.clear()
                 self._update_detected_file_count_label()
                 self._apply_excel_options_to_ui(data.get("excel_options"))
+                self._apply_properties_to_ui(data)
             finally:
                 self._item_table.blockSignals(False)
                 self._suppress_scenario_dirty = False
@@ -4103,6 +5164,7 @@ class _DataAggMainWindow(QDialog):
                 self._mark_scenario_dirty()
             else:
                 self._clear_scenario_dirty()
+            self._clear_item_table_undo()
             self._update_item_count_label()
             self._fit_item_table_columns()
             self._refresh_scenario_display_label()
@@ -4245,12 +5307,21 @@ class _DataAggMainWindow(QDialog):
                 )
                 return False
 
+            # 内容変化時のみ改版 +1（実行数のみの変更は対象外）
+            scenario_mod.bump_revision_if_content_changed(
+                data, getattr(self, "_revision_baseline_fp", "") or ""
+            )
+            scenario_mod.refresh_property_counts(data)
+            # ファイル名・作成日・更新日は改版判定の後に押印（指紋対象外）
+            scenario_mod.stamp_scenario_file_meta(data, path)
             scenario_mod.save_scenario(path, data)
             self._scenario = data
             self._scenario_path = path
             self._scenario_save_empty_filename = False
+            self._revision_baseline_fp = scenario_mod.scenario_content_fingerprint(data)
             set_last_folder(str(Path(path).parent))
             self._clear_scenario_dirty()
+            self._apply_properties_to_ui(data)
             self._refresh_scenario_display_label()
             if show_done:
                 show_done_notice(
@@ -4335,6 +5406,10 @@ class _DataAggMainWindow(QDialog):
             self._excel_options_from_ui()
         )
         data.pop(scenario_mod.KEY_RESULT_COLUMNS, None)
+        # プロパティ（概要は UI、改版・実行数は表示値を起点に）
+        props = self._properties_from_ui()
+        data[scenario_mod.KEY_PROPERTIES] = props
+        scenario_mod.refresh_property_counts(data)
         return data
 
     def _start_batch_done_poll_for_sheet(self, sheet_id: str, *, run_id: str = "") -> None:
@@ -4415,6 +5490,10 @@ class _DataAggMainWindow(QDialog):
         title = str(d.get("title") or "データ集約")
         msg = _normalize_message_newlines(str(d.get("message") or ""))
         if d.get("ok", True):
+            try:
+                self._bump_run_count_on_batch_success()
+            except Exception:
+                pass
             show_done_notice(self, title, msg)
             return
         from svc.data_agg_extract_limit import is_extract_truncated_batch_notify
@@ -5239,9 +6318,17 @@ class _ScenarioEditDialog(QDialog):
         self._on_registered = on_registered if callable(on_registered) else None
         self._dirty: bool = False
         self._undo_snapshot: list[dict[str, Any]] | None = None
-        self._undo_restore_row: int = -1
+        self._undo_registered_snapshots: list[dict[str, Any] | None] | None = None
+        self._undo_restore_selection: list[int] = []
         self._dsl_test_dialog: DslTestDialog | None = None
         self._dsl_test_cfg: dict[str, Any] = dict(self._screen_cfg.get("DSL_TEST") or {})
+        self._name_pattern_help_dialog: NamePatternHelpDialog | None = None
+        self._name_pattern_help_cfg: dict[str, Any] = dict(
+            self._screen_cfg.get("NAME_PATTERN_HELP") or {}
+        )
+        self._name_pattern_lock_widget: QLineEdit | None = None
+        self._name_pattern_lock_key: str | None = None
+        self._name_pattern_refocusing: bool = False
         self._scenario_focus_changed_connected = False
         self._master_items_list: list[dict[str, Any]] = list(items or [])
         self._master_item_row = -1
@@ -5317,7 +6404,7 @@ class _ScenarioEditDialog(QDialog):
         self._sources_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._sources_table.setColumnWidth(0, 28)
         self._sources_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._sources_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._sources_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self._sources_table.setAlternatingRowColors(True)
         self._sources_table.setStyleSheet(
             "QTableWidget { alternate-background-color: #FAFAF5; } "
@@ -5339,9 +6426,8 @@ class _ScenarioEditDialog(QDialog):
             "この項目に紐づく取得シナリオの一覧です。行を選ぶと右の詳細が切り替わります。",
         )
         self._sources_table.itemSelectionChanged.connect(self._on_source_selection_changed)
-        self._sources_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._sources_table.customContextMenuRequested.connect(
-            self._on_sources_table_context_menu
+        _install_table_context_menu(
+            self._sources_table, self._on_sources_table_context_menu
         )
         left_top_lay.addWidget(self._sources_table, 1)
         self._scenario_set_tip(
@@ -5611,6 +6697,8 @@ class _ScenarioEditDialog(QDialog):
             detail_cell,
             dsl_test_opener=self._open_dsl_test,
             dsl_test_cfg=self._dsl_test_cfg,
+            name_pattern_help_opener=self._open_name_pattern_help,
+            name_pattern_help_cfg=self._name_pattern_help_cfg,
         )
         self._cell_refs["on_join_group_added"] = self._wire_new_join_def
         self._cell_refs["on_link_group_added"] = self._wire_new_link_def
@@ -5678,17 +6766,17 @@ class _ScenarioEditDialog(QDialog):
         self._btn_register.clicked.connect(self._on_register_clicked)
         self._btn_register.setAutoDefault(False)
         self._btn_register.setDefault(False)
-        btn_cancel = QPushButton(_u("BTN_CANCEL", "キャンセル"))
+        self._btn_cancel = QPushButton(_u("BTN_CANCEL", "キャンセル"))
         self._scenario_set_tip(
-            btn_cancel,
+            self._btn_cancel,
             "TIP_BTN_CANCEL",
             "変更を破棄して閉じます。",
         )
-        btn_cancel.clicked.connect(self.reject)
-        btn_cancel.setAutoDefault(False)
-        btn_cancel.setDefault(False)
+        self._btn_cancel.clicked.connect(self.reject)
+        self._btn_cancel.setAutoDefault(False)
+        self._btn_cancel.setDefault(False)
         row_btn.addWidget(self._btn_register)
-        row_btn.addWidget(btn_cancel)
+        row_btn.addWidget(self._btn_cancel)
         root_layout.addLayout(row_btn)
         mw = scenario_edit_min_dialog_width(
             self._screen_cfg, left_width=self._scenario_left_pane_width
@@ -5963,15 +7051,23 @@ class _ScenarioEditDialog(QDialog):
             self._update_register_button_state()
             self._notify_main_scenario_dirty()
 
+    # 一覧表示用の自動名を行に固定する（未保存の内部キー。get_item で除去）。
+    # 毎回先頭から振り直すと、上追加が「末尾に N+1」「既存が +1 ずれ」に見える。
+    _AUTO_DISPLAY_NAME_KEY = "_auto_display_name"
+
     @staticmethod
     def _resolve_auto_scenario_display_names_for_sources(
         item_name: str, rows: list[dict[str, Any]]
     ) -> list[str]:
         """
         各行の一覧表示用シナリオ名。scenario_name が空の行には、既に使われている名前と重ならない
-        「項目名_シナリオN」を上から順に割り当てる（行番号ベースではない）。
+        「項目名_シナリオN」を割り当てる（行番号ベースではない）。
+
+        一度付けた自動名は行の _auto_display_name に固定し、挿入・削除で既存行の表示が
+        ずれないようにする（新規行だけが次の空き N を取る）。
         """
         iname = (item_name or "").strip() or "項目"
+        key = _ScenarioEditDialog._AUTO_DISPLAY_NAME_KEY
         n = len(rows)
         out: list[str] = [""] * n
         occupied: set[str] = set()
@@ -5980,6 +7076,14 @@ class _ScenarioEditDialog(QDialog):
             if sn:
                 out[i] = sn
                 occupied.add(sn)
+                rows[i].pop(key, None)
+        for i in range(n):
+            if out[i]:
+                continue
+            sticky = str(rows[i].get(key) or "").strip()
+            if sticky and sticky not in occupied:
+                out[i] = sticky
+                occupied.add(sticky)
         for i in range(n):
             if out[i]:
                 continue
@@ -5990,6 +7094,7 @@ class _ScenarioEditDialog(QDialog):
                 if cand not in occupied:
                     out[i] = cand
                     occupied.add(cand)
+                    rows[i][key] = cand
                     break
         return out
 
@@ -6003,14 +7108,6 @@ class _ScenarioEditDialog(QDialog):
         if 0 <= idx < len(names):
             return names[idx]
         return "%s_シナリオ%d" % (self._item_name, max(0, idx) + 1)
-
-    def _effective_scenario_name_at_in_list(self, idx: int, data: list[dict[str, Any]]) -> str:
-        names = _ScenarioEditDialog._resolve_auto_scenario_display_names_for_sources(
-            self._item_name, data
-        )
-        if 0 <= idx < len(names):
-            return names[idx]
-        return ""
 
     @staticmethod
     def _unique_duplicate_scenario_name(
@@ -6065,6 +7162,8 @@ class _ScenarioEditDialog(QDialog):
             self._btn_step.setEnabled(self._is_selected_registered())
 
     def _on_register_clicked(self) -> None:
+        if self._name_patterns_blocking_register():
+            return
         n_link_inc, n_join_inc = self._count_incomplete_key_defs_on_form()
         if n_link_inc or n_join_inc:
             t_reg = (
@@ -6130,8 +7229,7 @@ class _ScenarioEditDialog(QDialog):
                             pre_reg + "\n" + "\n".join(err_lines[:24]),
                         )
                         return
-            snap = copy.deepcopy(self._sources_data)
-            restore_row = self._current_source_index
+            self._capture_scenario_undo()
             # 登録＝このマスタ項目にぶら下がるシナリオをすべて確定（切替先からでも可）
             self._commit_all_sources_registered(
                 self._sources_data,
@@ -6143,9 +7241,6 @@ class _ScenarioEditDialog(QDialog):
             self._sync_sources_selection_and_form(ri)
             if self._on_registered is not None:
                 self._on_registered(self.get_item())
-            self._undo_snapshot = snap
-            self._undo_restore_row = restore_row
-            self._btn_undo_remove.setEnabled(True)
         self._dirty = False
         self._update_register_button_state()
         self._update_step_button_enabled()
@@ -6251,9 +7346,77 @@ class _ScenarioEditDialog(QDialog):
 
     def _clear_scenario_undo(self) -> None:
         self._undo_snapshot = None
-        self._undo_restore_row = -1
+        self._undo_registered_snapshots = None
+        self._undo_restore_selection = []
         if isinstance(getattr(self, "_btn_undo_remove", None), QPushButton):
             self._btn_undo_remove.setEnabled(False)
+
+    def _get_selected_source_indices(self) -> list[int]:
+        """ソース表の選択行（連続・歯抜け）を昇順で返す。"""
+        indices: set[int] = set()
+        sm = self._sources_table.selectionModel()
+        if sm is not None:
+            for idx in sm.selectedRows():
+                indices.add(int(idx.row()))
+        if not indices:
+            cr = int(self._sources_table.currentRow())
+            if 0 <= cr < len(self._sources_data):
+                indices.add(cr)
+        return sorted(indices)
+
+    def _capture_scenario_undo(self) -> None:
+        """直近1回分のソース一覧スナップショットを保存（追加／複写／削除／登録）。"""
+        self._undo_snapshot = copy.deepcopy(self._sources_data)
+        self._undo_registered_snapshots = copy.deepcopy(self._registered_display_snapshots)
+        self._undo_restore_selection = list(self._get_selected_source_indices())
+        if isinstance(getattr(self, "_btn_undo_remove", None), QPushButton):
+            self._btn_undo_remove.setEnabled(True)
+
+    def _disable_sources_form_keep_scroll(self) -> None:
+        """選択なし状態: フォーム無効・スクロール維持。"""
+        v = _table_vscroll_value(self._sources_table)
+        self._sources_table.blockSignals(True)
+        try:
+            _table_clear_selection_keep_scroll(self._sources_table)
+            self._current_source_index = -1
+        finally:
+            self._sources_table.blockSignals(False)
+        self._form_stack.setEnabled(False)
+        self._form_combo_type.setEnabled(False)
+        self._edit_scenario_ident.setEnabled(False)
+        self._update_summary_preview(-1)
+        # 要約・フォーム無効化後のレイアウト変化向け（ヘルパ内の維持だけでは足りない）
+        _table_set_vscroll(self._sources_table, v)
+        self._update_step_button_enabled()
+
+    def _apply_sources_selection_keep_scroll(self, rows: list[int]) -> None:
+        """選択を付け替え、先頭行をフォームに載せる（スクロールは基本維持）。"""
+        valid = [int(r) for r in rows if 0 <= int(r) < len(self._sources_data)]
+        if not valid:
+            self._disable_sources_form_keep_scroll()
+            return
+        v = _table_vscroll_value(self._sources_table)
+        focus = valid[0]
+        self._sources_table.blockSignals(True)
+        try:
+            self._current_source_index = focus
+            try:
+                self._load_source_to_form(focus)
+            except Exception:
+                pass
+            _table_select_rows_keep_scroll(self._sources_table, valid)
+        finally:
+            self._sources_table.blockSignals(False)
+        self._form_stack.setEnabled(True)
+        self._form_combo_type.setEnabled(True)
+        self._edit_scenario_ident.setEnabled(True)
+        self._update_summary_preview(focus)
+        # フォーム読込後の副作用向け（ヘルパ内の維持だけでは足りない）
+        _table_set_vscroll(self._sources_table, v)
+        _table_ensure_row_min_scroll(self._sources_table, valid[0])
+        if valid[-1] != valid[0]:
+            _table_ensure_row_min_scroll(self._sources_table, valid[-1])
+        self._update_step_button_enabled()
 
     def _open_dsl_test(self, le: QLineEdit) -> None:
         """整形 DSL テスト（非モーダル）。同時 1 つ。"""
@@ -6284,10 +7447,15 @@ class _ScenarioEditDialog(QDialog):
             self._dsl_test_dialog = None
 
     def _on_scenario_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
-        """右ペインの別項目へフォーカスが移ったら DSL テストを閉じる。"""
-        if self._dsl_test_dialog is None or new is None:
+        """右ペインの別項目へフォーカスが移ったら DSL テストを閉じる。名前パターンロックも監視。"""
+        if self._loading_source_form or self._name_pattern_refocusing:
             return
-        if self._loading_source_form:
+        lock = self._name_pattern_lock_widget
+        if lock is not None and new is not None and new is not lock:
+            if not self._is_name_pattern_escape_widget(new):
+                QTimer.singleShot(0, self._refocus_name_pattern_lock)
+                return
+        if self._dsl_test_dialog is None or new is None:
             return
         if self._should_close_dsl_test_on_focus(new):
             self._close_dsl_test_dialog(save_prefix=True)
@@ -6341,12 +7509,16 @@ class _ScenarioEditDialog(QDialog):
         self._scenario_focus_changed_connected = False
 
     def reject(self) -> None:
+        self._clear_name_pattern_lock()
+        self._close_name_pattern_help()
         self._close_dsl_test_dialog(save_prefix=True)
         self._disconnect_scenario_focus_changed()
         self._clear_scenario_undo()
         super().reject()
 
     def closeEvent(self, event) -> None:
+        self._clear_name_pattern_lock()
+        self._close_name_pattern_help()
         self._close_dsl_test_dialog(save_prefix=True)
         self._disconnect_scenario_focus_changed()
         super().closeEvent(event)
@@ -6423,15 +7595,165 @@ class _ScenarioEditDialog(QDialog):
         for cbx in ld.get("checks") or []:
             cbx.stateChanged.connect(self._on_form_changed)
 
+    def _name_pattern_field_key_for_widget(self, w: QWidget | None) -> str | None:
+        cr = getattr(self, "_cell_refs", None) or {}
+        if w is cr.get("file_pattern"):
+            return "file"
+        if w is cr.get("sheet_name"):
+            return "sheet"
+        return None
+
+    def _name_pattern_label_for_key(self, key: str | None) -> str:
+        hc = self._name_pattern_help_cfg or {}
+        if key == "sheet":
+            return str(hc.get("LABEL_SHEET") or "シート名")
+        return str(hc.get("LABEL_FILE") or "ファイル名")
+
+    def _ensure_name_pattern_help_dialog(self) -> NamePatternHelpDialog:
+        dlg = self._name_pattern_help_dialog
+        if dlg is None:
+            dlg = NamePatternHelpDialog(
+                help_cfg=self._name_pattern_help_cfg,
+                parent=self,
+            )
+            dlg.finished.connect(
+                lambda _r, d=dlg: self._on_name_pattern_help_finished(d)
+            )
+            self._name_pattern_help_dialog = dlg
+        return dlg
+
+    def _on_name_pattern_help_finished(self, dlg: NamePatternHelpDialog) -> None:
+        if self._name_pattern_help_dialog is dlg:
+            self._name_pattern_help_dialog = None
+
+    def _close_name_pattern_help(self) -> None:
+        dlg = self._name_pattern_help_dialog
+        if dlg is None:
+            return
+        self._name_pattern_help_dialog = None
+        try:
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+
+    def _open_name_pattern_help(self, le: QLineEdit, field_key: str = "file") -> None:
+        """？クリックまたはエラー時。共有1窓。"""
+        dlg = self._ensure_name_pattern_help_dialog()
+        # 手動オープン時はエラー帯を消さない（ロック中は残す）
+        if self._name_pattern_lock_widget is None:
+            dlg.clear_error_advice()
+        dlg.show_near(le)
+
+    def _show_name_pattern_error_help(
+        self, le: QLineEdit, field_key: str, raw: str
+    ) -> None:
+        from svc.data_agg_sheet_resolve import format_name_pattern_fix_advice
+
+        dlg = self._ensure_name_pattern_help_dialog()
+        dlg.set_error_advice(
+            field_label=self._name_pattern_label_for_key(field_key),
+            advice_text=format_name_pattern_fix_advice(raw),
+            field_key=field_key,
+            raw_input=raw,
+        )
+        dlg.show_near(le)
+
+    def _clear_name_pattern_lock(self) -> None:
+        self._name_pattern_lock_widget = None
+        self._name_pattern_lock_key = None
+
+    def _set_name_pattern_lock(self, le: QLineEdit, field_key: str) -> None:
+        self._name_pattern_lock_widget = le
+        self._name_pattern_lock_key = field_key
+
+    def _is_name_pattern_escape_widget(self, widget: QWidget | None) -> bool:
+        """エラーロック中でもフォーカスしてよい退避／ヘルプ系。"""
+        if widget is None:
+            return False
+        w: QWidget | None = widget
+        while w is not None:
+            if w is self._name_pattern_help_dialog:
+                return True
+            if w is getattr(self, "_btn_cancel", None):
+                return True
+            oname = w.objectName() if hasattr(w, "objectName") else ""
+            if oname in ("name_pattern_help_btn", "name_pattern_help_dialog"):
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _refocus_name_pattern_lock(self) -> None:
+        le = self._name_pattern_lock_widget
+        if le is None or self._name_pattern_refocusing:
+            return
+        self._name_pattern_refocusing = True
+        try:
+            le.setFocus(Qt.FocusReason.OtherFocusReason)
+            key = self._name_pattern_lock_key or "file"
+            self._show_name_pattern_error_help(le, key, le.text() if hasattr(le, "text") else "")
+        finally:
+            self._name_pattern_refocusing = False
+
+    def _on_name_pattern_editing_finished(self) -> None:
+        """FO: 不正ならヘルプ＋ロック。OK（空欄含む）ならヘルプを閉じロック解除。"""
+        if self._loading_source_form or self._name_pattern_refocusing:
+            return
+        from svc.data_agg_sheet_resolve import validate_name_pattern
+
+        w = self.sender()
+        if not isinstance(w, QLineEdit):
+            return
+        key = self._name_pattern_field_key_for_widget(w)
+        if key is None:
+            return
+        raw = w.text() if hasattr(w, "text") else ""
+        err = validate_name_pattern(raw)
+        if not err:
+            if self._name_pattern_lock_widget is w:
+                self._clear_name_pattern_lock()
+            self._close_name_pattern_help()
+            return
+        self._set_name_pattern_lock(w, key)
+        self._show_name_pattern_error_help(w, key, raw)
+        QTimer.singleShot(0, self._refocus_name_pattern_lock)
+
+    def _name_patterns_blocking_register(self) -> bool:
+        """登録前ガード。NG ならヘルプ表示して True。"""
+        if self._loading_source_form:
+            return False
+        from svc.data_agg_sheet_resolve import validate_name_pattern
+
+        cr = getattr(self, "_cell_refs", None) or {}
+        for key, wkey in (("file", "file_pattern"), ("sheet", "sheet_name")):
+            w = cr.get(wkey)
+            if not isinstance(w, QLineEdit):
+                continue
+            if not w.isEnabled():
+                continue
+            raw = w.text()
+            err = validate_name_pattern(raw)
+            if err:
+                self._set_name_pattern_lock(w, key)
+                self._show_name_pattern_error_help(w, key, raw)
+                self._refocus_name_pattern_lock()
+                return True
+        if self._name_pattern_lock_widget is not None:
+            self._refocus_name_pattern_lock()
+            return True
+        return False
+
     def _wire_detail_form_signals(self) -> None:
         cr = self._cell_refs
         nr = self._name_refs
 
         cr["file_pattern"].textChanged.connect(self._on_form_changed)
+        cr["file_pattern"].editingFinished.connect(self._on_name_pattern_editing_finished)
         cr["file_name_rule"].currentIndexChanged.connect(self._on_form_changed)
         for cb in cr["ext_checkboxes"]:
             cb.stateChanged.connect(self._on_form_changed)
         cr["sheet_name"].textChanged.connect(self._on_form_changed)
+        cr["sheet_name"].editingFinished.connect(self._on_name_pattern_editing_finished)
         cr["sheet_rule"].currentIndexChanged.connect(self._on_form_changed)
         cr["cell_ref"].textChanged.connect(self._on_form_changed)
         cr["row_offset"].valueChanged.connect(self._on_form_changed)
@@ -6764,27 +8086,97 @@ class _ScenarioEditDialog(QDialog):
             return {"type": "cell", "sheet_name": "", "cell_ref": "", "registered": False}
         return {"type": "cell", "sheet_name": "", "cell_ref": "", "registered": False}
 
-    def _insert_empty_source_at(self, insert_at: int) -> None:
-        """insert_at 位置に空のソース行を挿入（0 .. len まで）。"""
+    def _insert_empty_source_at(
+        self, insert_at: int, *, scroll_nudge: str = "auto"
+    ) -> None:
+        """
+        insert_at 位置に空のソース行を挿入（0 .. len まで）。
+        scroll_nudge の意味は _table_scroll_target_for_nudge と共通。
+        いつ up/down/keep にするかはコンテキスト側（項目表とは既定が異なる）。
+        """
         insert_at = max(0, min(int(insert_at), len(self._sources_data)))
         if 0 <= self._current_source_index < len(self._sources_data):
             self._apply_form_to_source(
                 self._current_source_index, include_scenario_name=False
             )
+        self._capture_scenario_undo()
+        v0 = _table_vscroll_value(self._sources_table)
         self._sources_data.insert(insert_at, self._make_new_source_template_row())
         self._registered_display_snapshots.insert(insert_at, None)
         self._refresh_sources_table()
-        self._sync_sources_selection_and_form(insert_at)
+        try:
+            self._sources_table.updateGeometries()
+        except Exception:
+            pass
+        prev_auto = self._sources_table.hasAutoScroll()
+        self._sources_table.setAutoScroll(False)
+        pin: _VScrollPin | None = None
+        try:
+            target = _table_scroll_target_for_nudge(
+                self._sources_table, insert_at, v0, scroll_nudge
+            )
+            # insert 後に max が増える。目標を先に決め、同期・geometry 後にもう一度適用
+            pin = _VScrollPin(self._sources_table, target)
+            self._sync_sources_selection_and_form(insert_at)
+            try:
+                self._sources_table.updateGeometries()
+            except Exception:
+                pass
+            # max が増えた後に再適用（作成時 max=0 だと +1 がクランプされる）
+            _table_set_vscroll(self._sources_table, target)
+            pin.update(target)
+            pin.release_later(150)
+            pin = None
+        finally:
+            if pin is not None:
+                pin.release()
+            self._sources_table.setAutoScroll(prev_auto)
         self._dirty = True
         self._update_register_button_state()
         self._notify_main_scenario_dirty()
 
     def _on_sources_table_context_menu(self, pos: QPoint) -> None:
         """ソース一覧の右クリック: 上／下追加・複写・削除（ボタンと同機能）。"""
-        idx = self._sources_table.indexAt(pos)
-        r = int(idx.row())
-        if r >= 0:
-            self._sources_table.selectRow(r)
+        # 基準は右クリックした行だけ（選択の current フォールバックで末尾に寄せない）
+        click = _table_row_at_context_pos(self._sources_table, pos)
+        raw_selected: list[int] = []
+        sm = self._sources_table.selectionModel()
+        if sm is not None:
+            raw_selected = sorted({int(i.row()) for i in sm.selectedRows()})
+        resolved = _context_menu_resolve_selection(raw_selected, click)
+        if resolved is not None:
+            v = _table_vscroll_value(self._sources_table)
+            self._sources_table.blockSignals(True)
+            try:
+                _table_select_rows_keep_scroll(self._sources_table, resolved)
+                self._current_source_index = resolved[0]
+                try:
+                    self._load_source_to_form(resolved[0])
+                except Exception:
+                    pass
+                self._form_stack.setEnabled(True)
+                self._form_combo_type.setEnabled(True)
+                self._edit_scenario_ident.setEnabled(True)
+                self._update_summary_preview(resolved[0])
+            finally:
+                self._sources_table.blockSignals(False)
+            # フォーム読込後の副作用向け（ヘルパ内の維持だけでは足りない）
+            _table_set_vscroll(self._sources_table, v)
+        if click >= 0:
+            anchor = click
+        elif resolved:
+            anchor = int(resolved[0])
+        elif raw_selected:
+            anchor = int(raw_selected[-1])
+        else:
+            anchor = -1
+        near_top, near_bot = _table_viewport_edge_flags(self._sources_table, anchor)
+        n_before = len(self._sources_data)
+        # 項目表と異なり: 上端+上は up、下端+下は down、他は keep（末尾寄せしない）
+        nudge_up = "up" if near_top else "keep"
+        nudge_dn = "down" if near_bot else "keep"
+        ins_up = _context_insert_at(anchor, n_before, below=False)
+        ins_dn = _context_insert_at(anchor, n_before, below=True)
         menu = QMenu(self)
         a_up = menu.addAction(
             _ui_disp_str(self._screen_cfg, "CTX_INSERT_SOURCE_ABOVE", "上の行を追加")
@@ -6793,26 +8185,34 @@ class _ScenarioEditDialog(QDialog):
             _ui_disp_str(self._screen_cfg, "CTX_INSERT_SOURCE_BELOW", "下の行を追加")
         )
         menu.addSeparator()
-        dup_lbl = _ui_disp_str(self._screen_cfg, "CTX_DUPLICATE_SOURCE", "複写")
-        a_dup = menu.addAction(dup_lbl)
+        a_dup = menu.addAction(
+            _ui_disp_str(self._screen_cfg, "CTX_DUPLICATE_SOURCE", "複写")
+        )
         menu.addSeparator()
         a_del = menu.addAction(
             _ui_disp_str(self._screen_cfg, "CTX_REMOVE_SOURCE", "削除")
         )
-        chosen = menu.exec(self._sources_table.viewport().mapToGlobal(pos))
-        if chosen == a_up:
-            ins = r if r >= 0 else 0
-            self._insert_empty_source_at(ins)
-        elif chosen == a_dn:
-            ins = (r + 1) if r >= 0 else len(self._sources_data)
-            self._insert_empty_source_at(ins)
-        elif chosen == a_dup:
-            self._on_duplicate_source()
-        elif chosen == a_del:
-            self._on_remove_source()
+        a_up.triggered.connect(
+            lambda *_, ia=ins_up, sn=nudge_up: self._insert_empty_source_at(
+                ia, scroll_nudge=sn
+            )
+        )
+        a_dn.triggered.connect(
+            lambda *_, ia=ins_dn, sn=nudge_dn: self._insert_empty_source_at(
+                ia, scroll_nudge=sn
+            )
+        )
+        a_dup.triggered.connect(self._on_duplicate_source)
+        a_del.triggered.connect(self._on_remove_source)
+        menu.exec(_table_context_menu_global_pos(self._sources_table, pos))
 
     def _on_add_source(self) -> None:
         """取得ソースを追加。"""
+        if 0 <= self._current_source_index < len(self._sources_data):
+            self._apply_form_to_source(
+                self._current_source_index, include_scenario_name=False
+            )
+        self._capture_scenario_undo()
         row = self._make_new_source_template_row()
         self._sources_data.append(row)
         self._registered_display_snapshots.append(None)
@@ -6829,14 +8229,27 @@ class _ScenarioEditDialog(QDialog):
             self._sources_table.currentRow(),
             self._item_id,
         )
-        self._sync_sources_selection_and_form(len(self._sources_data) - 1)
+        new_row = len(self._sources_data) - 1
+        v = _table_vscroll_value(self._sources_table)
+        prev_auto = self._sources_table.hasAutoScroll()
+        self._sources_table.setAutoScroll(False)
+        try:
+            self._sync_sources_selection_and_form(new_row)
+            _table_set_vscroll(self._sources_table, v)
+            _table_ensure_row_min_scroll(self._sources_table, new_row)
+            _table_reassert_vscroll(
+                self._sources_table, _table_vscroll_value(self._sources_table)
+            )
+        finally:
+            self._sources_table.setAutoScroll(prev_auto)
         self._dirty = True
         self._update_register_button_state()
         self._notify_main_scenario_dirty()
 
     def _on_duplicate_source(self) -> None:
         """選択行のシナリオを deepcopy して直下に追加（識別名は重複しないよう付与）。"""
-        row = self._sources_table.currentRow()
+        indices = self._get_selected_source_indices()
+        row = indices[0] if indices else self._sources_table.currentRow()
         if row < 0 or row >= len(self._sources_data):
             return
         if 0 <= self._current_source_index < len(self._sources_data) and self._current_source_index != row:
@@ -6844,6 +8257,7 @@ class _ScenarioEditDialog(QDialog):
         self._current_source_index = row
         self._load_source_to_form(row)
         self._apply_form_to_source(row, include_scenario_name=False)
+        self._capture_scenario_undo()
         insert_at = row + 1
         dup = copy.deepcopy(self._sources_data[row])
         dup["registered"] = False
@@ -6851,77 +8265,74 @@ class _ScenarioEditDialog(QDialog):
         self._sources_data.insert(insert_at, dup)
         self._registered_display_snapshots.insert(insert_at, None)
         self._refresh_sources_table()
-        self._sync_sources_selection_and_form(insert_at)
+        v = _table_vscroll_value(self._sources_table)
+        prev_auto = self._sources_table.hasAutoScroll()
+        self._sources_table.setAutoScroll(False)
+        try:
+            self._sync_sources_selection_and_form(insert_at)
+            _table_set_vscroll(self._sources_table, v)
+            _table_ensure_row_min_scroll(self._sources_table, insert_at)
+            _table_reassert_vscroll(
+                self._sources_table, _table_vscroll_value(self._sources_table)
+            )
+        finally:
+            self._sources_table.setAutoScroll(prev_auto)
         self._dirty = True
         self._update_register_button_state()
         self._notify_main_scenario_dirty()
 
     def _on_remove_source(self) -> None:
-        """選択中の取得ソースを削除。"""
-        row = self._sources_table.currentRow()
-        if 0 <= row < len(self._sources_data):
-            snapshot = copy.deepcopy(self._sources_data)
-            deleted_index = row
-            if self._current_source_index == row:
-                self._current_source_index = -1
-            elif self._current_source_index > row:
-                self._current_source_index -= 1
-            del self._sources_data[row]
-            if row < len(self._registered_display_snapshots):
+        """選択中の取得ソースを削除（連続・歯抜け）。削除後は選択なし・フォーム無効。"""
+        indices = self._get_selected_source_indices()
+        if not indices:
+            return
+        if 0 <= self._current_source_index < len(self._sources_data):
+            self._apply_form_to_source(
+                self._current_source_index, include_scenario_name=False
+            )
+        self._capture_scenario_undo()
+        v = _table_vscroll_value(self._sources_table)
+        for row in reversed(indices):
+            if 0 <= row < len(self._sources_data):
+                del self._sources_data[row]
+            if 0 <= row < len(self._registered_display_snapshots):
                 del self._registered_display_snapshots[row]
-            self._refresh_sources_table()
-            if self._sources_data:
-                sel = min(max(0, row), len(self._sources_data) - 1)
-                self._sync_sources_selection_and_form(sel)
-                self._notify_main_scenario_dirty()
-            else:
-                self._form_stack.setEnabled(False)
-                self._form_combo_type.setEnabled(False)
-                self._edit_scenario_ident.setEnabled(False)
-                _log_scenario_edit_diag(
-                    "remove_source last_deleted pane_disabled item_id=%s", self._item_id
-                )
-                self._dirty = True
-                self._update_register_button_state()
-                self._notify_main_scenario_dirty()
-            self._undo_snapshot = snapshot
-            self._undo_restore_row = deleted_index
-            self._btn_undo_remove.setEnabled(True)
-            self._notify_parent_registered()
+        self._current_source_index = -1
+        self._refresh_sources_table()
+        _table_set_vscroll(self._sources_table, v)
+        self._disable_sources_form_keep_scroll()
+        self._dirty = True
+        self._update_register_button_state()
+        self._notify_main_scenario_dirty()
+        self._notify_parent_registered()
+        _log_scenario_edit_diag(
+            "remove_source multi n_deleted=%s n_left=%s item_id=%s",
+            len(indices),
+            len(self._sources_data),
+            self._item_id,
+        )
         self._update_step_button_enabled()
 
     def _on_undo_scenario(self) -> None:
-        """直近の削除または登録の直前状態へ1回だけ元に戻す。"""
+        """直近の追加／複写／削除／登録の直前状態へ1回だけ元に戻す。"""
         snap = self._undo_snapshot
         if snap is None:
             return
-        di = self._undo_restore_row
+        restore_sel = list(self._undo_restore_selection or [])
+        reg_snaps = self._undo_registered_snapshots
         self._sources_data = copy.deepcopy(snap)
-        self._registered_display_snapshots = [
-            copy.deepcopy(s) if isinstance(s, dict) and s.get("registered") else None
-            for s in self._sources_data
-        ]
+        if isinstance(reg_snaps, list):
+            self._registered_display_snapshots = copy.deepcopy(reg_snaps)
+        else:
+            self._registered_display_snapshots = [
+                copy.deepcopy(s) if isinstance(s, dict) and s.get("registered") else None
+                for s in self._sources_data
+            ]
         self._clear_scenario_undo()
+        v = _table_vscroll_value(self._sources_table)
         self._refresh_sources_table()
-        self._sources_table.blockSignals(True)
-        try:
-            if self._sources_data:
-                sel = di if 0 <= di < len(self._sources_data) else 0
-                self._sources_table.selectRow(sel)
-                self._current_source_index = sel
-                self._load_source_to_form(sel)
-                self._form_stack.setEnabled(True)
-                self._form_combo_type.setEnabled(True)
-                self._edit_scenario_ident.setEnabled(True)
-                self._update_summary_preview(sel)
-            else:
-                self._current_source_index = -1
-                self._form_stack.setEnabled(False)
-                self._form_combo_type.setEnabled(False)
-                self._edit_scenario_ident.setEnabled(False)
-                self._update_summary_preview(-1)
-        finally:
-            self._sources_table.blockSignals(False)
+        _table_set_vscroll(self._sources_table, v)
+        self._apply_sources_selection_keep_scroll(restore_sel)
         self._dirty = True
         self._update_register_button_state()
         self._notify_main_scenario_dirty()
@@ -7172,6 +8583,8 @@ class _ScenarioEditDialog(QDialog):
         elif stype != "name_extract":
             stype = "cell"
 
+        self._clear_name_pattern_lock()
+        self._close_name_pattern_help()
         self._loading_source_form = True
         self._block_detail_form_signals(True)
         prev_dirty = bool(self._dirty)
@@ -7698,9 +9111,11 @@ class _ScenarioEditDialog(QDialog):
         if cur >= 0 and cur < len(self._sources_data):
             self._apply_form_to_source(cur, include_scenario_name=False)
         out_sources: list[dict[str, Any]] = []
+        auto_key = self._AUTO_DISPLAY_NAME_KEY
         for s in self._sources_data:
             one = copy.deepcopy(s)
             one.pop("registered", None)
+            one.pop(auto_key, None)
             out_sources.append(one)
         return {"sources": out_sources, "write_mode": self._current_write_mode_key()}
 

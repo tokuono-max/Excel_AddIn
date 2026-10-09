@@ -66,6 +66,66 @@ def test_resolve_multi_patterns() -> None:
     ]
 
 
+def test_name_pattern_and_or_beta() -> None:
+    from svc.data_agg_sheet_resolve import (
+        match_text_by_name_pattern,
+        modernize_name_pattern,
+        validate_name_pattern,
+    )
+
+    assert match_text_by_name_pattern("光特性履歴", "含む", '"光"&"履歴"') is True
+    assert match_text_by_name_pattern("光特性", "含む", '"光"&"履歴"') is False
+    assert match_text_by_name_pattern("紐づけ履歴", "含む", '"光特性"|"紐づけ"') is True
+    # β: 括弧なし混在は不正
+    assert validate_name_pattern('"A"|"B"&"C"') is not None
+    assert match_text_by_name_pattern("Ax", "含む", '"A"|"B"&"C"') is False
+    # 括弧で意図明示
+    assert match_text_by_name_pattern("AC", "含む", '("A"|"B")&"C"') is True
+    assert match_text_by_name_pattern("A", "含む", '("A"|"B")&"C"') is False
+    assert match_text_by_name_pattern("BC", "含む", '"A"|("B"&"C")') is True
+    # 含まない＝式全体の否定
+    assert match_text_by_name_pattern("Data", "含まない", '"R_"|"実装"') is True
+    assert match_text_by_name_pattern("R_Only", "含まない", '"R_"|"実装"') is False
+    # 全角演算子は不可
+    assert validate_name_pattern('"A"｜"B"') is not None
+    # UI: 囲みなし旧形式はエラー／空は OK／新方式は OK
+    assert validate_name_pattern("") is None
+    assert validate_name_pattern("光特性") is not None
+    assert validate_name_pattern("光特性,紐づけ") is not None
+    assert validate_name_pattern('"光特性"') is None
+    assert validate_name_pattern('"光特性"|"紐づけ"') is None
+    # 旧形式現代化（カンマ・単一）
+    new, err = modernize_name_pattern("光特性,紐づけ")
+    assert err is None
+    assert new == '"光特性"|"紐づけ"'
+    new1, err1 = modernize_name_pattern("光特性")
+    assert err1 is None
+    assert new1 == '"光特性"'
+    from svc.data_agg_sheet_resolve import (
+        format_name_pattern_fix_advice,
+        name_pattern_needs_modernize,
+    )
+
+    assert name_pattern_needs_modernize("光特性")
+    advice = format_name_pattern_fix_advice("光特性") or ""
+    assert advice.startswith("構文エラー（光特性）")
+    assert "入力 → 修正候補：\"光特性\"" in advice
+    advice_bad = format_name_pattern_fix_advice('"A"|"B') or ""
+    assert '入力 → 修正候補："A"|"B"' in advice_bad
+    assert "内容: 引用符が閉じていません" in advice_bad
+    # 実行時マッチは旧形式も解釈（読込強制変換前の互換）
+    names = ["Data", "Foo_R_Bar", "実装シート", "R_Only"]
+    assert resolve_all_sheet_names_by_rule(names, "含む", '"R_"|"実装"') == [
+        "Foo_R_Bar",
+        "実装シート",
+        "R_Only",
+    ]
+    assert resolve_all_sheet_names_by_rule(names, "含む", "R_") == [
+        "Foo_R_Bar",
+        "R_Only",
+    ]
+
+
 def test_resolve_four_modes() -> None:
     names = ["Data", "Foo_R_Bar", "Other", "R_Only"]
     assert resolve_sheet_name_by_rule(names, "左端シート", "") == "Data"

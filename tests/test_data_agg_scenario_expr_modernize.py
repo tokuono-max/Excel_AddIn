@@ -12,12 +12,14 @@ if str(_root) not in sys.path:
 from core.core_value_shape import apply_value_shape  # noqa: E402
 from svc.data_agg_plus_cell_spec import validate_plus_cell_spec  # noqa: E402
 from svc.data_agg_scenario_expr_modernize import (  # noqa: E402
+    force_modernize_scenario_name_patterns,
     modernize_plus_cell_spec,
     modernize_scenario_expressions,
     modernize_shape_script,
     modernize_skip_primary_match,
     rewrite_shape_script_preferred,
     scenario_needs_expr_modernize,
+    scenario_needs_name_pattern_force,
     skip_primary_needs_modernize,
 )
 
@@ -97,6 +99,74 @@ def test_scenario_needs_and_apply() -> None:
     assert src["ui_scenario_source_v1"]["value_shape_script"] == "trim();left(2)"
     assert src["ui_scenario_source_v1"]["link_defs"][0]["cell"] == 'D10+"X"'
     assert not scenario_needs_expr_modernize(data)
+
+
+def test_name_pattern_comma_modernize_with_dsl() -> None:
+    data = {
+        "items": [
+            {
+                "name": "項目",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "cell_ref": "A1",
+                        "sheet_name": "R_,実装",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "光特性,紐づけ",
+                            "value_shape_script": "trim",
+                            "link_defs": [],
+                            "join_defs": [],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    assert scenario_needs_expr_modernize(data)
+    assert scenario_needs_name_pattern_force(data)
+    res = modernize_scenario_expressions(data, inplace=True)
+    assert res.changed
+    src = data["items"][0]["sources"][0]
+    # 任意現代化は DSL のみ。名前パターンは強制変換 API 側
+    assert src["sheet_name"] == "R_,実装"
+    assert src["ui_scenario_source_v1"]["file_pattern"] == "光特性,紐づけ"
+    assert src["ui_scenario_source_v1"]["value_shape_script"] == "trim()"
+    assert not scenario_needs_expr_modernize(data)
+    assert scenario_needs_name_pattern_force(data)
+    fres = force_modernize_scenario_name_patterns(data, inplace=True)
+    assert fres.changed
+    assert src["sheet_name"] == '"R_"|"実装"'
+    assert src["ui_scenario_source_v1"]["file_pattern"] == '"光特性"|"紐づけ"'
+    assert not scenario_needs_name_pattern_force(data)
+
+
+def test_name_pattern_single_token_force() -> None:
+    data = {
+        "items": [
+            {
+                "name": "項目",
+                "sources": [
+                    {
+                        "type": "cell",
+                        "cell_ref": "A1",
+                        "sheet_name": "光特性",
+                        "ui_scenario_source_v1": {
+                            "file_pattern": "紐づけ",
+                            "link_defs": [],
+                            "join_defs": [],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    assert not scenario_needs_expr_modernize(data)
+    assert scenario_needs_name_pattern_force(data)
+    force_modernize_scenario_name_patterns(data, inplace=True)
+    src = data["items"][0]["sources"][0]
+    assert src["sheet_name"] == '"光特性"'
+    assert src["ui_scenario_source_v1"]["file_pattern"] == '"紐づけ"'
+    assert not scenario_needs_name_pattern_force(data)
 
 
 def test_fixed_link_mode_cell_not_touched() -> None:

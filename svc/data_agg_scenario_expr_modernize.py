@@ -10,6 +10,8 @@
       ・旧形（left,3 / rep,旧,新）および () 内 `;` 区切りも上記へ寄せる
   - 主キースキップ: 区切り `;`、各トークンを CSV 方式 `""` 囲み
   - セル座標式（主キー／連携セル／結合）: 非 A1 パートを `""` リテラル化
+  - ファイル名／シート名条件は本モジュールの任意現代化対象外。
+    読込時は ``force_modernize_scenario_name_patterns`` で常に強制変換する。
 
 固定値モードの連携欄は + 分割しないため対象外（実行時は全体が CSV \"…\" なら中身だけを値とする）。
 変換できない箇所は書き換えず notes に残す。
@@ -30,6 +32,10 @@ from core.core_value_shape import (
 )
 from svc.data_agg_plus_cell_spec import is_a1_cell_ref, parse_plus_cell_spec
 from svc.data_agg_primary_end import parse_skip_primary_match
+from svc.data_agg_sheet_resolve import (
+    modernize_name_pattern,
+    name_pattern_needs_modernize,
+)
 from svc.svc_data_agg_scenario import (
     KEY_ITEMS,
     KEY_ITEM_SOURCES,
@@ -301,6 +307,7 @@ def _source_needs_modernize(src: dict[str, Any]) -> bool:
     )
     if is_name:
         return False
+    # ファイル名／シート名は任意現代化対象外（読込時に強制変換）
     if plus_cell_spec_needs_modernize(src.get("cell_ref")):
         return True
     if src.get("skip_primary_match") is not None and skip_primary_needs_modernize(
@@ -437,6 +444,97 @@ def modernize_scenario_expressions(
                     jd, "value_shape_script", "%s 結合#%d DSL" % (base, kk + 1)
                 )
                 _apply_cell(jd, "cell", "%s 結合#%d 座標" % (base, kk + 1))
+
+    if not inplace and target is not data:
+        data.clear()
+        data.update(target)
+    return result
+
+
+def _source_needs_name_pattern_force(src: dict[str, Any]) -> bool:
+    st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
+    if st in (
+        SOURCE_TYPE_NAME_EXTRACT,
+        "metadata",
+        "meta",
+        "filename",
+    ):
+        return False
+    pb = source_ui_block(src)
+    if not isinstance(pb, dict):
+        pb = {}
+    if name_pattern_needs_modernize(pb.get("file_pattern")):
+        return True
+    if name_pattern_needs_modernize(src.get("sheet_name")):
+        return True
+    return False
+
+
+def scenario_needs_name_pattern_force(data: dict[str, Any]) -> bool:
+    """ファイル名／シート名の旧形式が1つでもあれば True（読込時強制変換対象）。"""
+    items = data.get(KEY_ITEMS) if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        for src in it.get(KEY_ITEM_SOURCES) or []:
+            if isinstance(src, dict) and _source_needs_name_pattern_force(src):
+                return True
+    return False
+
+
+def force_modernize_scenario_name_patterns(
+    data: dict[str, Any],
+    *,
+    inplace: bool = True,
+) -> ModernizeResult:
+    """読込時: ファイル名／シート名の旧形式を新方式へ強制変換（問い合わせなし）。"""
+    target: dict[str, Any] = data if inplace else copy.deepcopy(data)
+    result = ModernizeResult()
+    items = target.get(KEY_ITEMS)
+    if not isinstance(items, list):
+        return result
+
+    def _apply(container: dict[str, Any], key: str, label: str) -> None:
+        if key not in container:
+            return
+        raw = container.get(key)
+        if raw is None or not str(raw).strip():
+            return
+        if not name_pattern_needs_modernize(str(raw)):
+            return
+        new, err = modernize_name_pattern(str(raw))
+        if err:
+            result.notes.append("%s: %s" % (label, err))
+            return
+        if new is not None and new != raw:
+            container[key] = new
+            result.changed = True
+            result.change_count += 1
+
+    for ii, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        iname = str(it.get("name") or it.get("id") or ("項目%d" % (ii + 1)))
+        for jj, src in enumerate(it.get(KEY_ITEM_SOURCES) or []):
+            if not isinstance(src, dict):
+                continue
+            st = str(src.get("type") or SOURCE_TYPE_CELL).strip().lower()
+            if st in (
+                SOURCE_TYPE_NAME_EXTRACT,
+                "metadata",
+                "meta",
+                "filename",
+            ):
+                continue
+            sn = str(src.get("scenario_name") or ("シナリオ%d" % (jj + 1)))
+            base = "「%s」/「%s」" % (iname, sn)
+            pb = source_ui_block(src)
+            if not isinstance(pb, dict):
+                continue
+            _apply(pb, "file_pattern", "%s ファイル名条件" % base)
+            _apply(src, "sheet_name", "%s シート名条件" % base)
 
     if not inplace and target is not data:
         data.clear()

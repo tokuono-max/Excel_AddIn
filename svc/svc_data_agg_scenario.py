@@ -78,6 +78,18 @@ KEY_DEBUG_FLAGS = "debug_flags"
 KEY_EXCEL_OPTIONS = "excel_options"
 # 一括実行・マスタデバッグの結果一覧に付加する列（実行時 UI のみ。シナリオ保存対象外）。
 KEY_RESULT_COLUMNS = "result_columns"
+# シナリオ概要・改版・実行数など（旧ファイルに無くても読込可）。
+# 注: KEY_VERSION（トップレベル version）は JSON スキーマ版であり改版番号ではない。
+KEY_PROPERTIES = "properties"
+KEY_PROP_REVISION = "revision"
+KEY_PROP_RUN_COUNT = "run_count"
+KEY_PROP_ITEM_COUNT = "item_count"
+KEY_PROP_SCENARIO_COUNT = "scenario_count"
+KEY_PROP_AUTHOR = "author"
+KEY_PROP_FILE_NAME = "file_name"
+KEY_PROP_CREATED_AT = "created_at"
+KEY_PROP_UPDATED_AT = "updated_at"
+KEY_PROP_SUMMARY = "summary"
 
 # ソース type（extract_item_values と整合）
 SOURCE_TYPE_CELL = "cell"
@@ -306,6 +318,158 @@ def scenario_edit_should_reapply_h_splitter(*, user_moved: bool, force: bool) ->
     return bool(force) or not bool(user_moved)
 
 
+def default_properties() -> dict[str, Any]:
+    """プロパティ既定（旧シナリオ互換: 欠落時はこの値で補完）。"""
+    return {
+        KEY_PROP_REVISION: 0,
+        KEY_PROP_RUN_COUNT: 0,
+        KEY_PROP_ITEM_COUNT: 0,
+        KEY_PROP_SCENARIO_COUNT: 0,
+        KEY_PROP_AUTHOR: "",
+        KEY_PROP_FILE_NAME: "",
+        KEY_PROP_CREATED_AT: "",
+        KEY_PROP_UPDATED_AT: "",
+        KEY_PROP_SUMMARY: "",
+    }
+
+
+def normalize_properties(raw: Any) -> dict[str, Any]:
+    """properties を読込用に正規化する。旧ファイルで欠落していても安全。"""
+    d = default_properties()
+    if not isinstance(raw, dict):
+        return d
+
+    def _nonneg_int(v: Any, default: int = 0) -> int:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return default
+        return max(0, n)
+
+    if KEY_PROP_REVISION in raw:
+        d[KEY_PROP_REVISION] = _nonneg_int(raw.get(KEY_PROP_REVISION), 0)
+    if KEY_PROP_RUN_COUNT in raw:
+        d[KEY_PROP_RUN_COUNT] = _nonneg_int(raw.get(KEY_PROP_RUN_COUNT), 0)
+    if KEY_PROP_ITEM_COUNT in raw:
+        d[KEY_PROP_ITEM_COUNT] = _nonneg_int(raw.get(KEY_PROP_ITEM_COUNT), 0)
+    if KEY_PROP_SCENARIO_COUNT in raw:
+        d[KEY_PROP_SCENARIO_COUNT] = _nonneg_int(raw.get(KEY_PROP_SCENARIO_COUNT), 0)
+    if KEY_PROP_AUTHOR in raw:
+        d[KEY_PROP_AUTHOR] = str(raw.get(KEY_PROP_AUTHOR) or "")
+    if KEY_PROP_FILE_NAME in raw:
+        d[KEY_PROP_FILE_NAME] = str(raw.get(KEY_PROP_FILE_NAME) or "")
+    if KEY_PROP_CREATED_AT in raw:
+        d[KEY_PROP_CREATED_AT] = str(raw.get(KEY_PROP_CREATED_AT) or "")
+    if KEY_PROP_UPDATED_AT in raw:
+        d[KEY_PROP_UPDATED_AT] = str(raw.get(KEY_PROP_UPDATED_AT) or "")
+    if KEY_PROP_SUMMARY in raw:
+        d[KEY_PROP_SUMMARY] = str(raw.get(KEY_PROP_SUMMARY) or "")
+    return d
+
+
+def format_scenario_save_timestamp(dt: Any = None) -> str:
+    """保存メタ用の日時文字列（例: 2026/10/09 12:33）。"""
+    from datetime import datetime
+
+    if dt is None:
+        dt = datetime.now()
+    if not isinstance(dt, datetime):
+        dt = datetime.now()
+    return dt.strftime("%Y/%m/%d %H:%M")
+
+
+def stamp_scenario_file_meta(data: dict[str, Any], path: str | Path) -> dict[str, Any]:
+    """
+    保存時メタを properties に反映する。
+    - file_name: パスのファイル名（拡張子含む）
+    - created_at: 空のときだけ現在時刻（初回保存）
+    - updated_at: 常に現在時刻
+    """
+    props = normalize_properties(data.get(KEY_PROPERTIES))
+    p = Path(str(path or ""))
+    name = p.name if str(p) else ""
+    if name:
+        props[KEY_PROP_FILE_NAME] = name
+    now = format_scenario_save_timestamp()
+    if not str(props.get(KEY_PROP_CREATED_AT) or "").strip():
+        props[KEY_PROP_CREATED_AT] = now
+    props[KEY_PROP_UPDATED_AT] = now
+    data[KEY_PROPERTIES] = props
+    return props
+
+
+def count_master_items(data: dict[str, Any] | None) -> int:
+    """マスタ項目数。"""
+    items = (data or {}).get(KEY_ITEMS) or []
+    return sum(1 for it in items if isinstance(it, dict))
+
+
+def count_registered_scenarios(data: dict[str, Any] | None) -> int:
+    """
+    マスタ項目に紐づくシナリオ（sources）総数。
+
+    メイン／シナリオ JSON 上の sources は、シナリオ編集の「登録」で反映されたもの
+    （および読込済み定義）であり、編集ダイアログ内だけの未登録下書きは含まれない。
+    get_item() が registered フラグを落とすため、フラグ有無ではなく「ソース行の有無」で数える
+    （一括実行可否の判定と同じ基準）。
+    """
+    n = 0
+    for it in (data or {}).get(KEY_ITEMS) or []:
+        if not isinstance(it, dict):
+            continue
+        for src in it.get(KEY_ITEM_SOURCES) or []:
+            if isinstance(src, dict) and src:
+                n += 1
+    return n
+
+
+def refresh_property_counts(data: dict[str, Any]) -> dict[str, Any]:
+    """item_count / scenario_count を現状の items から再計算して properties に反映する。"""
+    props = normalize_properties(data.get(KEY_PROPERTIES))
+    props[KEY_PROP_ITEM_COUNT] = count_master_items(data)
+    props[KEY_PROP_SCENARIO_COUNT] = count_registered_scenarios(data)
+    data[KEY_PROPERTIES] = props
+    return props
+
+
+def scenario_content_fingerprint(data: dict[str, Any] | None) -> str:
+    """
+    改版判定用の内容指紋。
+    改版番号・実行数・件数スナップショットは除外し、概要・items・scan 等を対象にする。
+    """
+    src = dict(data or {})
+    props = normalize_properties(src.get(KEY_PROPERTIES))
+    scan = dict(src.get(KEY_SCAN) or {})
+    scan.pop("file_paths", None)
+    payload = {
+        KEY_ITEMS: src.get(KEY_ITEMS) or [],
+        KEY_MATCH_KEYS: src.get(KEY_MATCH_KEYS) or [],
+        KEY_SCAN: scan,
+        KEY_MASTER_PATH: src.get(KEY_MASTER_PATH) or "",
+        KEY_EXCEL_OPTIONS: normalize_excel_options(src.get(KEY_EXCEL_OPTIONS)),
+        # 作成日・更新日・ファイル名は保存メタのため指紋対象外
+        KEY_PROP_AUTHOR: props.get(KEY_PROP_AUTHOR) or "",
+        KEY_PROP_SUMMARY: props.get(KEY_PROP_SUMMARY) or "",
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def bump_revision_if_content_changed(
+    data: dict[str, Any], previous_fingerprint: str
+) -> tuple[dict[str, Any], bool]:
+    """
+    内容が変わっていれば改版番号を +1 する。
+    戻り値: (更新後 properties, 改版したか)
+    """
+    props = normalize_properties(data.get(KEY_PROPERTIES))
+    cur = scenario_content_fingerprint(data)
+    changed = cur != str(previous_fingerprint or "")
+    if changed:
+        props[KEY_PROP_REVISION] = int(props.get(KEY_PROP_REVISION) or 0) + 1
+    data[KEY_PROPERTIES] = props
+    return props, changed
+
+
 def _normalize_scenario_payload(data: dict[str, Any]) -> None:
     """読込直後に write_mode および UI 内の旧書込みインデックスを補正する（インプレース）。"""
     items = data.get(KEY_ITEMS)
@@ -334,6 +498,9 @@ def _normalize_scenario_payload(data: dict[str, Any]) -> None:
                 if isinstance(wmn, int) and wmn >= len(WRITE_MODES_NAME):
                     pb["write_mode_name_idx"] = 0
                 migrate_ui_block_write_mode_keys(pb, for_name=for_name, detail_cfg=None)
+    # 旧ファイル互換: properties 欠落時も既定で埋める
+    data[KEY_PROPERTIES] = normalize_properties(data.get(KEY_PROPERTIES))
+    refresh_property_counts(data)
 
 
 def load_scenario(path: str | Path) -> dict[str, Any]:
@@ -827,12 +994,14 @@ def default_excel_options() -> dict[str, Any]:
 
 
 def default_result_columns() -> dict[str, Any]:
-    """結果一覧・Excel 出力の先頭に付加するパス／ファイル名列（既定は両方 OFF）。"""
+    """結果一覧・Excel 出力の先頭に付加するパス／ファイル／シート名列（既定はすべて OFF）。"""
     return {
         "include_path": False,
         "include_file": False,
+        "include_sheet": False,
         "path_header": "パス",
         "file_header": "ファイル",
+        "sheet_header": "シート名",
     }
 
 
@@ -845,23 +1014,30 @@ def normalize_result_columns(raw: Any) -> dict[str, Any]:
         d["include_path"] = bool(raw.get("include_path"))
     if "include_file" in raw:
         d["include_file"] = bool(raw.get("include_file"))
+    if "include_sheet" in raw:
+        d["include_sheet"] = bool(raw.get("include_sheet"))
     ph = str(raw.get("path_header") or "").strip()
     if ph:
         d["path_header"] = ph[:64]
     fh = str(raw.get("file_header") or "").strip()
     if fh:
         d["file_header"] = fh[:64]
+    sh = str(raw.get("sheet_header") or "").strip()
+    if sh:
+        d["sheet_header"] = sh[:64]
     return d
 
 
 def result_column_header_names(raw: Any) -> list[str]:
-    """有効な結果付加列のヘッダ名（左から パス→ファイル）。"""
+    """有効な結果付加列のヘッダ名（左から パス→ファイル→シート名）。"""
     opts = normalize_result_columns(raw)
     names: list[str] = []
     if opts["include_path"]:
         names.append(str(opts["path_header"]))
     if opts["include_file"]:
         names.append(str(opts["file_header"]))
+    if opts["include_sheet"]:
+        names.append(str(opts["sheet_header"]))
     return names
 
 
@@ -959,4 +1135,5 @@ def create_empty_scenario() -> dict[str, Any]:
             "item_preview": False,
         },
         KEY_EXCEL_OPTIONS: default_excel_options(),
+        KEY_PROPERTIES: default_properties(),
     }

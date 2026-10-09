@@ -25,6 +25,10 @@ from ui_qt.ui_common import (
     set_widget_tooltip,
     show_warning_notice,
 )
+from ui_qt.ui_data_agg_name_pattern_help import (
+    make_mini_square_button,
+    make_name_pattern_help_button,
+)
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel
@@ -77,6 +81,10 @@ class CollapsibleSection(QWidget):
         )
         self._btn = QPushButton()
         self._btn.setFlat(True)
+        # Enter／Space で折りたたまれないよう、マウスクリック専用にする
+        self._btn.setAutoDefault(False)
+        self._btn.setDefault(False)
+        self._btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn.setStyleSheet(
             "QPushButton { text-align: left; padding: 4px 2px; font-weight: bold; font-size: 12px; }"
         )
@@ -84,6 +92,8 @@ class CollapsibleSection(QWidget):
         self._btn.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
+        self._arrow_lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._arrow_lbl.mousePressEvent = self._on_arrow_mouse_press  # type: ignore[method-assign]
         head.addWidget(self._arrow_lbl, 0, Qt.AlignmentFlag.AlignTop)
         head.addWidget(self._btn, 1, Qt.AlignmentFlag.AlignTop)
         root.addLayout(head)
@@ -103,6 +113,17 @@ class CollapsibleSection(QWidget):
         arrow = "▼" if self._expanded else "▶"
         self._arrow_lbl.setText(arrow)
         self._btn.setText(self._base_title)
+
+    def _on_arrow_mouse_press(self, event) -> None:
+        """矢印もマウス左クリックでのみ開閉（見出しと同じ）。"""
+        try:
+            from PySide6.QtCore import Qt as _Qt
+
+            if event is not None and event.button() == _Qt.MouseButton.LeftButton:
+                self._toggle()
+        except Exception:
+            pass
+        # QLabel 既定処理は不要（フォーカスを取らない）
 
     def _toggle(self) -> None:
         self._expanded = not self._expanded
@@ -586,25 +607,18 @@ def _value_shape_form_field(
     row_lay.addWidget(le, 1)
     if dsl_test_opener is not None:
         dt_cfg = dsl_test_cfg or {}
-        btn_sz = 8
         try:
-            btn_sz = max(4, int(dt_cfg.get("BTN_OPEN_SIZE") or 8))
+            btn_sz = max(14, int(dt_cfg.get("BTN_OPEN_SIZE") or 18))
         except (TypeError, ValueError):
-            btn_sz = 8
-        btn_test = QPushButton("")
-        btn_test.setObjectName("dsl_test_open_btn")
-        btn_test.setFixedSize(btn_sz, btn_sz)
-        btn_test.setToolTip(
-            _dcp(dt_cfg, "TIP_DSL_TEST_BTN", "整形 DSL をテストします")
+            btn_sz = 18
+        # 名前パターン「？」と同デザイン（灰色四角・同サイズ・「？」表示）
+        btn_test = make_mini_square_button(
+            text="?",
+            size=btn_sz,
+            tip=_dcp(dt_cfg, "TIP_DSL_TEST_BTN", "整形 DSL をテストします"),
+            on_click=lambda _=False, editor=le: dsl_test_opener(editor),
+            object_name="dsl_test_open_btn",
         )
-        btn_test.setStyleSheet(
-            "QPushButton { background-color: #888888; border: 1px solid #666666; "
-            "border-radius: 1px; min-width: %dpx; max-width: %dpx; "
-            "min-height: %dpx; max-height: %dpx; padding: 0px; margin: 0px; }"
-            "QPushButton:hover { background-color: #777777; }"
-            % (btn_sz, btn_sz, btn_sz, btn_sz)
-        )
-        btn_test.clicked.connect(lambda _=False, editor=le: dsl_test_opener(editor))
         row_lay.addWidget(btn_test, 0)
     vl.addWidget(row)
     if short:
@@ -643,7 +657,7 @@ def apply_scenario_detail_cell_tooltips(
         refs.get("file_pattern"),
         cfg,
         "TOOLTIP_FILE_NAME",
-        "検索条件が「完全一致／含む／含まない」のときのファイル名です。\n\n・カンマ区切りで複数可\n・空欄は全ファイル対象",
+        "対象ファイル名のパターンです。AND（&）／OR（|）が使えます。記述構文は右の？へ。",
     )
     _apply_cfg_tip_force(
         refs.get("file_name_rule"),
@@ -669,7 +683,7 @@ def apply_scenario_detail_cell_tooltips(
         refs.get("sheet_name"),
         cfg,
         "TOOLTIP_SHEET_NAME",
-        "照合に使うシート名です。\n\n・カンマ区切りで複数可\n・空欄は該当なし",
+        "対象シート名のパターンです。AND（&）／OR（|）が使えます。記述構文は右の？へ。",
     )
     scn = refs.get("sheet_csv_note")
     if isinstance(scn, QLabel) and scn.text().strip():
@@ -910,6 +924,36 @@ def apply_scenario_detail_name_tooltips(
         )
 
 
+def _wrap_line_edit_with_help_btn(
+    le: QLineEdit,
+    *,
+    help_opener: Callable[[QLineEdit, str], None] | None,
+    field_key: str,
+    help_cfg: dict[str, Any] | None,
+) -> QWidget:
+    """入力＋右の小さな「？」。help_opener が無ければ入力のみ。"""
+    if help_opener is None:
+        return le
+    hc = help_cfg or {}
+    try:
+        btn_sz = max(14, int(hc.get("BTN_SIZE") or 18))
+    except (TypeError, ValueError):
+        btn_sz = 18
+    tip = _dcp(hc, "TIP_BTN", "名前パターンの書き方を表示します")
+    row = QWidget()
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(4)
+    lay.addWidget(le, 1)
+    btn = make_name_pattern_help_button(
+        size=btn_sz,
+        tip=tip,
+        on_click=lambda _=False, editor=le, key=field_key: help_opener(editor, key),
+    )
+    lay.addWidget(btn, 0)
+    return row
+
+
 def build_scenario_detail_cell_scroll(
     item_name: str,
     items: list[dict[str, Any]] | None = None,
@@ -917,10 +961,13 @@ def build_scenario_detail_cell_scroll(
     *,
     dsl_test_opener: Callable[[QLineEdit], None] | None = None,
     dsl_test_cfg: dict[str, Any] | None = None,
+    name_pattern_help_opener: Callable[[QLineEdit, str], None] | None = None,
+    name_pattern_help_cfg: dict[str, Any] | None = None,
 ) -> tuple[QScrollArea, dict[str, Any]]:
     """セル座標から取得。detail_cfg は SCREENS.SCENARIO_EDIT.DETAIL_CELL。refs でウィジェット参照を返す。"""
     cfg = detail_cfg or {}
     refs: dict[str, Any] = {}
+    _np_help_cfg = name_pattern_help_cfg or {}
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -958,7 +1005,15 @@ def build_scenario_detail_cell_scroll(
     tip_fn = _dcp(cfg, "TOOLTIP_FILE_NAME", "")
     if tip_fn:
         set_widget_tooltip(le_fn, tip_fn)
-    f1.addRow(_field_lbl(_dcp(cfg, "LABEL_FILE_NAME", "ファイル名")), le_fn)
+    f1.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_FILE_NAME", "ファイル名")),
+        _wrap_line_edit_with_help_btn(
+            le_fn,
+            help_opener=name_pattern_help_opener,
+            field_key="file",
+            help_cfg=_np_help_cfg,
+        ),
+    )
     refs["file_pattern"] = le_fn
 
     fn_rule_items = _dc(cfg, "FILE_NAME_RULE_ITEMS", ["完全一致", "含む", "含まない"])
@@ -1025,7 +1080,15 @@ def build_scenario_detail_cell_scroll(
     tip_sheet = _dcp(cfg, "TOOLTIP_SHEET_NAME", "")
     if tip_sheet:
         set_widget_tooltip(le_sheet, tip_sheet)
-    f2.addRow(_field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")), le_sheet)
+    f2.addRow(
+        _field_lbl(_dcp(cfg, "LABEL_SHEET_NAME", "シート名")),
+        _wrap_line_edit_with_help_btn(
+            le_sheet,
+            help_opener=name_pattern_help_opener,
+            field_key="sheet",
+            help_cfg=_np_help_cfg,
+        ),
+    )
     sheet_rule_items = _dc(
         cfg, "SHEET_RULE_ITEMS", ["左端シート", "完全一致", "含む", "含まない"]
     )
