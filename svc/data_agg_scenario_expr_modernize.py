@@ -475,6 +475,20 @@ def _source_needs_name_pattern_force(src: dict[str, Any]) -> bool:
     return False
 
 
+def scenario_load_should_mark_dirty(
+    *,
+    dsl_modernized: bool,
+    name_pattern_force_changed: bool,
+) -> bool:
+    """
+    シナリオ読込後に保存ボタンを有効化すべきか。
+
+    DSL 任意現代化（はい＋変更）または名前パターン強制変換で
+    メモリ上の内容が変わった場合に True。
+    """
+    return bool(dsl_modernized or name_pattern_force_changed)
+
+
 def scenario_needs_name_pattern_force(data: dict[str, Any]) -> bool:
     """ファイル名／シート名／名前取得の検索文字の旧形式が1つでもあれば True。"""
     items = data.get(KEY_ITEMS) if isinstance(data, dict) else None

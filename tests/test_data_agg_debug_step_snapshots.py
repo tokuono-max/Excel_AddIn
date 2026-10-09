@@ -115,6 +115,66 @@ def test_master_step_snapshot_uses_table_rows_from_step_cache() -> None:
         dlg.close()
 
 
+def test_master_step_snapshot_includes_result_column_headers() -> None:
+    """結果付加列 ON 時、snapshot の見出し／列数が描画（付加列＋項目）と一致する。"""
+    _app()
+    src = {"type": "cell", "scenario_name": "S1", "sheet_name": "Sheet1", "cell_ref": "A1"}
+    items = [
+        {"id": "item_a", "name": "品名", "sources": [src], "write_mode": "fill_in"},
+        {"id": "item_b", "name": "機器番号", "sources": [src], "write_mode": "fill_in"},
+    ]
+    scen = {
+        "id": "debug",
+        "name": "debug",
+        "items": items,
+        "result_columns": {
+            "include_path": True,
+            "include_file": True,
+            "include_sheet": True,
+            "path_header": "パス",
+            "file_header": "ファイル",
+            "sheet_header": "シート名",
+        },
+    }
+    dlg = DataAggDebugDialog(
+        parent=None,
+        debug_cfg={},
+        live_items=items,
+        scan_paths=["dummy.xlsx"],
+        fixed_mode=1,
+        scenario_for_dry_run=scen,
+    )
+    try:
+        table_rows = [
+            [r"C:\data", "a.xlsx", "Sheet1", "UNIT-A", "DEV-1"],
+            [r"C:\data", "b.xlsx", "Sheet1", "UNIT-B", "DEV-2"],
+        ]
+        dlg._mi_idx = 1
+        dlg._active_slot_indices = [0]
+        dlg._summary_rows = [["10", "-", "-", "-", "-"]]
+        dlg._summary_phase_labels = ["S1"]
+        dlg._value_cols = [["x"]]
+        dlg._value_col_tooltips = [[None]]
+        dlg._value_col_spans = [(0, 0)]
+        _seed_step_cache(dlg, 1, table_rows)
+
+        dlg._capture_master_step_snapshot(1, 0)
+
+        snap = dlg._master_step_snapshots[(1, 0)]
+        assert snap["grid_headers"] == ["パス", "ファイル", "シート名", "品名", "機器番号"]
+        assert snap["grid_rows"][0] == [
+            r"C:\data",
+            "a.xlsx",
+            "Sheet1",
+            "UNIT-A",
+            "DEV-1",
+        ]
+        assert snap["grid_rows"][0][3] == "UNIT-A"
+        assert snap["grid_rows"][0][4] == "DEV-1"
+    finally:
+        dlg.close()
+
+
 def test_master_step_snapshot_ignores_colvals_overlay() -> None:
     """colvals だけでは snapshot を埋めない（extract overlay 禁止）。"""
     dlg = _master_dialog()

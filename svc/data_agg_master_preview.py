@@ -334,12 +334,21 @@ def table_rows_to_join_search_seed_pool(
     file_header: str | None = None,
     sheet_header: str | None = None,
 ) -> list[dict[str, Any]]:
-    """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。"""
+    """mpv 段階キャッシュの table_rows を join_search seed プール行へ変換する。
+
+    __file_path の優先順:
+      1. 結果付加「パス」がファイル付き（拡張子あり）→ そのまま（レガシー／フルパス格納）
+      2. 呼び出し側の row_file_paths（フォルダのみパス列＋ファイル列から復元済み）
+      3. パス列（フォルダ）＋ファイル列を結合
+      4. パス列の生値 / anchor / synthetic
+    """
+    from pathlib import Path  # noqa: WPS433
+
     if not headers or not rows:
         return []
-    _ = file_header  # 由来フルパスは呼び出し側の row_file_paths で解決済み
     path_ix = _index_of_origin_path_header(headers, path_header=path_header)
     path_h = str(headers[path_ix]) if path_ix >= 0 else None
+    file_ix = _index_of_origin_file_header(headers, file_header=file_header)
     sheet_ix = _index_of_origin_sheet_header(headers, sheet_header=sheet_header)
     anchor_fp = str(anchor_file_path or "").strip()
     # 行 index 対応を崩さない（空文字も位置を保つ）
@@ -347,6 +356,27 @@ def table_rows_to_join_search_seed_pool(
         str(p).strip() if p is not None else ""
         for p in (row_file_paths or [])
     ]
+
+    def _looks_like_file_path(raw: str) -> bool:
+        s = str(raw or "").strip()
+        if not s:
+            return False
+        try:
+            return bool(Path(s).suffix)
+        except Exception:
+            return False
+
+    def _join_folder_and_basename(folder: str, basename: str) -> str:
+        fol = str(folder or "").strip()
+        bn = str(basename or "").strip()
+        if not fol or not bn:
+            return ""
+        try:
+            joined = str(Path(fol) / Path(bn).name)
+        except Exception:
+            return ""
+        return joined if _looks_like_file_path(joined) else ""
+
     out: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         if not isinstance(row, (list, tuple)):
@@ -356,11 +386,23 @@ def table_rows_to_join_search_seed_pool(
             key = str(h)
             d[key] = row[c] if c < len(row) else None
         d["__iter_index"] = int(i)
-        fp = ""
+        path_val = ""
         if path_h and d.get(path_h) not in (None, ""):
-            fp = str(d[path_h]).strip()
+            path_val = str(d[path_h]).strip()
+        file_val = ""
+        if file_ix >= 0 and file_ix < len(row):
+            file_val = str(row[file_ix] or "").strip()
+
+        fp = ""
+        if path_val and _looks_like_file_path(path_val):
+            # パス列にフルパス相当（拡張子あり）が入っている場合
+            fp = path_val
         elif i < len(row_fps) and row_fps[i]:
+            # 呼び出し側が復元したフルパス（本番: パス＝フォルダのみ）
             fp = row_fps[i]
+        elif path_val:
+            joined = _join_folder_and_basename(path_val, file_val)
+            fp = joined or path_val
         elif anchor_fp and not stacked_join:
             fp = anchor_fp
         else:

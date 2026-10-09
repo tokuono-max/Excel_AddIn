@@ -4907,11 +4907,8 @@ class DataAggDebugDialog(QDialog):
             gr: list[list[str]] = []
             used_step_cache = False
             if self._scenario_for_dry_run and self._debug_scan_paths:
-                items = list((self._scenario_for_dry_run or {}).get("items") or [])
-                gh = [
-                    str(it.get("name") or it.get("id") or ("項目_%s" % i))
-                    for i, it in enumerate(items)
-                ]
+                # 結果付加列（パス／ファイル／シート名）＋マスタ項目（描画と同一）
+                gh = list(self._mpv_preview_headers())
                 mi_saved = int(self._mi_idx)
                 step_saved = int(self._master_step_idx)
                 try:
@@ -4996,9 +4993,10 @@ class DataAggDebugDialog(QDialog):
         """ステップ snapshot 用。compute の table_rows のみ（extract overlay 禁止）。"""
         if not (self._scenario_for_dry_run and self._debug_scan_paths):
             return []
+        headers = self._mpv_preview_headers()
+        ncols = len(headers)
         items = list((self._scenario_for_dry_run or {}).get("items") or [])
-        ncols = len(items)
-        if ncols <= 0 or int(mi) < 0 or int(step_row) < 0:
+        if ncols <= 0 or int(mi) < 0 or int(mi) >= len(items) or int(step_row) < 0:
             return []
         n_pick = int(step_row) + 1
         rows: list[list[Any]] | None = None
@@ -5042,11 +5040,8 @@ class DataAggDebugDialog(QDialog):
         headers: list[str] = []
         grid_rows: list[list[str]] = []
         if self._scenario_for_dry_run and self._debug_scan_paths:
-            items = list((self._scenario_for_dry_run or {}).get("items") or [])
-            headers = [
-                str(it.get("name") or it.get("id") or ("項目_%s" % i))
-                for i, it in enumerate(items)
-            ]
+            # 結果付加列込み（_render_mpv_grid / _mpv_preview_headers と同一）
+            headers = list(self._mpv_preview_headers())
             n_pick = int(step_row) + 1
             n_act = len(self._active_slot_indices or [])
             if n_pick > 0 and n_act > 0:
@@ -9149,7 +9144,12 @@ class DataAggDebugDialog(QDialog):
         items = list(scen.get("items") or [])
         if mi_idx < 0 or mi_idx >= len(items):
             return
-        from svc.svc_data_agg_scenario import infer_item_lineage, normalize_item_write_mode
+        from svc.svc_data_agg_scenario import (  # noqa: WPS433
+            KEY_RESULT_COLUMNS,
+            infer_item_lineage,
+            normalize_item_write_mode,
+            result_column_header_names,
+        )
         from svc.svc_data_agg_write import merge_cell_for_write_mode
 
         it = items[mi_idx]
@@ -9157,7 +9157,9 @@ class DataAggDebugDialog(QDialog):
         if lin == "__mixed__":
             lin = None
         wm = normalize_item_write_mode(it.get("write_mode"), lineage=lin)
-        ncols = len(items)
+        extra = len(result_column_header_names(scen.get(KEY_RESULT_COLUMNS)))
+        ncols = extra + len(items)
+        col_i = extra + int(mi_idx)
         display_cap = self._master_preview_display_rows()
         nrows = min(
             display_cap,
@@ -9178,8 +9180,8 @@ class DataAggDebugDialog(QDialog):
                 self._mpv_grid.append([None] * ncols)
         for r in range(len(self._mpv_grid)):
             new_val = colvals[r] if r < len(colvals) else None
-            old = self._mpv_grid[r][mi_idx]
-            self._mpv_grid[r][mi_idx] = merge_cell_for_write_mode(old, new_val, wm)
+            old = self._mpv_grid[r][col_i]
+            self._mpv_grid[r][col_i] = merge_cell_for_write_mode(old, new_val, wm)
 
     def _render_mpv_grid(self) -> None:
         """マスタプレビュー: 結果一覧は run_preview_compute の table_rows（進捗行）のみを表示する。

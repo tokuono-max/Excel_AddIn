@@ -18,6 +18,7 @@ from svc.data_agg_scenario_expr_modernize import (  # noqa: E402
     modernize_shape_script,
     modernize_skip_primary_match,
     rewrite_shape_script_preferred,
+    scenario_load_should_mark_dirty,
     scenario_needs_expr_modernize,
     scenario_needs_name_pattern_force,
     skip_primary_needs_modernize,
@@ -167,6 +168,21 @@ def test_name_pattern_single_token_force() -> None:
     assert src["sheet_name"] == '"光特性"'
     assert src["ui_scenario_source_v1"]["file_pattern"] == '"紐づけ"'
     assert not scenario_needs_name_pattern_force(data)
+
+
+def test_scenario_load_should_mark_dirty_matrix() -> None:
+    assert not scenario_load_should_mark_dirty(
+        dsl_modernized=False, name_pattern_force_changed=False
+    )
+    assert scenario_load_should_mark_dirty(
+        dsl_modernized=True, name_pattern_force_changed=False
+    )
+    assert scenario_load_should_mark_dirty(
+        dsl_modernized=False, name_pattern_force_changed=True
+    )
+    assert scenario_load_should_mark_dirty(
+        dsl_modernized=True, name_pattern_force_changed=True
+    )
 
 
 def test_name_extract_search_text_force_modernize() -> None:

@@ -5013,11 +5013,13 @@ class _DataAggMainWindow(QDialog):
             from svc.data_agg_scenario_expr_modernize import (
                 force_modernize_scenario_name_patterns,
                 modernize_scenario_expressions,
+                scenario_load_should_mark_dirty,
                 scenario_needs_expr_modernize,
                 scenario_needs_name_pattern_force,
             )
 
             modernized = False
+            name_force_changed = False
             modernize_notes: list[str] = []
             needs_dsl = scenario_needs_expr_modernize(data)
             needs_name_force = scenario_needs_name_pattern_force(data)
@@ -5076,6 +5078,7 @@ class _DataAggMainWindow(QDialog):
             # 名前パターン（ファイル／シート／検索文字）は常に強制変換（DSL の可否に依存しない）
             if needs_name_force:
                 fres = force_modernize_scenario_name_patterns(data, inplace=True)
+                name_force_changed = bool(fres.changed)
                 if fres.notes:
                     note_pre = _ui_disp_str(
                         self._ui or {},
@@ -5090,6 +5093,7 @@ class _DataAggMainWindow(QDialog):
 
             # 現代化「はい」で変更した場合は座標ソフト警告を出さない（合意）。
             # いいえ／未変更時のみ従来どおり警告。部分失敗は上の notes で通知済み。
+            # ※ソフト警告の抑止は DSL 現代化のみ（名前パターン強制変換では抑止しない）。
             cell_errs = scenario_mod.validate_scenario(data, check_cell_specs=True)
             soft = [e for e in cell_errs if e not in errs]
             if soft and not modernized:
@@ -5160,7 +5164,11 @@ class _DataAggMainWindow(QDialog):
                 self._item_table.blockSignals(False)
                 self._suppress_scenario_dirty = False
             self._sync_item_table_master_name_roles()
-            if modernized:
+            # メモリ上で表現が変わった場合のみ dirty（読込案内「保存は操作者の判断」と整合）。
+            if scenario_load_should_mark_dirty(
+                dsl_modernized=modernized,
+                name_pattern_force_changed=name_force_changed,
+            ):
                 self._mark_scenario_dirty()
             else:
                 self._clear_scenario_dirty()

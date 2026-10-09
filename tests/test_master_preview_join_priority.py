@@ -463,7 +463,7 @@ def test_table_row_file_paths_prefers_stored_iteration_paths() -> None:
 
 
 def test_seed_pool_reads_result_path_header_pasu() -> None:
-    """結果付加列「パス」を seed の __file_path に使う（file_path レガシーのみ依存しない）。"""
+    """結果付加列「パス」がフルパス相当（拡張子あり）なら seed の __file_path に使う。"""
     from svc.data_agg_master_preview import (  # noqa: WPS433
         table_row_file_paths_for_stacked_seed,
         table_rows_to_join_search_seed_pool,
@@ -489,6 +489,59 @@ def test_seed_pool_reads_result_path_header_pasu() -> None:
     )
     assert pool[0]["__file_path"] == r"C:\origin\a.xlsx"
     assert pool[1]["__file_path"] == r"C:\origin\b.xlsx"
+
+
+def test_seed_pool_folder_only_path_prefers_row_file_paths() -> None:
+    """本番仕様: パス列＝フォルダのみのとき row_file_paths（フルパス）を __file_path に使う。"""
+    from svc.data_agg_master_preview import (  # noqa: WPS433
+        table_row_file_paths_for_stacked_seed,
+        table_rows_to_join_search_seed_pool,
+    )
+
+    headers = ["パス", "ファイル", "機器番号"]
+    rows = [
+        [r"C:\origin", "a.xlsx", "DEV1"],
+        [r"C:\origin", "b.xlsx", "DEV2"],
+    ]
+    scan = [r"C:\origin\a.xlsx", r"C:\origin\b.xlsx"]
+    fps = table_row_file_paths_for_stacked_seed(
+        headers,
+        rows,
+        scan_paths=scan,
+        path_header="パス",
+        file_header="ファイル",
+    )
+    assert fps == [r"C:\origin\a.xlsx", r"C:\origin\b.xlsx"]
+
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        row_file_paths=fps,
+        stacked_join=True,
+        path_header="パス",
+        file_header="ファイル",
+    )
+    assert pool[0]["__file_path"] == r"C:\origin\a.xlsx"
+    assert pool[1]["__file_path"] == r"C:\origin\b.xlsx"
+    assert pool[0].get("__sheet_name") in (None, "")
+
+
+def test_seed_pool_folder_plus_file_joins_without_row_fps() -> None:
+    """row_file_paths 無しでもパス（フォルダ）＋ファイル列からフルパスを復元する。"""
+    from svc.data_agg_master_preview import table_rows_to_join_search_seed_pool  # noqa: WPS433
+
+    headers = ["パス", "ファイル", "シート名", "機器番号"]
+    rows = [[r"C:\data\plant", "unit.xlsm", "Sheet1", "DEV1"]]
+    pool = table_rows_to_join_search_seed_pool(
+        headers,
+        rows,
+        stacked_join=True,
+        path_header="パス",
+        file_header="ファイル",
+        sheet_header="シート名",
+    )
+    assert pool[0]["__file_path"] == r"C:\data\plant\unit.xlsm"
+    assert pool[0]["__sheet_name"] == "Sheet1"
 
 
 def test_seed_pool_does_not_treat_master_item_named_pasu_as_origin() -> None:
