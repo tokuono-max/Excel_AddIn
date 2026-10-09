@@ -3456,13 +3456,7 @@ class _DataAggMainWindow(QDialog):
             self._file_list.addItem(fp)
         self._update_detected_file_count_label()
         self._update_batch_button_enabled()
-        try:
-            sp = str(self._get_scan_state().get("start_path") or "").strip() or "."
-            rp = Path(sp).resolve()
-            if rp.is_dir():
-                set_last_folder(str(rp))
-        except Exception:
-            pass
+        # 基準フォルダ走査では last_folder を更新しない（シナリオ読／書・項目CSVのみ）。
         if not auto_mode:
             t_scan = _ui_disp_str(self._ui or {}, "BTN_SEARCH_RUN", "検索実行")
             msg = _ui_disp_str(
@@ -3754,6 +3748,7 @@ class _DataAggMainWindow(QDialog):
                     self._main_ui_disp("MSG_ITEM_CSV_EMPTY", "項目が含まれていません。"),
                 )
                 return
+            # 項目 CSV 読込も作業フォルダとして記録する（基準フォルダ選択・走査は対象外）。
             set_last_folder(str(Path(path).parent))
             headers = lines[0].split(",") if "," in lines[0] else lines
             self._on_scenario_clear_all()
@@ -4891,7 +4886,7 @@ class _DataAggMainWindow(QDialog):
                 )
                 if path:
                     self._edit_start_path.setText(path)
-                    set_last_folder(path)
+                    # 基準フォルダ選択では last_folder を更新しない（シナリオ読／書・項目CSVのみ）。
                     self._on_scan(auto_mode=True)
             finally:
                 if _lock_xl and self._parent_hwnd:
@@ -4964,7 +4959,7 @@ class _DataAggMainWindow(QDialog):
         }
 
     def _file_dialog_initial_dir(self) -> str:
-        """%TEMP%\\csv_tool\\last_folder.txt 等に有効なフォルダがあればそのパス。無ければ空（Qt の従来どおりの初期位置）。"""
+        """作業フォルダ（last_folder）。シナリオ読／書・項目CSV読込で更新。基準フォルダは対象外。無ければ空。"""
         lf = get_last_folder()
         return lf if lf else ""
 
@@ -5119,6 +5114,7 @@ class _DataAggMainWindow(QDialog):
             from svc import svc_data_agg_scenario as _scen_fp
 
             self._revision_baseline_fp = _scen_fp.scenario_content_fingerprint(data)
+            # データ集約の作業フォルダ（シナリオ読／書・項目CSV。基準フォルダは対象外）。
             set_last_folder(str(Path(path).parent))
             self._suppress_scenario_dirty = True
             self._item_table.blockSignals(True)
@@ -5327,6 +5323,7 @@ class _DataAggMainWindow(QDialog):
             self._scenario_path = path
             self._scenario_save_empty_filename = False
             self._revision_baseline_fp = scenario_mod.scenario_content_fingerprint(data)
+            # データ集約の作業フォルダ（シナリオ読／書・項目CSV。基準フォルダは対象外）。
             set_last_folder(str(Path(path).parent))
             self._clear_scenario_dirty()
             self._apply_properties_to_ui(data)
