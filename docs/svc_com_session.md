@@ -12,7 +12,7 @@
 | COM エラー | `com_recycle scheduled reason=com_session_error` → プロセス終了 → 次回 spawn |
 | リボン前 | **事前再起動なし**（`prepare_com_session_before_request` は no-op） |
 | Excel 終了 | `com_monitor` が死んだ HWND をキャッシュから除去（プロセスは維持） |
-| 全 Excel 終了 | lifecycle monitor が `request_shutdown_all` → 正常終了 |
+| 全 Excel 終了 | lifecycle monitor（既定 poll 0.5s×confirm 2）が停止フラグ → 常駐が正常終了 |
 
 旧 A+（操作ごとの com_recycle・同一 HWND でも事前 kill）は **廃止**。
 

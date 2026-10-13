@@ -5,6 +5,7 @@ Excel プロセス監視: 全 EXCEL.EXE 終了後に常駐 Python へ shutdown �
 - 複数 Excel: 1 つでも EXCEL.EXE が残れば Python は維持
 - 最後の Excel 終了後: core の停止フラグ（svc を import しない）
 - VBA BeforeClose では Python に触らない（ribbon / 起動時 ensure と併用）
+- 検知: 既定 poll 0.5 秒 × 連続 confirm 2 回（最短おおよそ 1 秒）。誤終了防止のため confirm は 2 を維持
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ try:
 except Exception:
     logger = logging.getLogger(__name__)
 
-DEFAULT_POLL_SEC = 1.0
+DEFAULT_POLL_SEC = 0.5
 _GONE_CONFIRM_POLLS = 2
 
 _monitor_lock = threading.Lock()

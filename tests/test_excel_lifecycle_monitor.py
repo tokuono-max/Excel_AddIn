@@ -11,6 +11,12 @@ import pytest
 from core import excel_lifecycle_monitor as elc
 
 
+def test_lifecycle_default_poll_keeps_double_confirm() -> None:
+    """A: 検知短縮は poll のみ。confirm=2 は維持（誤終了防止）。"""
+    assert elc.DEFAULT_POLL_SEC == pytest.approx(0.5)
+    assert elc._GONE_CONFIRM_POLLS == 2
+
+
 def test_is_any_excel_process_running_true():
     with patch.object(elc, "subprocess") as sp:
         sp.run.return_value.stdout = '"EXCEL.EXE","1234","Console","1","100,000 K"\n'

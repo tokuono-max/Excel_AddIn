@@ -101,7 +101,7 @@ def _cap_list_capped(lst: list[str], cap: int) -> list[str]:
 
 
 def debug_event_lines_from_sheet_rows(event_log_rows: list[list[Any]]) -> list[str]:
-    """§10.8 シート列（時刻・理由コード・シナリオID・参照パス・詳細）をログ用 1 行テキストに。"""
+    """§10.8 シート列（時刻・理由コード・シナリオファイル・参照パス・詳細）をログ用 1 行テキストに。"""
     lines: list[str] = []
     for row in event_log_rows:
         if len(row) >= 5:

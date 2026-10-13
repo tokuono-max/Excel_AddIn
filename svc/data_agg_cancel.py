@@ -567,9 +567,9 @@ def _iter_recent_event_rows(book: Any, *, lookback_rows: int = 20) -> list[list[
 def _event_log_row_kind_sid_path_detail(
     row: list[Any],
 ) -> tuple[str, str, str, str]:
-    """レポート行から区分・シナリオID・対象パス・詳細を取る（列追加前後両対応）。"""
+    """レポート行から区分・シナリオファイル・対象パス・詳細を取る（列追加前後両対応）。"""
     n = len(row)
-    # 現行: PC性能, APL Ver, 記録日時, 処理時間, 出力行数, 区分, 書込み方式, 出力シート名, シナリオID, 対象パス, 詳細
+    # 現行: PC性能, APL Ver, 記録日時, 処理時間, 出力行数, 区分, 書込み方式, 出力シート名, シナリオファイル, 対象パス, 詳細
     if n >= 11:
         return (
             str(row[5] or "").strip(),
@@ -602,16 +602,22 @@ def _event_log_row_kind_sid_path_detail(
     )
 
 
-def _has_recent_cancel_summary(book: Any, *, scenario_id: str, scenario_path: str) -> bool:
+def _has_recent_cancel_summary(
+    book: Any,
+    *,
+    scenario_id: str,
+    target_path: str = "",
+) -> bool:
+    """同一シナリオの直近「一括実行・中止」があるか。対象パスは基準フォルダ（任意照合）。"""
     sid = str(scenario_id or "").strip()
-    sp = str(scenario_path or "").strip()
+    tp = str(target_path or "").strip()
     for row in reversed(_iter_recent_event_rows(book)):
         kind, row_sid, row_sp, detail_s = _event_log_row_kind_sid_path_detail(row)
         if kind != "一括実行・中止":
             continue
         if sid and row_sid and sid != row_sid:
             continue
-        if sp and row_sp and sp != row_sp:
+        if tp and row_sp and tp != row_sp:
             continue
         if detail_s:
             try:
@@ -630,8 +636,13 @@ def append_cancel_event_log_from_ui(
     sheet_id: str,
     scenario_id: str = "",
     scenario_path: str = "",
+    target_path: str = "",
 ) -> bool:
-    """強制終了時の補完: UI 側からイベントログへ「一括実行・中止」を追記。"""
+    """強制終了時の補完: UI 側からイベントログへ「一括実行・中止」を追記。
+
+    対象パス列は収集の基準フォルダ（target_path）。scenario_path は旧 API 互換で無視する。
+    """
+    _ = scenario_path
     if int(parent_hwnd or 0) <= 0:
         return False
     try:
@@ -644,15 +655,16 @@ def append_cancel_event_log_from_ui(
         if not ctx:
             return False
         _app, book, _sheet, _hwnd = ctx
+        path_col = str(target_path or "").strip()
         if _has_recent_cancel_summary(
             book,
             scenario_id=str(scenario_id or ""),
-            scenario_path=str(scenario_path or ""),
+            target_path=path_col,
         ):
             return True
         row = write_mod.format_batch_run_summary_row(
             str(scenario_id or ""),
-            str(scenario_path or ""),
+            path_col,
             ok=False,
             error="cancelled",
         )
@@ -801,6 +813,7 @@ def force_data_agg_batch_cancel_from_ui(
     parent_hwnd: int = 0,
     scenario_id: str = "",
     scenario_path: str = "",
+    target_path: str = "",
     cooperative_wait_ms: int = _COOP_WAIT_INITIAL_MS,
     cooperative_wait_extended_ms: int = _COOP_WAIT_EXTENDED_MS,
     apply_com_side_effects: bool = True,
@@ -846,6 +859,7 @@ def force_data_agg_batch_cancel_from_ui(
                     sheet_id=sid,
                     scenario_id=str(scenario_id or ""),
                     scenario_path=str(scenario_path or ""),
+                    target_path=str(target_path or ""),
                 )
             except Exception:
                 pass

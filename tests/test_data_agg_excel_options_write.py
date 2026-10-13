@@ -398,6 +398,8 @@ def test_event_log_headers_include_elapsed_after_timestamp() -> None:
     assert EVENT_LOG_HEADERS[3] == "処理時間"
     assert EVENT_LOG_HEADERS[4] == "出力行数"
     assert EVENT_LOG_HEADERS[5] == "区分"
+    assert EVENT_LOG_HEADERS[8] == "シナリオファイル"
+    assert "シナリオID" not in EVENT_LOG_HEADERS
 
 
 def test_format_elapsed_ms_ja() -> None:
@@ -408,7 +410,7 @@ def test_format_elapsed_ms_ja() -> None:
 def test_format_batch_run_summary_row_processing_time_column() -> None:
     row = format_batch_run_summary_row(
         "sid",
-        r"C:\scen.json",
+        r"\\server\share\ODN164",
         ok=True,
         files=2,
         output_rows=42,
@@ -420,18 +422,21 @@ def test_format_batch_run_summary_row_processing_time_column() -> None:
     assert "秒" in str(row[3]) or "分" in str(row[3])
     assert row[4] == 42
     assert row[5] == "一括実行・完了"
+    # 対象パス = 基準フォルダ（シナリオ JSON ではない）
+    assert row[9] == r"\\server\share\ODN164"
 
 
 def test_format_batch_run_summary_row_cancelled() -> None:
     row = format_batch_run_summary_row(
         "sid",
-        r"C:\scen.json",
+        r"C:\data\ODN164",
         ok=False,
         error="cancelled",
         files=3,
         total_ms=500,
     )
     assert row[5] == "一括実行・中止"
+    assert row[9] == r"C:\data\ODN164"
     import json
 
     detail = json.loads(str(row[10]))

@@ -4663,6 +4663,22 @@ def compute_batch_table_rows(
         except Exception:
             pass
 
+    def _publish_io_path_at(file_index: int, io_path: str | Path) -> None:
+        """パイプラインで1ファイルの io が確定した時点で holder を差し替える（進捗マーク用）。"""
+        if io_paths_holder is None:
+            return
+        try:
+            ix = int(file_index) - 1
+            if ix < 0:
+                return
+            cur = list(io_paths_holder[0] or [])
+            while len(cur) <= ix:
+                cur.append("")
+            cur[ix] = str(io_path)
+            io_paths_holder[0] = cur
+        except Exception:
+            pass
+
     _publish_io_paths(paths)
     items = data.get("items") or []
     if not items:
@@ -5092,11 +5108,14 @@ def compute_batch_table_rows(
         nf: int,
         fname: str,
         done: int,
+        *,
+        io_path: Any = None,
     ) -> None:
         with _parallel_prog_lock:
             mark = ""
-            if 1 <= int(fi) <= len(paths):
-                mark = _file_progress_mark(paths[int(fi) - 1], file_index=int(fi))
+            if 1 <= int(fi) <= len(paths) or io_path is not None:
+                ref = io_path if io_path is not None else paths[int(fi) - 1]
+                mark = _file_progress_mark(ref, file_index=int(fi))
             dn = _parallel_done_n(event, done)
             if event == "start":
                 _ph(
@@ -5143,9 +5162,20 @@ def compute_batch_table_rows(
         if any(path_is_network(p) for p in display_paths):
             def _pipe_extract(fi: int, io_path: str, display_path: str) -> _BatchFileExtractResult:
                 fname = Path(str(display_path)).name
+                # ステージ確定後の実 io でマーク／holder を先に更新（古い UNC paths を見ない）
+                try:
+                    from svc.data_agg_progress_mark import progress_io_ref_mark  # noqa: WPS433
+
+                    progress_mark_store.set(fi, progress_io_ref_mark(io_path))
+                except Exception:
+                    pass
+                with _parallel_prog_lock:
+                    _publish_io_path_at(fi, io_path)
                 with _par_done_lock:
                     dn0 = int(_par_done_n[0])
-                _parallel_extract_progress("start", fi, n_files, fname, dn0)
+                _parallel_extract_progress(
+                    "start", fi, n_files, fname, dn0, io_path=io_path
+                )
                 try:
                     return _batch_file_extract_and_merge(
                         io_path,
@@ -5176,7 +5206,9 @@ def compute_batch_table_rows(
                     with _par_done_lock:
                         _par_done_n[0] += 1
                         dn1 = int(_par_done_n[0])
-                    _parallel_extract_progress("done", fi, n_files, fname, dn1)
+                    _parallel_extract_progress(
+                        "done", fi, n_files, fname, dn1, io_path=io_path
+                    )
 
             _cold_w = parallel_cold_cap if parallel_ramp_on else file_parallel_workers
             _ramp_n = parallel_ramp_files if parallel_ramp_on else n_files
@@ -6849,6 +6881,8 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     # イベントログ用: 永続パスがあればそれを優先（未保存一括はスナップショットパス）
     scenario_path_log = scenario_path_user or scenario_snapshot_path
     scenario_id_fallback = str(Path(load_path).stem)
+    # レポート「対象パス」= 収集の基準フォルダ（読込後に更新）
+    scan_target_path_for_report: list[str] = [""]
     _dlog(
         "enter hwnd=%s sheet_id=%s load_path=%s scenario_path_log=%s",
         parent_hwnd,
@@ -6882,7 +6916,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             return
         row = write_mod.format_batch_run_summary_row(
             scenario_id_arg,
-            scenario_path_log,
+            scan_target_path_for_report[0],
             ok=ok,
             files=files_n,
             output_rows=output_rows,
@@ -6943,6 +6977,9 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
                 Path(scenario_snapshot_path).unlink(missing_ok=True)
             except OSError:
                 pass
+    scan_target_path_for_report[0] = str(
+        (data.get("scan") or {}).get("start_path") or ""
+    ).strip() or "."
     errs = scenario_mod.validate_scenario(data)
     if errs:
         sid_v = str(data.get("id") or scenario_id_fallback)
@@ -6985,6 +7022,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
     # マスタ列への集約はシナリオの items 一覧の縦並び順（上から順）に従う。
     scan_cfg = data.get("scan") or {}
     start_path = scan_cfg.get("start_path") or "."
+    scan_target_path_for_report[0] = str(start_path)
     ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
@@ -7217,6 +7255,7 @@ def _run_batch(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -> None
             "data_agg_batch_notify_parent": notify_parent,
             "data_agg_batch_scenario_id": str(scenario_id),
             "data_agg_batch_scenario_path": str(scenario_path_log),
+            "data_agg_batch_scan_start_path": str(start_path),
         },
     )
     with batch_cancel_scope(cancel_check):
@@ -7765,6 +7804,7 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
 
     scenario_id = str(meta.get("scenario_id") or "")
     scenario_path_log = str(meta.get("scenario_path_log") or "")
+    scan_start_path = str(meta.get("scan_start_path") or "").strip()
     files_n = int(meta.get("files_n") or 0)
     join_events_total = int(meta.get("join_events_total") or 0)
     dt_compute_ms = meta.get("compute_ms")
@@ -7800,7 +7840,7 @@ def _run_batch_write(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) -
             return
         row = write_mod.format_batch_run_summary_row(
             scenario_id_arg,
-            scenario_path_log,
+            scan_start_path,
             ok=ok,
             files=files_n,
             output_rows=output_rows,

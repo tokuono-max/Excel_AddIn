@@ -4284,7 +4284,7 @@ class DataAggDebugDialog(QDialog):
         self.log_intro = QLabel(
             self._d(
                 "LOG_INTRO_HTML",
-                "<b>ログ</b>：実行の要約、<b>EVENT</b> 行（§10.8：時刻・理由コード・シナリオID・参照パス・詳細）。",
+                "<b>ログ</b>：実行の要約、<b>EVENT</b> 行（§10.8：時刻・理由コード・シナリオファイル・参照パス・詳細）。",
             )
         )
         self._wrap_desc_label(self.log_intro)

@@ -244,6 +244,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             except OSError:
                 pass
 
+    scan_start_path = str((data.get("scan") or {}).get("start_path") or "").strip() or "."
     errs = scenario_mod.validate_scenario(data)
     stem_user = Path(scenario_path_user).stem if scenario_path_user.strip() else ""
     id_in_json = str(data.get("id") or "").strip()
@@ -264,6 +265,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     "user_msg": "シナリオの検証エラー:\n" + "\n".join(errs[:5]),
                     "scenario_id": scenario_id,
                     "scenario_path_log": scenario_path_log,
+                    "scan_start_path": scan_start_path,
                     "excel_write_summary": _excel_options_log_summary(data.get("excel_options")),
                     "batch_run_id": batch_run_id,
                     "batch_start_ts_ms": batch_start_ts_ms,
@@ -302,6 +304,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                     "user_msg": "項目が定義されていません。",
                     "scenario_id": scenario_id,
                     "scenario_path_log": scenario_path_log,
+                    "scan_start_path": scan_start_path,
                     "excel_write_summary": _excel_options_log_summary(data.get("excel_options")),
                     "batch_run_id": batch_run_id,
                     "batch_start_ts_ms": batch_start_ts_ms,
@@ -397,6 +400,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 "user_msg": msg,
                 "scenario_id": scenario_id,
                 "scenario_path_log": scenario_path_log,
+                "scan_start_path": scan_start_path,
                 "files_n": int(files_n or 0),
                 "compute_ms": compute_ms if compute_ms is not None else _tms,
                 "event_log_rows": event_log_rows or [],
@@ -423,6 +427,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
 
     scan_cfg = data.get("scan") or {}
     start_path = scan_cfg.get("start_path") or "."
+    scan_start_path = str(start_path)
     ext_t = tuple(scan_cfg.get("extensions") or [".xlsx", ".xlsm", ".csv"])
     kw = scan_cfg.get("keyword") or ""
     rec = bool(scan_cfg.get("recursive"))
@@ -524,6 +529,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             "data_agg_batch_notify_parent": notify_parent,
             "data_agg_batch_scenario_id": str(scenario_id),
             "data_agg_batch_scenario_path": str(scenario_path_log),
+            "data_agg_batch_scan_start_path": str(scan_start_path),
         },
     )
 
@@ -589,6 +595,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 "user_msg": "対象ファイルが 0 件でした。",
                 "scenario_id": scenario_id,
                 "scenario_path_log": scenario_path_log,
+                "scan_start_path": scan_start_path,
                 "files_n": 0,
                 "compute_ms": _tms,
                 "excel_write_summary": _excel_options_log_summary(data.get("excel_options")),
@@ -745,6 +752,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 "user_msg": user_msg,
                 "scenario_id": scenario_id,
                 "scenario_path_log": scenario_path_log,
+                "scan_start_path": scan_start_path,
                 "files_n": len(file_paths),
                 "compute_ms": dt_compute_ms,
                 "event_log_rows": event_log_rows,
@@ -784,6 +792,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
                 "user_msg": "集約計算中にエラーが発生しました: %s" % e,
                 "scenario_id": scenario_id,
                 "scenario_path_log": scenario_path_log,
+                "scan_start_path": scan_start_path,
                 "files_n": len(file_paths),
                 "compute_ms": dt_compute_ms,
                 "event_log_rows": event_log_rows,
@@ -854,6 +863,7 @@ def run_batch_compute(parent_hwnd: int, sheet_id: str, payload: dict[str, Any]) 
             "abort": False,
             "scenario_id": scenario_id,
             "scenario_path_log": scenario_path_log,
+            "scan_start_path": scan_start_path,
             "files_n": len(file_paths),
             "join_events_total": join_events_total,
             "compute_ms": dt_compute_ms,

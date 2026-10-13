@@ -652,6 +652,7 @@ class ProgressDialog(QDialog):
         sid = sheet_id_from_cancel_path(cancel_path)
         scenario_id = str(self._req.get("data_agg_batch_scenario_id") or "")
         scenario_path = str(self._req.get("data_agg_batch_scenario_path") or "")
+        scan_start_path = str(self._req.get("data_agg_batch_scan_start_path") or "")
         notify_parent = bool(self._req.get("data_agg_batch_notify_parent"))
         progress_path = getattr(self, "_progress_path", None)
 
@@ -729,6 +730,7 @@ class ProgressDialog(QDialog):
                         sheet_id=str(result.get("sheet_id") or sid),
                         scenario_id=scenario_id,
                         scenario_path=scenario_path,
+                        target_path=scan_start_path,
                     )
                 except Exception:
                     pass

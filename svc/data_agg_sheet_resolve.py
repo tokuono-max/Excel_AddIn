@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import zipfile
 from collections.abc import Sequence
@@ -252,6 +253,32 @@ def _flatten_name_pattern_ast(node: NamePatternAst) -> list[str]:
     return []
 
 
+@functools.lru_cache(maxsize=512)
+def _parse_name_pattern_cached(
+    s: str,
+) -> tuple[NamePatternKind, NamePatternAst | None, tuple[str, ...], str | None]:
+    """同一文字列の再解析を避ける（一括で同一 file/sheet 式が何度も評価されるため）。"""
+    if s.strip() == "":
+        return ("empty", None, (), None)
+    if _pattern_looks_like_expr(s):
+        ast, err = _parse_name_expr_full(s)
+        if err or ast is None:
+            return ("invalid", None, (), err or "式が不正です")
+        return ("expr", ast, tuple(_flatten_name_pattern_ast(ast)), None)
+    if _pattern_has_fullwidth_syntax(s) and any(ch in "&|()" for ch in s):
+        # レガシー判定だが半角演算子も混在している等は上で expr 扱い。ここは葉に全角記号のみ。
+        pass
+    leaves = parse_comma_separated_patterns(s)
+    if not leaves:
+        return ("empty", None, (), None)
+    return ("legacy", None, tuple(leaves), None)
+
+
+def clear_name_pattern_parse_cache() -> None:
+    """解析キャッシュを破棄する（テスト用）。"""
+    _parse_name_pattern_cached.cache_clear()
+
+
 def parse_name_pattern(
     raw: str | None,
 ) -> tuple[NamePatternKind, NamePatternAst | None, list[str], str | None]:
@@ -260,22 +287,12 @@ def parse_name_pattern(
 
     戻り: (kind, ast, leaves, error_message)
     - empty / legacy / expr / invalid
+
+    同一文字列はプロセス内 LRU で再解析を省略する（意味は不変）。
     """
     s = "" if raw is None else str(raw)
-    if s.strip() == "":
-        return ("empty", None, [], None)
-    if _pattern_looks_like_expr(s):
-        ast, err = _parse_name_expr_full(s)
-        if err or ast is None:
-            return ("invalid", None, [], err or "式が不正です")
-        return ("expr", ast, _flatten_name_pattern_ast(ast), None)
-    if _pattern_has_fullwidth_syntax(s) and any(ch in "&|()" for ch in s):
-        # レガシー判定だが半角演算子も混在している等は上で expr 扱い。ここは葉に全角記号のみ。
-        pass
-    leaves = parse_comma_separated_patterns(s)
-    if not leaves:
-        return ("empty", None, [], None)
-    return ("legacy", None, leaves, None)
+    kind, ast, leaves_t, err = _parse_name_pattern_cached(s)
+    return (kind, ast, list(leaves_t), err)
 
 
 def pattern_leaf_tokens(raw: str | None) -> list[str]:

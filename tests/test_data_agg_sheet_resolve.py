@@ -66,6 +66,30 @@ def test_resolve_multi_patterns() -> None:
     ]
 
 
+def test_parse_name_pattern_lru_cache() -> None:
+    """同一式の再解析はキャッシュヒット（意味は不変）。"""
+    from svc.data_agg_sheet_resolve import (
+        _parse_name_pattern_cached,
+        clear_name_pattern_parse_cache,
+        match_text_by_name_pattern,
+        parse_name_pattern,
+    )
+
+    clear_name_pattern_parse_cache()
+    expr = '("A"|"B")&"C"'
+    k1, a1, leaves1, e1 = parse_name_pattern(expr)
+    hits_before = _parse_name_pattern_cached.cache_info().hits
+    k2, a2, leaves2, e2 = parse_name_pattern(expr)
+    assert _parse_name_pattern_cached.cache_info().hits == hits_before + 1
+    assert (k1, a1, leaves1, e1) == (k2, a2, leaves2, e2)
+    assert match_text_by_name_pattern("AC", "含む", expr) is True
+    assert match_text_by_name_pattern("A", "含む", expr) is False
+    # 呼び出し側が leaves を変更してもキャッシュ本体は壊れない
+    leaves1.append("MUT")
+    _k, _a, leaves3, _e = parse_name_pattern(expr)
+    assert "MUT" not in leaves3
+
+
 def test_name_pattern_and_or_beta() -> None:
     from svc.data_agg_sheet_resolve import (
         match_text_by_name_pattern,

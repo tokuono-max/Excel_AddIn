@@ -91,6 +91,27 @@ def test_apply_batch_hook_join_phase_not_unc() -> None:
 
 
 
+def test_mark_store_staged_local_overrides_unc_fallback(tmp_path: Path) -> None:
+    """パイプライン開始時: store にローカル io を先置きすれば UNC 表示パスでも [LOC]。"""
+    from svc.data_agg_progress_mark import FileProgressMarkStore  # noqa: E402
+
+    staged = tmp_path / "staged.xlsx"
+    staged.write_bytes(b"PK")
+    store = FileProgressMarkStore()
+    store.set(1, progress_io_ref_mark(staged))
+    assert store.get(1, r"\\server\share\a.xlsx").startswith("[LOC]")
+    phase, _detail = apply_batch_hook_io_mark(
+        "ファイル読込",
+        "[LOC] ファイル 1/2: a.xlsx 読込中",
+        suffix="[LOC] ファイル 1/2: a.xlsx 読込中",
+        io_paths=[str(staged)],
+        file_index=1,
+        mark_state=ProgressIoMarkState(),
+    )
+    assert phase.startswith(PROGRESS_MARK_LOC)
+    assert "[UNC]" not in phase
+
+
 def test_progress_io_ref_mark_cached_before_network(tmp_path: Path) -> None:
     from svc.svc_data_agg_extract import (  # noqa: E402
         bind_workbook_cache_frame,

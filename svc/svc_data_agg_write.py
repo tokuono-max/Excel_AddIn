@@ -152,7 +152,7 @@ EVENT_LOG_HEADERS = [
     "区分",
     "書込み方式",
     "出力シート名",
-    "シナリオID",
+    "シナリオファイル",
     "対象パス",
     "詳細",
 ]
@@ -436,7 +436,7 @@ def format_join_events_for_event_log(
 
 def format_batch_run_summary_row(
     scenario_id: str,
-    scenario_path: str,
+    target_path: str,
     *,
     ok: bool,
     files: int = 0,
@@ -451,7 +451,10 @@ def format_batch_run_summary_row(
     excel_write_summary: str = "",
     output_sheet_name: str = "",
 ) -> list[Any]:
-    """一括実行の成否サマリをイベントログ 1 行分にする（データ集約レポート）。"""
+    """一括実行の成否サマリをイベントログ 1 行分にする（データ集約レポート）。
+
+    target_path: 収集の基準フォルダ（scan.start_path。UNC 可）。シナリオ JSON パスではない。
+    """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     err_s = str(error or "").strip().lower()
     is_cancel = err_s == "cancelled"
@@ -490,7 +493,7 @@ def format_batch_run_summary_row(
         write_summary=str(excel_write_summary or ""),
         sheet_name=str(output_sheet_name or ""),
         scenario_id=str(scenario_id or ""),
-        path=str(scenario_path or ""),
+        path=str(target_path or ""),
         detail=json.dumps(detail, ensure_ascii=False),
     )
 

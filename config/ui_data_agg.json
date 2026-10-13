@@ -537,7 +537,7 @@
       "VALUES_TITLE_MASTER_ROWS_BUSY": "結合・一覧を計算中…",
       "VALUES_TITLE_MASTER_ROWS_FMT": "【表示行数：%s/%s　ファイル数：%s　読込行数：%s】",
       "VALUES_TITLE_MASTER_SCAN_CAP_SUFFIX": "（走査上限到達）",
-      "LOG_INTRO_HTML": "<b>ログ</b>：実行の要約、<b>EVENT</b> 行（§10.8：時刻・理由コード・シナリオID・参照パス・詳細）。",
+      "LOG_INTRO_HTML": "<b>ログ</b>：実行の要約、<b>EVENT</b> 行（§10.8：時刻・理由コード・シナリオファイル・参照パス・詳細）。",
       "COND_HINT_SCENARIO_HTML": "<b>条件</b>：番号／項目／要約。親行の背景は<b>条件項目列のみ</b>（§3.1.3.2）。",
       "COND_HINT_MASTER_HTML": "<b>条件</b>：登録シナリオごと。親行の背景は<b>シナリオ名列のみ</b>。",
       "TREE_COL_NO": "番号",
