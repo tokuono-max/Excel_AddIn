@@ -339,41 +339,116 @@ def _count_unescaped_double_quotes(s: str) -> int:
     return n
 
 
+def _normalize_name_pattern_fullwidth(raw: str) -> str:
+    """全角の引用・演算・括弧・読点を半角へ寄せる。"""
+    table = {
+        "\u201c": '"',  # “
+        "\u201d": '"',  # ”
+        "\uff02": '"',  # ＂
+        "\uff06": "&",  # ＆
+        "\uff5c": "|",  # ｜
+        "\uff08": "(",  # （
+        "\uff09": ")",  # ）
+        "\u3001": ",",  # 、
+        "\uff0c": ",",  # ，
+    }
+    return "".join(table.get(ch, ch) for ch in str(raw or ""))
+
+
+def _name_pattern_candidate_ok(trial: str) -> str | None:
+    """trial が新方式として妥当ならその文字列、legacy なら現代化結果。"""
+    t = str(trial or "").strip()
+    if not t:
+        return None
+    kind, _ast, leaves, err = parse_name_pattern(t)
+    if kind == "expr" and not err:
+        return t
+    if kind == "legacy" and leaves:
+        return "|".join(_csv_quote_pattern_leaf(x) for x in leaves)
+    return None
+
+
 def _suggest_fix_for_invalid(raw: str) -> str | None:
     """
     invalid 入力から妥当な新方式候補を推定する。
     例: \"A\"|\"B → \"A\"|\"B\"（閉じ引用の補完）
     """
-    s = str(raw or "").strip()
-    if not s:
+    s0 = str(raw or "").strip()
+    if not s0:
         return None
+    norm = _normalize_name_pattern_fullwidth(s0).strip()
+    # 半角正規化を先に試し、全角のまま引用して葉に全角が残るのを避ける
+    variants: list[str] = []
+    if norm:
+        variants.append(norm)
+    if s0 not in variants:
+        variants.append(s0)
+
     trials: list[str] = []
-    # 引用符の閉じ忘れ
-    if _count_unescaped_double_quotes(s) % 2 == 1:
-        trials.append(s + '"')
-    # 括弧の閉じ忘れ
-    open_p = s.count("(")
-    close_p = s.count(")")
-    if open_p > close_p:
-        base = s + ('"' if _count_unescaped_double_quotes(s) % 2 == 1 else "")
-        trials.append(base + (")" * (open_p - close_p)))
+    for s in variants:
+        trials.append(s)
+        # 引用符の閉じ忘れ
+        if _count_unescaped_double_quotes(s) % 2 == 1:
+            trials.append(s + '"')
+        # 括弧の閉じ忘れ
+        open_p = s.count("(")
+        close_p = s.count(")")
+        if open_p > close_p:
+            base = s + ('"' if _count_unescaped_double_quotes(s) % 2 == 1 else "")
+            trials.append(base + (")" * (open_p - close_p)))
+        # カンマ区切り → OR
+        if "," in s and "|" not in s and "&" not in s:
+            parts = [p.strip() for p in s.split(",") if p.strip()]
+            if parts:
+                trials.append(
+                    "|".join(_csv_quote_pattern_leaf(p.strip('"')) for p in parts)
+                )
+        # 素の | / & で分かれているが引用なし
+        if ("|" in s or "&" in s) and '"' not in s:
+            for sep in ("|", "&"):
+                if sep not in s:
+                    continue
+                parts = [p.strip() for p in s.split(sep) if p.strip()]
+                if len(parts) >= 2:
+                    trials.append(sep.join(_csv_quote_pattern_leaf(p) for p in parts))
+        # 全体を1要素として引用（演算子・半角引用なし）
+        if not any(ch in s for ch in '&|(),"') and s:
+            trials.append(_csv_quote_pattern_leaf(s))
+        # 外側の壊れ引用を剥がして再引用
+        stripped = s.strip().strip('"').strip()
+        if stripped and stripped != s:
+            trials.append(_csv_quote_pattern_leaf(stripped))
+
+    seen: set[str] = set()
     for trial in trials:
-        kind, _ast, _leaves, err = parse_name_pattern(trial)
-        if kind == "expr" and not err:
-            return trial
-    return None
+        t = str(trial or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        ok = _name_pattern_candidate_ok(t)
+        if ok:
+            return ok
+    # 最後の手段: 正規化後の中身を1トークンとして引用
+    core = norm.strip().strip('"').strip() if norm else ""
+    if not core:
+        core = s0.strip().strip('"').strip() or s0
+    return _csv_quote_pattern_leaf(core)
 
 
 def name_pattern_fix_candidate(raw: str | None) -> str | None:
-    """修正候補の新方式文字列。作れなければ None。"""
-    s = "" if raw is None else str(raw).strip()
-    if not s:
+    """修正候補の新方式文字列。作れなければ None（表示側は最後の手段を使う）。"""
+    s0 = "" if raw is None else str(raw).strip()
+    if not s0:
         return None
+    # 全角記号を先に半角へ（legacy 葉に全角引用が残るのを防ぐ）
+    s = _normalize_name_pattern_fullwidth(s0).strip() or s0
     kind, _ast, leaves, _err = parse_name_pattern(s)
     if kind == "legacy" and leaves:
         return "|".join(_csv_quote_pattern_leaf(t) for t in leaves)
     if kind == "invalid":
-        return _suggest_fix_for_invalid(s)
+        return _suggest_fix_for_invalid(s0)
+    if kind == "expr" and not _err:
+        return s if s != s0 else None
     return None
 
 
@@ -399,13 +474,18 @@ def format_name_pattern_fix_advice(raw: str | None) -> str:
     err = validate_name_pattern(s)
     detail = (err or "").strip()
     cand = name_pattern_fix_candidate(s)
+    if not cand and s.strip():
+        # （なし）は出さず、最終手段の引用を必ず付ける
+        cand = _suggest_fix_for_invalid(s) or _csv_quote_pattern_leaf(
+            _normalize_name_pattern_fullwidth(s).strip().strip('"').strip() or s.strip()
+        )
     lines = [
         "構文エラー（%s）" % s,
-        "入力 → 修正候補：%s" % (cand if cand else "（なし）"),
+        "入力 → 修正候補：%s" % (cand if cand else _csv_quote_pattern_leaf(s.strip())),
     ]
     if detail:
         lines.append("内容: %s" % detail)
-    elif not cand:
+    else:
         lines.append("内容: %s" % _NAME_PATTERN_UI_RULE)
     return "\n".join(lines)
 

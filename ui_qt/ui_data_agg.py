@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import (
+    QEvent,
     QEventLoop,
     QItemSelection,
     QItemSelectionModel,
@@ -6236,6 +6237,15 @@ class _DataAggMainWindow(QDialog):
             pass
 
 
+class _BlockWheelWhenLockedFilter(QObject):
+    """エラーロック中の詳細スクロールでホイール移動を抑止する。"""
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Wheel:
+            return True
+        return super().eventFilter(watched, event)
+
+
 class _ScenarioEditDialog(QDialog):
     """
     シナリオ編集ダイアログ。項目単位で取得ソースを設定する（結合キーは詳細ペイン §4）。
@@ -6327,13 +6337,18 @@ class _ScenarioEditDialog(QDialog):
         self._undo_restore_selection: list[int] = []
         self._dsl_test_dialog: DslTestDialog | None = None
         self._dsl_test_cfg: dict[str, Any] = dict(self._screen_cfg.get("DSL_TEST") or {})
+        self._dsl_test_opened_for_error: bool = False
         self._name_pattern_help_dialog: NamePatternHelpDialog | None = None
         self._name_pattern_help_cfg: dict[str, Any] = dict(
             self._screen_cfg.get("NAME_PATTERN_HELP") or {}
         )
+        self._name_pattern_help_opened_for_error: bool = False
         self._name_pattern_lock_widget: QLineEdit | None = None
         self._name_pattern_lock_key: str | None = None
         self._name_pattern_refocusing: bool = False
+        self._dsl_lock_widget: QLineEdit | None = None
+        self._dsl_refocusing: bool = False
+        self._error_scroll_wheel_filter = _BlockWheelWhenLockedFilter(self)
         self._scenario_focus_changed_connected = False
         self._master_items_list: list[dict[str, Any]] = list(items or [])
         self._master_item_row = -1
@@ -7171,6 +7186,8 @@ class _ScenarioEditDialog(QDialog):
     def _on_register_clicked(self) -> None:
         if self._name_patterns_blocking_register():
             return
+        if self._value_shapes_blocking_register():
+            return
         n_link_inc, n_join_inc = self._count_incomplete_key_defs_on_form()
         if n_link_inc or n_join_inc:
             t_reg = (
@@ -7333,9 +7350,7 @@ class _ScenarioEditDialog(QDialog):
         jd["row"].valueChanged.connect(self._on_form_changed)
         jd["col"].valueChanged.connect(self._on_form_changed)
         jd["item_combo"].currentIndexChanged.connect(self._on_form_changed)
-        jvs = jd.get("value_shape_script")
-        if jvs is not None:
-            jvs.textChanged.connect(self._on_form_changed)
+        self._wire_value_shape_line_edit(jd.get("value_shape_script"))
         for cbx in jd.get("checks") or []:
             cbx.stateChanged.connect(self._on_form_changed)
 
@@ -7425,61 +7440,103 @@ class _ScenarioEditDialog(QDialog):
             _table_ensure_row_min_scroll(self._sources_table, valid[-1])
         self._update_step_button_enabled()
 
-    def _open_dsl_test(self, le: QLineEdit) -> None:
-        """整形 DSL テスト（非モーダル）。同時 1 つ。"""
-        self._close_dsl_test_dialog(save_prefix=True)
-        hint = (le.toolTip() or "").strip()
-        if not hint:
-            for block in (
-                self._screen_cfg.get("DETAIL_CELL") or {},
-                self._screen_cfg.get("DETAIL_NAME") or {},
-            ):
-                hint = str(block.get("VALUE_SHAPE_HINT_HTML") or "").strip()
-                if hint:
-                    break
+    def _dsl_hint_html_for(self, le: QLineEdit) -> str:
+        """DSLテスト右ペイン用。コマンド一覧 HTML（短い入力チップとは分離）。"""
+        _ = le
+        for block in (
+            self._screen_cfg.get("DETAIL_CELL") or {},
+            self._screen_cfg.get("DETAIL_NAME") or {},
+        ):
+            hint = str(block.get("VALUE_SHAPE_HINT_HTML") or "").strip()
+            if hint:
+                return hint
+        return ""
+
+    def _open_dsl_test(self, le: QLineEdit, *, for_error: bool = False) -> None:
+        """整形 DSL テスト（非モーダル）。同時 1 つ。ロック中は他欄へ切り替えない。"""
+        lock = self._dsl_lock_widget
+        if lock is not None and lock is not le:
+            QTimer.singleShot(0, self._refocus_dsl_lock)
+            return
+        # 当該欄エラーロック中の灰色ボタンはエラーモード維持（フラグ／ライブ同期を落とさない）
+        effective_error = bool(for_error) or (lock is le)
+        existing = self._dsl_test_dialog
+        if existing is not None and existing.target_line_edit is le:
+            if effective_error:
+                self._dsl_test_opened_for_error = True
+                existing.set_live_sync_to_target(True)
+                existing.apply_syntax_error_display(with_modal=False)
+            else:
+                self._dsl_test_opened_for_error = False
+                existing.set_live_sync_to_target(False)
+            existing.show()
+            existing.raise_()
+            # 手動もエラーも対象入力へフォーカス（窓を残したまま編集）
+            QTimer.singleShot(0, existing.prefer_target_focus)
+            return
+        if existing is not None:
+            if lock is not None:
+                QTimer.singleShot(0, self._refocus_dsl_lock)
+                return
+            self._close_dsl_test_dialog(save_prefix=True)
         dlg = DslTestDialog(
             target_line_edit=le,
-            hint_html=hint,
+            hint_html=self._dsl_hint_html_for(le),
             dsl_test_cfg=self._dsl_test_cfg,
             position_anchor_widget=find_dsl_test_open_button(le) or le,
             parent=self,
         )
         self._dsl_test_dialog = dlg
         dlg.finished.connect(lambda _result: self._on_dsl_test_dialog_finished(dlg))
+        self._dsl_test_opened_for_error = bool(effective_error)
+        dlg.set_live_sync_to_target(bool(effective_error))
         dlg.show()
+        if effective_error:
+            dlg.apply_syntax_error_display(with_modal=False)
+        QTimer.singleShot(0, dlg.prefer_target_focus)
 
     def _on_dsl_test_dialog_finished(self, dlg: DslTestDialog) -> None:
         """×／Esc 等でユーザーが閉じたとき、親側の参照を解放する。"""
         if self._dsl_test_dialog is dlg:
             self._dsl_test_dialog = None
+            self._dsl_test_opened_for_error = False
 
     def _on_scenario_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
-        """右ペインの別項目へフォーカスが移ったら DSL テストを閉じる。名前パターンロックも監視。"""
-        if self._loading_source_form or self._name_pattern_refocusing:
+        """ロック監視・専用窓の自動クローズ（名前パターン／DSL 同型）。"""
+        if (
+            self._loading_source_form
+            or self._name_pattern_refocusing
+            or self._dsl_refocusing
+        ):
             return
-        lock = self._name_pattern_lock_widget
-        if lock is not None and new is not None and new is not lock:
+        np_lock = self._name_pattern_lock_widget
+        if np_lock is not None and new is not None and new is not np_lock:
             if not self._is_name_pattern_escape_widget(new):
                 QTimer.singleShot(0, self._refocus_name_pattern_lock)
                 return
-        if self._dsl_test_dialog is None or new is None:
+        dsl_lock = self._dsl_lock_widget
+        if dsl_lock is not None and new is not None and new is not dsl_lock:
+            if not self._is_dsl_escape_widget(new):
+                QTimer.singleShot(0, self._refocus_dsl_lock)
+                return
+            # ロック中は専用窓をフォーカス移動では閉じない
             return
-        if self._should_close_dsl_test_on_focus(new):
-            self._close_dsl_test_dialog(save_prefix=True)
+        if new is None:
+            return
+        # 専用窓表示中: 対象入力／窓内／起動ボタンでは閉じない（手動もエラーも同じ）
+        # ロック有無に関わらず should_close 判定を使う（ロック中の early-return は上で処理済）
+        if self._name_pattern_help_dialog is not None:
+            if self._should_close_name_pattern_help_on_focus(new):
+                # エラーロック中は上で refocus 済み。非ロック（手動表示）のみ閉じる
+                if self._name_pattern_lock_widget is None:
+                    self._close_name_pattern_help()
+        if self._dsl_test_dialog is not None:
+            if self._should_close_dsl_test_on_focus(new):
+                if self._dsl_lock_widget is None:
+                    self._close_dsl_test_dialog(save_prefix=True)
 
-    def _should_close_dsl_test_on_focus(self, widget: QWidget) -> bool:
-        dlg = self._dsl_test_dialog
-        if dlg is None:
-            return False
-        target = dlg.target_line_edit
+    def _widget_in_scenario_right_pane(self, widget: QWidget | None) -> bool:
         w: QWidget | None = widget
-        while w is not None:
-            if w is dlg or w is target:
-                return False
-            if w.objectName() == "dsl_test_open_btn":
-                return False
-            w = w.parentWidget()
-        w = widget
         while w is not None:
             if w is getattr(self, "_scenario_right_wrap", None):
                 return True
@@ -7488,11 +7545,52 @@ class _ScenarioEditDialog(QDialog):
             w = w.parentWidget()
         return False
 
+    def _should_close_dsl_test_on_focus(self, widget: QWidget) -> bool:
+        """非ロック時。窓内・対象整形欄・その灰色ボタン以外（右ペイン内）なら閉じる。"""
+        dlg = self._dsl_test_dialog
+        if dlg is None:
+            return False
+        target = dlg.target_line_edit
+        open_btn = find_dsl_test_open_button(target)
+        w: QWidget | None = widget
+        while w is not None:
+            if w is dlg or w is target:
+                return False
+            if open_btn is not None and w is open_btn:
+                return False
+            if w.objectName() == "dsl_test_open_btn":
+                # 他欄の起動ボタンは「それ以外」扱い → 閉じる（付け替えは click 側）
+                return self._widget_in_scenario_right_pane(widget)
+            w = w.parentWidget()
+        return self._widget_in_scenario_right_pane(widget)
+
+    def _should_close_name_pattern_help_on_focus(self, widget: QWidget) -> bool:
+        """ヘルプ内・対象入力（とその行）・？以外（右ペイン内）なら閉じる。手動／エラー共通。"""
+        dlg = self._name_pattern_help_dialog
+        if dlg is None:
+            return False
+        anchor = dlg.anchor_widget
+        anchor_row = anchor.parentWidget() if anchor is not None else None
+        w: QWidget | None = widget
+        while w is not None:
+            if w is dlg:
+                return False
+            if anchor is not None and w is anchor:
+                return False
+            if anchor_row is not None and w is anchor_row:
+                return False
+            oname = w.objectName() if hasattr(w, "objectName") else ""
+            if oname in ("name_pattern_help_btn", "name_pattern_help_dialog"):
+                return False
+            w = w.parentWidget()
+        return self._widget_in_scenario_right_pane(widget)
+
     def _close_dsl_test_dialog(self, save_prefix: bool = True) -> None:
         dlg = self._dsl_test_dialog
         if dlg is None:
             return
         self._dsl_test_dialog = None
+        self._dsl_test_opened_for_error = False
         try:
             if save_prefix:
                 dlg.save_shared_input()
@@ -7518,6 +7616,7 @@ class _ScenarioEditDialog(QDialog):
     def reject(self) -> None:
         self._clear_name_pattern_lock()
         self._close_name_pattern_help()
+        self._clear_dsl_lock()
         self._close_dsl_test_dialog(save_prefix=True)
         self._disconnect_scenario_focus_changed()
         self._clear_scenario_undo()
@@ -7526,6 +7625,7 @@ class _ScenarioEditDialog(QDialog):
     def closeEvent(self, event) -> None:
         self._clear_name_pattern_lock()
         self._close_name_pattern_help()
+        self._clear_dsl_lock()
         self._close_dsl_test_dialog(save_prefix=True)
         self._disconnect_scenario_focus_changed()
         super().closeEvent(event)
@@ -7593,9 +7693,7 @@ class _ScenarioEditDialog(QDialog):
         ld["row"].valueChanged.connect(self._on_form_changed)
         ld["col"].valueChanged.connect(self._on_form_changed)
         ld["item_combo"].currentIndexChanged.connect(self._on_form_changed)
-        lvs = ld.get("value_shape_script")
-        if lvs is not None:
-            lvs.textChanged.connect(self._on_form_changed)
+        self._wire_value_shape_line_edit(ld.get("value_shape_script"))
         ce = ld.get("carry_empty")
         if ce is not None:
             ce.stateChanged.connect(self._on_form_changed)
@@ -7637,12 +7735,14 @@ class _ScenarioEditDialog(QDialog):
     def _on_name_pattern_help_finished(self, dlg: NamePatternHelpDialog) -> None:
         if self._name_pattern_help_dialog is dlg:
             self._name_pattern_help_dialog = None
+            self._name_pattern_help_opened_for_error = False
 
     def _close_name_pattern_help(self) -> None:
         dlg = self._name_pattern_help_dialog
         if dlg is None:
             return
         self._name_pattern_help_dialog = None
+        self._name_pattern_help_opened_for_error = False
         try:
             dlg.close()
             dlg.deleteLater()
@@ -7650,12 +7750,28 @@ class _ScenarioEditDialog(QDialog):
             pass
 
     def _open_name_pattern_help(self, le: QLineEdit, field_key: str = "file") -> None:
-        """？クリックまたはエラー時。共有1窓。"""
+        """？クリック（手動）。共有1窓。当該欄ロック中はエラーモード維持。"""
         dlg = self._ensure_name_pattern_help_dialog()
-        # 手動オープン時はエラー帯を消さない（ロック中は残す）
-        if self._name_pattern_lock_widget is None:
-            dlg.clear_error_advice()
-        dlg.show_near(le)
+        lock = self._name_pattern_lock_widget
+        if lock is le:
+            # エラーロック中の？はフラグを落とさず、助言を再表示
+            self._name_pattern_help_opened_for_error = True
+            key = self._name_pattern_lock_key or field_key
+            raw = le.text() if hasattr(le, "text") else ""
+            from svc.data_agg_sheet_resolve import format_name_pattern_fix_advice
+
+            dlg.set_error_advice(
+                field_label=self._name_pattern_label_for_key(key),
+                advice_text=format_name_pattern_fix_advice(raw),
+                field_key=key,
+                raw_input=raw,
+            )
+        else:
+            self._name_pattern_help_opened_for_error = False
+            if lock is None:
+                dlg.clear_error_advice()
+        # 対象入力へフォーカスを戻し、見ながら編集
+        dlg.show_near(le, prefer_anchor_focus=True)
 
     def _show_name_pattern_error_help(
         self, le: QLineEdit, field_key: str, raw: str
@@ -7663,21 +7779,97 @@ class _ScenarioEditDialog(QDialog):
         from svc.data_agg_sheet_resolve import format_name_pattern_fix_advice
 
         dlg = self._ensure_name_pattern_help_dialog()
+        self._name_pattern_help_opened_for_error = True
         dlg.set_error_advice(
             field_label=self._name_pattern_label_for_key(field_key),
             advice_text=format_name_pattern_fix_advice(raw),
             field_key=field_key,
             raw_input=raw,
         )
-        dlg.show_near(le)
+        dlg.show_near(le, prefer_anchor_focus=True)
+
+    _ERROR_INPUT_STYLE = (
+        "QLineEdit { background-color: #ffe4e4; }"
+    )
+
+    def _set_error_input_style(self, le: QLineEdit | None, *, on: bool) -> None:
+        if le is None:
+            return
+        try:
+            if on:
+                le.setStyleSheet(self._ERROR_INPUT_STYLE)
+            else:
+                le.setStyleSheet("")
+        except Exception:
+            pass
 
     def _clear_name_pattern_lock(self) -> None:
+        prev = self._name_pattern_lock_widget
         self._name_pattern_lock_widget = None
         self._name_pattern_lock_key = None
+        self._set_error_input_style(prev, on=False)
+        self._sync_error_scroll_lock()
 
     def _set_name_pattern_lock(self, le: QLineEdit, field_key: str) -> None:
+        prev = self._name_pattern_lock_widget
+        if prev is not None and prev is not le:
+            self._set_error_input_style(prev, on=False)
         self._name_pattern_lock_widget = le
         self._name_pattern_lock_key = field_key
+        self._set_error_input_style(le, on=True)
+        self._sync_error_scroll_lock()
+
+    def _sync_error_scroll_lock(self) -> None:
+        """エラーロック中は詳細フォームのスクロールを止める。"""
+        locked = (
+            self._name_pattern_lock_widget is not None
+            or self._dsl_lock_widget is not None
+        )
+        pol = (
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if locked
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        for attr in ("_detail_scroll_cell", "_detail_scroll_name"):
+            sc = getattr(self, attr, None)
+            if sc is None:
+                continue
+            try:
+                sc.setVerticalScrollBarPolicy(pol)
+                sc.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                    if locked
+                    else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                )
+                sb = sc.verticalScrollBar()
+                if sb is not None:
+                    sb.setEnabled(not locked)
+                sc.setProperty("_data_agg_scroll_locked", locked)
+                vp = sc.viewport()
+                filt = self._error_scroll_wheel_filter
+                if locked:
+                    vp.installEventFilter(filt)
+                else:
+                    vp.removeEventFilter(filt)
+            except Exception:
+                pass
+        dlg_np = self._name_pattern_help_dialog
+        if dlg_np is not None:
+            try:
+                if locked and self._name_pattern_lock_widget is not None:
+                    dlg_np.set_body_scroll_enabled(False)
+                elif self._name_pattern_lock_widget is None:
+                    dlg_np.set_body_scroll_enabled(True)
+            except Exception:
+                pass
+        dlg_dsl = self._dsl_test_dialog
+        if dlg_dsl is not None:
+            try:
+                dlg_dsl.set_error_scroll_locked(
+                    locked and self._dsl_lock_widget is not None
+                )
+            except Exception:
+                pass
 
     def _is_name_pattern_escape_widget(self, widget: QWidget | None) -> bool:
         """エラーロック中でもフォーカスしてよい退避／ヘルプ系。"""
@@ -7708,7 +7900,7 @@ class _ScenarioEditDialog(QDialog):
             self._name_pattern_refocusing = False
 
     def _on_name_pattern_editing_finished(self) -> None:
-        """FO: 不正ならヘルプ＋ロック。OK（空欄含む）ならヘルプを閉じロック解除。"""
+        """FO: 不正ならヘルプ＋ロック。OK ならロック解除。エラー起因ヘルプは閉じる。"""
         if self._loading_source_form or self._name_pattern_refocusing:
             return
         from svc.data_agg_sheet_resolve import validate_name_pattern
@@ -7722,12 +7914,20 @@ class _ScenarioEditDialog(QDialog):
         raw = w.text() if hasattr(w, "text") else ""
         err = validate_name_pattern(raw)
         if not err:
+            was_error_open = self._name_pattern_help_opened_for_error
             if self._name_pattern_lock_widget is w:
                 self._clear_name_pattern_lock()
-            self._close_name_pattern_help()
+            dlg = self._name_pattern_help_dialog
+            if dlg is not None and dlg.anchor_widget is w:
+                dlg.clear_error_advice()
+                # エラー起因で開いた窓だけ、解消時に閉じる（手動オープンは残す）
+                if was_error_open:
+                    self._close_name_pattern_help()
+            self._sync_error_scroll_lock()
             return
         self._set_name_pattern_lock(w, key)
         self._show_name_pattern_error_help(w, key, raw)
+        self._sync_error_scroll_lock()
         QTimer.singleShot(0, self._refocus_name_pattern_lock)
 
     def _current_form_source_type(self) -> str:
@@ -7776,6 +7976,151 @@ class _ScenarioEditDialog(QDialog):
                     return True
         return False
 
+    def _iter_value_shape_line_edits(self) -> list[QLineEdit]:
+        out: list[QLineEdit] = []
+        if self._current_form_source_type() == "name_extract":
+            nr = getattr(self, "_name_refs", None) or {}
+            w = nr.get("value_shape_script")
+            if isinstance(w, QLineEdit):
+                out.append(w)
+            return out
+        cr = getattr(self, "_cell_refs", None) or {}
+        w = cr.get("value_shape_script")
+        if isinstance(w, QLineEdit):
+            out.append(w)
+        for ld in cr.get("link_defs") or []:
+            lw = ld.get("value_shape_script") if isinstance(ld, dict) else None
+            if isinstance(lw, QLineEdit):
+                out.append(lw)
+        for jd in cr.get("join_defs") or []:
+            jw = jd.get("value_shape_script") if isinstance(jd, dict) else None
+            if isinstance(jw, QLineEdit):
+                out.append(jw)
+        return out
+
+    def _value_shape_has_error(self, le: QLineEdit | None) -> bool:
+        if le is None or not hasattr(le, "text"):
+            return False
+        from core.core_value_shape import compile_shape_script
+
+        ok, _msg = compile_shape_script(le.text())
+        return not ok
+
+    def _clear_dsl_lock(self) -> None:
+        prev = self._dsl_lock_widget
+        self._dsl_lock_widget = None
+        self._set_error_input_style(prev, on=False)
+        self._sync_error_scroll_lock()
+
+    def _set_dsl_lock(self, le: QLineEdit) -> None:
+        prev = self._dsl_lock_widget
+        if prev is not None and prev is not le:
+            self._set_error_input_style(prev, on=False)
+        self._dsl_lock_widget = le
+        self._set_error_input_style(le, on=True)
+        self._sync_error_scroll_lock()
+
+    def _is_dsl_escape_widget(self, widget: QWidget | None) -> bool:
+        """DSL エラーロック中でもフォーカスしてよい退避／テスト系。"""
+        if widget is None:
+            return False
+        lock = self._dsl_lock_widget
+        open_btn = find_dsl_test_open_button(lock) if isinstance(lock, QLineEdit) else None
+        w: QWidget | None = widget
+        while w is not None:
+            if w is self._dsl_test_dialog:
+                return True
+            if w is getattr(self, "_btn_cancel", None):
+                return True
+            if open_btn is not None and w is open_btn:
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _show_dsl_error_dialog(self, le: QLineEdit) -> None:
+        self._open_dsl_test(le, for_error=True)
+        dlg = self._dsl_test_dialog
+        if dlg is not None:
+            dlg.set_error_scroll_locked(True)
+
+    def _refocus_dsl_lock(self) -> None:
+        le = self._dsl_lock_widget
+        if le is None or self._dsl_refocusing:
+            return
+        # 双方向同期で既に直っている場合は解除（フォーカス移動を許す）
+        if not self._value_shape_has_error(le):
+            was_error_open = self._dsl_test_opened_for_error
+            self._clear_dsl_lock()
+            dlg = self._dsl_test_dialog
+            if dlg is not None and dlg.target_line_edit is le:
+                dlg.clear_syntax_error_display()
+                dlg.set_error_scroll_locked(False)
+                if was_error_open:
+                    self._close_dsl_test_dialog(save_prefix=True)
+            return
+        self._dsl_refocusing = True
+        try:
+            le.setFocus(Qt.FocusReason.OtherFocusReason)
+            self._show_dsl_error_dialog(le)
+        finally:
+            self._dsl_refocusing = False
+
+    def _on_value_shape_editing_finished(self) -> None:
+        """FO: 不正なら DSL テスト＋ロック。OK ならロック解除。エラー起因窓は閉じる。"""
+        if self._loading_source_form or self._dsl_refocusing:
+            return
+        w = self.sender()
+        if not isinstance(w, QLineEdit):
+            return
+        # ロック中の他欄 FO は無視（付け替え禁止）
+        lock = self._dsl_lock_widget
+        if lock is not None and lock is not w:
+            return
+        if not self._value_shape_has_error(w):
+            was_error_open = self._dsl_test_opened_for_error
+            if lock is w:
+                self._clear_dsl_lock()
+            dlg = self._dsl_test_dialog
+            if dlg is not None and dlg.target_line_edit is w:
+                dlg.clear_syntax_error_display()
+                dlg.set_error_scroll_locked(False)
+                # エラー起因で開いた窓だけ解消時に閉じる（手動は残す）
+                if was_error_open:
+                    self._close_dsl_test_dialog(save_prefix=True)
+            self._sync_error_scroll_lock()
+            return
+        self._set_dsl_lock(w)
+        self._show_dsl_error_dialog(w)
+        self._sync_error_scroll_lock()
+        QTimer.singleShot(0, self._refocus_dsl_lock)
+
+    def _value_shapes_blocking_register(self) -> bool:
+        """登録前ガード。整形 DSL の NG ならテスト表示して True。"""
+        if self._loading_source_form:
+            return False
+        for w in self._iter_value_shape_line_edits():
+            if not w.isEnabled():
+                continue
+            if self._value_shape_has_error(w):
+                self._set_dsl_lock(w)
+                self._show_dsl_error_dialog(w)
+                self._refocus_dsl_lock()
+                return True
+        lock = self._dsl_lock_widget
+        if lock is not None:
+            if lock not in self._iter_value_shape_line_edits():
+                self._clear_dsl_lock()
+            else:
+                self._refocus_dsl_lock()
+                return True
+        return False
+
+    def _wire_value_shape_line_edit(self, le: QLineEdit | None) -> None:
+        if le is None:
+            return
+        le.textChanged.connect(self._on_form_changed)
+        le.editingFinished.connect(self._on_value_shape_editing_finished)
+
     def _wire_detail_form_signals(self) -> None:
         cr = self._cell_refs
         nr = self._name_refs
@@ -7807,35 +8152,12 @@ class _ScenarioEditDialog(QDialog):
             shr.stateChanged.connect(self._on_form_changed)
         for cbx in cr["cell_checks"]:
             cbx.stateChanged.connect(self._on_form_changed)
-        vsc = cr.get("value_shape_script")
-        if vsc is not None:
-            vsc.textChanged.connect(self._on_form_changed)
+        self._wire_value_shape_line_edit(cr.get("value_shape_script"))
         cr["write_mode_cell"].currentIndexChanged.connect(self._on_form_changed)
         for ld in cr["link_defs"]:
-            ld["cell"].textChanged.connect(self._on_form_changed)
-            ld["mode_cell"].toggled.connect(self._on_form_changed)
-            ld["mode_fixed"].toggled.connect(self._on_form_changed)
-            ld["row"].valueChanged.connect(self._on_form_changed)
-            ld["col"].valueChanged.connect(self._on_form_changed)
-            ld["item_combo"].currentIndexChanged.connect(self._on_form_changed)
-            lvs = ld.get("value_shape_script")
-            if lvs is not None:
-                lvs.textChanged.connect(self._on_form_changed)
-            ce = ld.get("carry_empty")
-            if ce is not None:
-                ce.stateChanged.connect(self._on_form_changed)
-            for cbx in ld.get("checks") or []:
-                cbx.stateChanged.connect(self._on_form_changed)
+            self._wire_new_link_def(ld)
         for jd in cr["join_defs"]:
-            jd["cell"].textChanged.connect(self._on_form_changed)
-            jd["row"].valueChanged.connect(self._on_form_changed)
-            jd["col"].valueChanged.connect(self._on_form_changed)
-            jd["item_combo"].currentIndexChanged.connect(self._on_form_changed)
-            jvs = jd.get("value_shape_script")
-            if jvs is not None:
-                jvs.textChanged.connect(self._on_form_changed)
-            for cbx in jd.get("checks") or []:
-                cbx.stateChanged.connect(self._on_form_changed)
+            self._wire_new_join_def(jd)
 
         nr["search_target"].currentIndexChanged.connect(self._on_form_changed)
         nr["search_cond"].currentIndexChanged.connect(self._on_form_changed)
@@ -7857,9 +8179,7 @@ class _ScenarioEditDialog(QDialog):
         nr["length_value_edit"].textChanged.connect(self._on_form_changed)
         for cbx in nr["name_checks"]:
             cbx.stateChanged.connect(self._on_form_changed)
-        vsn = nr.get("value_shape_script")
-        if vsn is not None:
-            vsn.textChanged.connect(self._on_form_changed)
+        self._wire_value_shape_line_edit(nr.get("value_shape_script"))
         nr["write_mode_name"].currentIndexChanged.connect(self._on_form_changed)
         nr["path_item"].currentIndexChanged.connect(self._on_form_changed)
 

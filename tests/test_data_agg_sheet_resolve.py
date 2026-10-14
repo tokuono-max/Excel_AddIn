@@ -137,6 +137,14 @@ def test_name_pattern_and_or_beta() -> None:
     advice_bad = format_name_pattern_fix_advice('"A"|"B') or ""
     assert '入力 → 修正候補："A"|"B"' in advice_bad
     assert "内容: 引用符が閉じていません" in advice_bad
+    from svc.data_agg_sheet_resolve import name_pattern_fix_candidate
+
+    # 全角引用・カンマ区切りも候補を返す（（なし）にしない）
+    assert name_pattern_fix_candidate("“光特性”") == '"光特性"'
+    assert name_pattern_fix_candidate("A,B") == '"A"|"B"'
+    advice_fw = format_name_pattern_fix_advice("光＆履歴") or ""
+    assert "（なし）" not in advice_fw
+    assert "入力 → 修正候補：" in advice_fw
     # 実行時マッチは旧形式も解釈（読込強制変換前の互換）
     names = ["Data", "Foo_R_Bar", "実装シート", "R_Only"]
     assert resolve_all_sheet_names_by_rule(names, "含む", '"R_"|"実装"') == [

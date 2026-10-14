@@ -250,6 +250,9 @@ class DslTestDialog(QDialog):
         self._closing = False
         self._cmd_error_active = False
         self._cmd_format_guard = False
+        self._sync_guard = False
+        # True=エラー起因表示時のみコマンド→整形へリアルタイム反映。手動時はペースト任せ。
+        self._live_sync_to_target = False
         self._splitter: QSplitter | None = None
         self._pane_left = 200
         self._pane_right = 302
@@ -344,6 +347,7 @@ class DslTestDialog(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._cmd_text.textChanged.connect(self._on_command_edited)
+        self._target.textChanged.connect(self._on_target_text_changed)
         set_widget_tooltip(self._cmd_text, _dcp(self._cfg, "TIP_CMD_INPUT", ""))
         left.addWidget(self._cmd_text)
 
@@ -497,6 +501,56 @@ class DslTestDialog(QDialog):
     def target_line_edit(self) -> QLineEdit:
         return self._target
 
+    def cmd_script_text(self) -> str:
+        """シナリオ整形欄と同期する DSL コマンド文字列。"""
+        return self._cmd_script_text()
+
+    def apply_syntax_error_display(self, *, with_modal: bool = True) -> bool:
+        """
+        現在のコマンドを検証する。成功なら True。
+        失敗時はエラー箇所を赤太字。with_modal=False ならハイライトのみ（自動オープン用）。
+        """
+        sc = self._cmd_script_text()
+        if not (sc or "").strip():
+            if self._cmd_error_active:
+                self._clear_cmd_error_highlight()
+            return True
+        ok, msg, block = shape_script_syntax_error_block(sc)
+        if ok:
+            if self._cmd_error_active:
+                self._clear_cmd_error_highlight()
+            return True
+        if block:
+            self._highlight_cmd_error_block(block)
+        if with_modal:
+            self._show_error_dialog(msg or "構文エラー")
+        return False
+
+    def clear_syntax_error_display(self) -> None:
+        """前回の構文エラー赤ハイライトだけ消す。"""
+        self._clear_cmd_error_highlight()
+
+    def set_live_sync_to_target(self, enabled: bool) -> None:
+        """エラー起因時のみ True。手動オープン時は False（ペーストで反映）。"""
+        self._live_sync_to_target = bool(enabled)
+
+    def set_error_scroll_locked(self, locked: bool) -> None:
+        """エラーロック中は説明ペイン等のスクロールを止める。"""
+        pol = (
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if locked
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        for w in (self._hint_view, self._input_text, self._result_display):
+            try:
+                w.setVerticalScrollBarPolicy(pol)
+                w.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                sb = w.verticalScrollBar()
+                if sb is not None:
+                    sb.setEnabled(not locked)
+            except Exception:
+                pass
+
     def _sync_splitter_widths(self) -> None:
         """外枠リサイズ時、規定幅を下限に LEFT/RIGHT_STRETCH 比で余白を配分。0 は伸びない。"""
         sp = self._splitter
@@ -537,6 +591,8 @@ class DslTestDialog(QDialog):
         self._sync_splitter_widths()
 
     def _position_dialog(self) -> None:
+        from ui_qt.ui_data_agg_name_pattern_help import _place_dialog_above_or_below
+
         ox = _cfg_int(self._cfg, "POSITION_OFFSET_X", 0)
         oy = _cfg_int(self._cfg, "POSITION_OFFSET_Y", 4)
         anchor = (
@@ -547,32 +603,19 @@ class DslTestDialog(QDialog):
         parent = self.parentWidget()
         if anchor in ("open_button_below", "target_button_below") and parent is not None:
             try:
-                pg = parent.frameGeometry()
-                anchor_bottom = self._position_anchor.mapToGlobal(
-                    self._position_anchor.rect().bottomLeft()
-                )
-                anchor_top = self._position_anchor.mapToGlobal(
-                    self._position_anchor.rect().topLeft()
-                )
-                x = int(pg.right()) - int(self.width()) - ox
-                dialog_h = int(self.height())
                 oy_above = _cfg_int(self._cfg, "POSITION_OFFSET_Y_ABOVE", 16)
                 if oy_above <= 0:
                     oy_above = max(oy, 16)
-                screen = QGuiApplication.screenAt(anchor_bottom)
-                if screen is None:
-                    screen = QGuiApplication.primaryScreen()
-                if screen is not None:
-                    avail = screen.availableGeometry()
-                    space_below = int(avail.bottom()) - int(anchor_bottom.y()) - oy
-                    space_above = int(anchor_top.y()) - int(avail.top()) - oy_above
-                    if space_below >= dialog_h or space_below >= space_above:
-                        y = int(anchor_bottom.y()) + oy
-                    else:
-                        y = int(anchor_top.y()) - dialog_h - oy_above
-                else:
-                    y = int(anchor_bottom.y()) + oy
-                self.move(x, y)
+                # 下は起動ボタン基準、上は整形入力を隠さない
+                _place_dialog_above_or_below(
+                    dialog=self,
+                    anchor=self._position_anchor,
+                    clear_top_widget=self._target,
+                    ox=ox,
+                    oy=oy,
+                    oy_above=oy_above,
+                    x_align="parent_right",
+                )
                 return
             except Exception:
                 pass
@@ -587,8 +630,18 @@ class DslTestDialog(QDialog):
                 pass
         if anchor in ("target_field", "target_top_right"):
             try:
-                tl = self._target.mapToGlobal(self._target.rect().topRight())
-                self.move(int(tl.x()) + ox, int(tl.y()) + oy)
+                oy_above = _cfg_int(self._cfg, "POSITION_OFFSET_Y_ABOVE", 16)
+                if oy_above <= 0:
+                    oy_above = max(oy, 16)
+                _place_dialog_above_or_below(
+                    dialog=self,
+                    anchor=self._target,
+                    clear_top_widget=self._target,
+                    ox=ox,
+                    oy=oy,
+                    oy_above=oy_above,
+                    x_align="anchor_left",
+                )
                 return
             except Exception:
                 pass
@@ -610,6 +663,17 @@ class DslTestDialog(QDialog):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._position_dialog()
+        # 実枠確定後にもう一度（タイトルバー分のかぶり防止）
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, self._position_dialog)
+
+    def prefer_target_focus(self) -> None:
+        """手動オープン後、対象の整形欄へフォーカスを戻す。"""
+        try:
+            self._target.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
 
     def _sample_input_text(self) -> str:
         """テスト用文字列（改行維持。\\r\\n は \\n に正規化）。"""
@@ -695,6 +759,37 @@ class DslTestDialog(QDialog):
         if self._cmd_error_active:
             self._clear_cmd_error_highlight()
         self._result_display.clear()
+        self._sync_cmd_to_target()
+
+    def _on_target_text_changed(self, _text: str = "") -> None:
+        if self._sync_guard or self._cmd_format_guard or self._closing:
+            return
+        self._sync_guard = True
+        try:
+            want = self._target.text() if hasattr(self._target, "text") else ""
+            if self._cmd_script_text() != want:
+                self._run_cmd_format_safe(
+                    lambda: self._cmd_text.setPlainText(want)
+                )
+                self._applied_steps = 0
+                self._exec_display.clear()
+                self._result_display.clear()
+                if self._cmd_error_active:
+                    self._clear_cmd_error_highlight()
+        finally:
+            self._sync_guard = False
+
+    def _sync_cmd_to_target(self) -> None:
+        if self._sync_guard or self._closing or not self._live_sync_to_target:
+            return
+        script = self._cmd_script_text()
+        if not hasattr(self._target, "text") or self._target.text() == script:
+            return
+        self._sync_guard = True
+        try:
+            self._target.setText(script)
+        finally:
+            self._sync_guard = False
 
     def _syntax_error_title(self) -> str:
         return _dcp(self._cfg, "MSGBOX_SYNTAX_ERROR_TITLE", "構文エラー") or "構文エラー"
@@ -751,18 +846,8 @@ class DslTestDialog(QDialog):
         return block
 
     def _validate_script_syntax(self, script: str) -> bool:
-        sc = (script or "").strip()
-        if not sc:
-            if self._cmd_error_active:
-                self._clear_cmd_error_highlight()
-            return True
-        ok, msg, block = shape_script_syntax_error_block(sc)
-        if ok:
-            if self._cmd_error_active:
-                self._clear_cmd_error_highlight()
-            return True
-        self._show_syntax_error(msg or "構文エラー", block)
-        return False
+        _ = script  # 呼び出し側が渡すが、表示は現在のコマンド欄を正とする
+        return self.apply_syntax_error_display(with_modal=True)
 
     def _show_initial_step_state(self) -> None:
         """ステップ循環の初期状態（クリアボタンと同じ）。"""
@@ -836,6 +921,10 @@ class DslTestDialog(QDialog):
         if not self._closing:
             set_shared_dsl_test_input(self._sample_input_text())
             self._closing = True
+        try:
+            self._target.textChanged.disconnect(self._on_target_text_changed)
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def keyPressEvent(self, event: Any) -> None:

@@ -370,6 +370,7 @@ def test_ui_hint_documents_me_as_parameter_only() -> None:
         assert "外側開始時の現在値" in h
         # 記述例は () 形が主、旧形も可
         assert "trim()" in h
+        assert "wide()（全角英数・記号を半角変換）" in h
         assert "rep(\"検索\",\"置換\")" in h
         assert "upr()" in h
         assert "tok(" in h
@@ -378,9 +379,17 @@ def test_ui_hint_documents_me_as_parameter_only() -> None:
         assert "left(数)" in h
         assert "旧形" in h
         assert "split,ブロック" not in h
-        short = cfg["SCREENS"]["SCENARIO_EDIT"][block]["VALUE_SHAPE_HINT_SHORT_HTML"]
-        assert "パラメータのみ" in short
-        assert "() 形" in short and "旧形も可" in short
+        short = cfg["SCREENS"]["SCENARIO_EDIT"][block].get(
+            "VALUE_SHAPE_HINT_SHORT_HTML", ""
+        )
+        assert not str(short or "").strip()
+        tip_field = cfg["SCREENS"]["SCENARIO_EDIT"][block]["VALUE_SHAPE_TIP"]
+        assert "取得した文字列を加工するコマンド記述" in tip_field
+        assert "右のボタン" in tip_field
+    assert (
+        cfg["SCREENS"]["SCENARIO_EDIT"]["DSL_TEST"]["TIP_DSL_TEST_BTN"]
+        == "説明とテスト"
+    )
     tip = cfg["SCREENS"]["SCENARIO_EDIT"]["DSL_TEST"]["TIP_CMD_INPUT"]
     assert "パラメータのみ" in tip
     assert "直前コマンド結果" in tip

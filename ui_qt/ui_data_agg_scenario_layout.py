@@ -558,11 +558,16 @@ def _write_mode_combo_from_config(
 
 
 def _apply_value_shape_hints(le: QLineEdit, cfg: dict[str, Any]) -> tuple[QLabel, str]:
-    """整形 DSL: 詳細はツールチップ、短い説明は QLabel（空なら行を追加しない想定）。"""
-    full = _dch(cfg, "VALUE_SHAPE_HINT_HTML", "")
+    """整形 DSL: 欄チップは短文、詳細表は DSL テスト右ペイン（HINT_HTML）。短注記は空なら非表示。"""
+    tip = _dcp(cfg, "VALUE_SHAPE_TIP", "")
+    if tip:
+        set_widget_tooltip(le, tip)
+    else:
+        # 互換: 旧設定で TIP 未定義なら長い HINT_HTML をチップに使う
+        full = _dch(cfg, "VALUE_SHAPE_HINT_HTML", "")
+        if full:
+            le.setToolTip(full)
     short = _dch(cfg, "VALUE_SHAPE_HINT_SHORT_HTML", "")
-    if full:
-        le.setToolTip(full)
     lab = QLabel(short)
     lab.setWordWrap(True)
     lab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -615,7 +620,7 @@ def _value_shape_form_field(
         btn_test = make_mini_square_button(
             text="?",
             size=btn_sz,
-            tip=_dcp(dt_cfg, "TIP_DSL_TEST_BTN", "整形 DSL をテストします"),
+            tip=_dcp(dt_cfg, "TIP_DSL_TEST_BTN", "説明とテスト"),
             on_click=lambda _=False, editor=le: dsl_test_opener(editor),
             object_name="dsl_test_open_btn",
         )

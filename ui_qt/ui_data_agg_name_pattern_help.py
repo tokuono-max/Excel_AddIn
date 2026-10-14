@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -38,6 +39,194 @@ def _html_escape(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+_DEFAULT_BODY_ITEMS: list[tuple[str, str]] = [
+    (
+        "書き方（新方式）",
+        "・ファイル名／シート名／名前から取得の検索文字で共通<br>"
+        "・要素は半角 <code>\"…\"</code> で囲む（必須）<br>"
+        "・OR は <code>|</code>、AND は <code>&amp;</code>（半角のみ）<br>"
+        "・同じ段で &amp; と | を混ぜるときは <code>()</code> 必須（括弧は内側から）",
+    ),
+    (
+        "例",
+        "・単一: <code>\"光特性\"</code><br>"
+        "・OR: <code>\"光特性\"|\"紐づけ\"</code><br>"
+        "・AND: <code>\"光\"&amp;\"履歴\"</code><br>"
+        "・括弧: <code>(\"A\"|\"B\")&amp;\"C\"</code>",
+    ),
+    (
+        "よくある誤り",
+        "・囲み忘れ（<code>光特性</code> → <code>\"光特性\"</code>）<br>"
+        "・閉じ忘れ・全角の ” ＆ ｜（）",
+    ),
+    (
+        "その他",
+        "・空欄可。旧カンマ区切りはシナリオ読込時のみ自動で新方式へ変換",
+    ),
+]
+
+
+def _name_pattern_body_items(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+    raw = cfg.get("BODY_ITEMS")
+    out: list[tuple[str, str]] = []
+    if isinstance(raw, list):
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or it.get("TITLE") or "").strip()
+            html = str(it.get("html") or it.get("HTML") or it.get("body") or "").strip()
+            if title or html:
+                out.append((title, html))
+    if out:
+        return out
+    # 互換: 旧 BODY_HTML を1枠にまとめる
+    legacy = _cfg_str(cfg, "BODY_HTML", "")
+    if legacy:
+        return [("", legacy)]
+    return list(_DEFAULT_BODY_ITEMS)
+
+
+def _make_framed_help_item(title: str, html: str) -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("name_pattern_help_item")
+    frame.setFrameShape(QFrame.Shape.StyledPanel)
+    frame.setFrameShadow(QFrame.Shadow.Plain)
+    frame.setStyleSheet(
+        "QFrame#name_pattern_help_item {"
+        " border: 1px solid #c8c8c8; border-radius: 2px;"
+        " background: #fafafa; padding: 0px; }"
+    )
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(8, 6, 8, 6)
+    lay.setSpacing(4)
+    if title:
+        head = QLabel("<b>%s</b>" % _html_escape(title))
+        head.setTextFormat(Qt.TextFormat.RichText)
+        head.setWordWrap(True)
+        lay.addWidget(head)
+    if html:
+        body = QLabel(html)
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        lay.addWidget(body)
+    return frame
+
+
+def _dialog_outer_size(dialog: QWidget) -> tuple[int, int]:
+    """
+    ウィンドウ枠（タイトルバー含む）の大きさ。
+    height() だけだと上配置時に枠分だけ対象入力へかぶる。
+    """
+    fg = dialog.frameGeometry()
+    w = int(fg.width()) if fg.width() > 0 else int(dialog.width())
+    h = int(fg.height()) if fg.height() > 0 else int(dialog.height())
+    # 未表示などで frame==client のときはタイトルバー分を見込む
+    if h <= int(dialog.height()) + 2:
+        h = int(dialog.height()) + 32
+    if w <= 0:
+        w = max(int(dialog.width()), 280)
+    if h <= 0:
+        h = max(int(dialog.height()), 180)
+    return w, h
+
+
+def _place_dialog_above_or_below(
+    *,
+    dialog: QWidget,
+    anchor: QWidget,
+    clear_top_widget: QWidget | None,
+    ox: int,
+    oy: int,
+    oy_above: int,
+    x_align: str = "anchor_left",
+) -> None:
+    """
+    下優先。上に出すときは対象入力（clear_top_widget）の上端より
+    ダイアログ下端が必ず上に来るようずらす（かぶったら再補正）。
+    """
+    bottom_left = anchor.mapToGlobal(anchor.rect().bottomLeft())
+    top_ref = clear_top_widget or anchor
+    top_left = top_ref.mapToGlobal(top_ref.rect().topLeft())
+    dialog_w, dialog_h = _dialog_outer_size(dialog)
+    if x_align == "parent_right":
+        parent = dialog.parentWidget()
+        if parent is not None:
+            x = int(parent.frameGeometry().right()) - dialog_w - ox
+        else:
+            x = int(bottom_left.x())
+    else:
+        x = int(bottom_left.x())
+    screen = QGuiApplication.screenAt(bottom_left)
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    place_below = True
+    y: int
+    clear_top_y = int(top_left.y())
+    if screen is not None:
+        avail = screen.availableGeometry()
+        space_below = int(avail.bottom()) - int(bottom_left.y()) - oy
+        space_above = clear_top_y - int(avail.top()) - oy_above
+        place_below = space_below >= dialog_h or space_below >= space_above
+        if place_below:
+            y = int(bottom_left.y()) + oy
+        else:
+            # 上配置: 枠下端が入力上端 - oy_above になる位置
+            y = clear_top_y - dialog_h - oy_above
+        if x + dialog_w > avail.right():
+            x = max(avail.left(), int(avail.right()) - dialog_w)
+        if x < avail.left():
+            x = int(avail.left())
+        if place_below:
+            if y + dialog_h > avail.bottom():
+                y = max(avail.top(), int(avail.bottom()) - dialog_h)
+            if y < avail.top():
+                y = int(avail.top())
+    else:
+        y = int(bottom_left.y()) + oy
+    dialog.move(x, y)
+    # 実枠で再計測し、対象入力と縦に重なっていれば必ず空ける
+    try:
+        from PySide6.QtCore import QRect
+
+        fg = dialog.frameGeometry()
+        tr = top_ref.rect()
+        top_glob = top_ref.mapToGlobal(tr.topLeft())
+        clear_rect = QRect(
+            int(top_glob.x()),
+            int(top_glob.y()),
+            max(int(tr.width()), 1),
+            max(int(tr.height()), 1),
+        )
+        # 横は問わず、縦のかぶりを解消（入力の上へ）
+        if int(fg.bottom()) >= int(clear_rect.top()) - max(oy_above, 1) and int(
+            fg.top()
+        ) < int(clear_rect.bottom()):
+            # 入力より上に出す（下配置のつもりでも、かぶっているなら上へ退避）
+            dialog.move(
+                int(fg.x()),
+                int(clear_rect.top()) - max(oy_above, 1) - int(fg.height()),
+            )
+            place_below = False
+        if place_below:
+            min_top = int(bottom_left.y()) + max(oy, 1)
+            fg2 = dialog.frameGeometry()
+            if int(fg2.top()) < min_top:
+                dialog.move(int(fg2.x()), min_top)
+            # 下配置後もまだ入力と重なるなら上へ
+            fg3 = dialog.frameGeometry()
+            if int(fg3.bottom()) >= int(clear_rect.top()) and int(fg3.top()) < int(
+                clear_rect.bottom()
+            ):
+                dialog.move(
+                    int(fg3.x()),
+                    int(clear_rect.top()) - max(oy_above, 1) - int(fg3.height()),
+                )
+    except Exception:
+        pass
 
 
 class NamePatternHelpDialog(QDialog):
@@ -78,32 +267,20 @@ class NamePatternHelpDialog(QDialog):
         self._err_label.setVisible(False)
         root.addWidget(self._err_label)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QLabel()
-        body.setWordWrap(True)
-        body.setTextFormat(Qt.TextFormat.RichText)
-        body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        body.setText(
-            _cfg_str(
-                self._cfg,
-                "BODY_HTML",
-                "<b>書き方</b><br>"
-                "・要素は半角 <code>\"…\"</code> で囲む<br>"
-                "・OR は <code>|</code>、AND は <code>&amp;</code>（半角のみ）<br>"
-                "・同じ段で &amp; と | を混ぜるときは <code>()</code> 必須<br>"
-                "・例: <code>\"光特性\"</code> / "
-                "<code>\"光特性\"|\"紐づけ\"</code> / "
-                "<code>\"光\"&amp;\"履歴\"</code> / "
-                "<code>(\"A\"|\"B\")&amp;\"C\"</code><br>"
-                "・よくある誤り: 囲み忘れ、閉じ忘れ、全角の ” ＆ ｜（）<br>"
-                "・旧カンマ区切りはシナリオ読込時のみ自動で新方式へ変換",
-            )
-        )
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body_host = QWidget()
+        body_lay = QVBoxLayout(body_host)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(6)
+        for title, html in _name_pattern_body_items(self._cfg):
+            body_lay.addWidget(_make_framed_help_item(title, html))
+        body_lay.addStretch(1)
+        self._scroll.setWidget(body_host)
+        root.addWidget(self._scroll, 1)
+        self._scroll_enabled = True
 
     def set_error_advice(
         self,
@@ -135,23 +312,55 @@ class NamePatternHelpDialog(QDialog):
             html_lines.append("<b>%s</b>" % esc if i == 0 else esc)
         self._err_label.setText("<br>".join(html_lines))
         self._err_label.setVisible(True)
+        self.set_body_scroll_enabled(False)
         _ = field_label  # 互換引数（表示は入力文字列側）
 
     def clear_error_advice(self) -> None:
         self._error_field_key = None
         self._err_label.clear()
         self._err_label.setVisible(False)
+        self.set_body_scroll_enabled(True)
+
+    def set_body_scroll_enabled(self, enabled: bool) -> None:
+        """エラー表示中は本文スクロールを止める。"""
+        self._scroll_enabled = bool(enabled)
+        pol = (
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if enabled
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll.setVerticalScrollBarPolicy(pol)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sb = self._scroll.verticalScrollBar()
+        if sb is not None:
+            sb.setEnabled(enabled)
 
     @property
     def error_field_key(self) -> str | None:
         return self._error_field_key
 
-    def show_near(self, anchor: QWidget | None) -> None:
+    @property
+    def anchor_widget(self) -> QWidget | None:
+        """ヘルプ表示の基準にした入力欄（自動クローズ判定用）。"""
+        return self._anchor
+
+    def show_near(
+        self,
+        anchor: QWidget | None,
+        *,
+        prefer_anchor_focus: bool = True,
+    ) -> None:
+        """anchor 付近に表示。prefer_anchor_focus 時は入力へフォーカスを戻し見ながら編集可能に。"""
         self._anchor = anchor
         self.show()
         self.raise_()
-        self.activateWindow()
         self._reposition()
+        # 表示後に実枠サイズで再配置（初回 frame 未確定対策）
+        QTimer.singleShot(0, self._reposition)
+        if prefer_anchor_focus and anchor is not None:
+            anchor.setFocus(Qt.FocusReason.OtherFocusReason)
+        else:
+            self.activateWindow()
 
     def _reposition(self) -> None:
         anchor = self._anchor
@@ -159,36 +368,18 @@ class NamePatternHelpDialog(QDialog):
             return
         try:
             oy = _cfg_int(self._cfg, "POSITION_OFFSET_Y", 4)
-            oy_above = _cfg_int(self._cfg, "POSITION_OFFSET_Y_ABOVE", 4)
+            oy_above = _cfg_int(self._cfg, "POSITION_OFFSET_Y_ABOVE", 8)
             if oy_above <= 0:
-                oy_above = oy
-            bottom_left = anchor.mapToGlobal(anchor.rect().bottomLeft())
-            top_left = anchor.mapToGlobal(anchor.rect().topLeft())
-            dialog_h = int(self.height())
-            dialog_w = int(self.width())
-            x = int(bottom_left.x())
-            screen = QGuiApplication.screenAt(bottom_left)
-            if screen is None:
-                screen = QGuiApplication.primaryScreen()
-            if screen is not None:
-                avail = screen.availableGeometry()
-                space_below = int(avail.bottom()) - int(bottom_left.y()) - oy
-                space_above = int(top_left.y()) - int(avail.top()) - oy_above
-                if space_below >= dialog_h or space_below >= space_above:
-                    y = int(bottom_left.y()) + oy
-                else:
-                    y = int(top_left.y()) - dialog_h - oy_above
-                if x + dialog_w > avail.right():
-                    x = max(avail.left(), int(avail.right()) - dialog_w)
-                if x < avail.left():
-                    x = int(avail.left())
-                if y < avail.top():
-                    y = int(avail.top())
-                if y + dialog_h > avail.bottom():
-                    y = max(avail.top(), int(avail.bottom()) - dialog_h)
-            else:
-                y = int(bottom_left.y()) + oy
-            self.move(x, y)
+                oy_above = max(oy, 8)
+            _place_dialog_above_or_below(
+                dialog=self,
+                anchor=anchor,
+                clear_top_widget=anchor,
+                ox=0,
+                oy=oy,
+                oy_above=oy_above,
+                x_align="anchor_left",
+            )
         except Exception:
             pass
 
